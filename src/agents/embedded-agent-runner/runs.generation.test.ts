@@ -334,6 +334,7 @@ describe("embedded run registry lifecycle generations", () => {
         sessionKey: "agent:main:main",
         embeddedRunToolAuthorityBinding: () => ({
           source: "reply",
+          acceptsRequesterOrigin: () => false,
           project: () => "authority",
           projectAsync: async () => "authority",
           assertActive: () => {},

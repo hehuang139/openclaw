@@ -24,6 +24,7 @@ import {
   readAdmittedHarnessCompletionInputAsync,
 } from "../agent-harness-completion-recovery.js";
 import { resolveExecDefaultsAsync } from "../exec-defaults.js";
+import { readRestartRecoveryRequesterSource } from "../requester-run-recovery-source.js";
 import {
   getMainSessionRecoveryRetryCount,
   isMainRestartRecoveryTerminalOnly,
@@ -499,9 +500,17 @@ export async function recoverStore(params: {
       if (stopped()) {
         return result;
       }
+      const requesterOrigin = expectedRecoverySourceRunId
+        ? readRestartRecoveryRequesterSource({
+            ...target,
+            entry,
+            sourceRunId: expectedRecoverySourceRunId,
+          })
+        : undefined;
       if (
         !recoverableHarnessCompletion &&
         !completionSource &&
+        !requesterOrigin &&
         requiresDelegatedRecoverySource(entry, source)
       ) {
         const tombstone = await tombstoneMainRestartRecoveryWithNotice({
