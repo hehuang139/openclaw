@@ -35,6 +35,7 @@ import type {
   ReplyBackendQueueMessageOptions,
   ReplyToolAuthorityRoute,
   ReplyToolAuthorityOverlay,
+  ReplyToolAuthorityRequester,
   ReplyToolAuthoritySnapshot,
   ReplyTurnParticipants,
   ReplyBackendQueueMessageResult,
@@ -57,6 +58,7 @@ export type {
   ReplyMessageInjectionOptions,
   ReplyToolAuthorityRoute,
   ReplyToolAuthorityOverlay,
+  ReplyToolAuthorityRequester,
   ReplyToolAuthoritySnapshot,
   ReplyTurnParticipant,
   ReplyTurnParticipants,
@@ -96,8 +98,14 @@ type ReplyMessageInjectionOwner = {
   projectToolAuthorityFingerprintAsync(
     overlay: ReplyToolAuthorityOverlay,
   ): Promise<string | undefined>;
+  projectRequesterToolAuthorityFingerprint(
+    requester: ReplyToolAuthorityRequester,
+  ): string | undefined;
+  projectRequesterToolAuthorityFingerprintAsync(
+    requester: ReplyToolAuthorityRequester,
+  ): Promise<string | undefined>;
   resolve(params: {
-    requesterOrigin?: RequesterOrigin;
+    requesterToolAuthority?: ReplyToolAuthorityRequester;
     preparation?: ReplyToolAuthorityPreparation;
     options?: ReplyBackendQueueMessageOptions;
     personalToolParticipant?: ReplyTurnParticipantInput;
@@ -248,6 +256,14 @@ export type ReplyOperation = {
   projectToolAuthorityFingerprintAsync(
     this: void,
     overlay: ReplyToolAuthorityOverlay,
+  ): Promise<string | undefined>;
+  /** Legacy snapshots without fresh-requester projection cannot admit delegated steering. */
+  projectRequesterToolAuthorityFingerprint?(
+    requester: ReplyToolAuthorityRequester,
+  ): string | undefined;
+  projectRequesterToolAuthorityFingerprintAsync?(
+    this: void,
+    requester: ReplyToolAuthorityRequester,
   ): Promise<string | undefined>;
   /** Prepare fingerprint and projection together for the final concrete attempt route. */
   /** @deprecated Use bindToolAuthorityRouteAsync. Supported through 2026-12-31. Removal in the first January 2027 stable release. */
@@ -795,6 +811,8 @@ export type EmbeddedRunToolAuthorityBinding = (registration: {
   watchdogAttempt?: SessionControllerWatchdogAttempt;
   project: (overlay: ReplyToolAuthorityOverlay) => string | undefined;
   projectAsync: (overlay: ReplyToolAuthorityOverlay) => Promise<string | undefined>;
+  projectRequester?: (requester: ReplyToolAuthorityRequester) => string | undefined;
+  projectRequesterAsync?: (requester: ReplyToolAuthorityRequester) => Promise<string | undefined>;
   assertActive: () => void;
   personalToolParticipants?: ReplyTurnParticipants;
 };

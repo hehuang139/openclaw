@@ -48,6 +48,7 @@ import { warnPluginSdkDeprecation } from "../../plugins/sdk-deprecation.js";
 import { GATEWAY_OWNER_ONLY_CORE_TOOLS } from "../../security/dangerous-tools.js";
 import type {
   ReplyToolAuthorityOverlay,
+  ReplyToolAuthorityRequester,
   ReplyToolAuthorityRoute,
   ReplyToolAuthoritySnapshot,
 } from "../../sessions/session-controller.contracts.js";
@@ -312,7 +313,12 @@ export function prepareReplyToolAuthority(
   narrow?: ReplyToolAuthorityNarrow,
   resolveReader?: () => SessionEntryCohortReader | undefined,
 ): ReplyToolAuthoritySnapshot &
-  Required<Pick<ReplyToolAuthoritySnapshot, "fingerprintAsync" | "projectAsync" | "close">> {
+  Required<
+    Pick<
+      ReplyToolAuthoritySnapshot,
+      "fingerprintAsync" | "projectAsync" | "projectRequester" | "projectRequesterAsync" | "close"
+    >
+  > {
   const handoff = run.run.trustedInternalHandoff;
   const toolsAllow = run.toolsAllow ? [...run.toolsAllow] : undefined;
   const intersection = run.toolsAllow
@@ -362,11 +368,27 @@ export function prepareReplyToolAuthority(
     messageChannel: snapshot.originatingChannel,
     operatorAuthority: snapshot.operatorAuthority,
   });
-  const projectInput = (overlay?: ReplyToolAuthorityOverlay) => {
-    const incoming = overlay ? applyReplyToolAuthorityOverlay(snapshot, overlay) : snapshot;
+  const projectInput = (caller?: ReplyToolAuthorityOverlay | ReplyToolAuthorityRequester) => {
+    const incoming = !caller
+      ? snapshot
+      : "requesterOrigin" in caller
+        ? {
+            ...snapshot,
+            run: {
+              ...snapshot.run,
+              config: captureRuntimeConfig(caller.config),
+              requesterOrigin: captureRequesterOrigin(caller),
+              // This is a fresh request, not the incumbent's external snapshot or completion.
+              conversationToolPolicy: undefined,
+              trustedInternalHandoff: undefined,
+              inputProvenance: undefined,
+              scheduledToolPolicy: undefined,
+            },
+          }
+        : applyReplyToolAuthorityOverlay(snapshot, caller);
     // Unidentified executions may run, but cannot lend their identity to new human input.
     if (
-      overlay &&
+      caller &&
       (!requesterPrincipalKey ||
         requesterPrincipalKey !==
           resolveRequesterPrincipalKey({
@@ -514,6 +536,24 @@ export function prepareReplyToolAuthority(
   type PreparedFingerprint = Awaited<ReturnType<typeof prepare>>;
   let fingerprintRead: PreparedFingerprint | undefined;
   let projectionRead: PreparedFingerprint | undefined;
+  const projectAsync = async (
+    caller: ReplyToolAuthorityOverlay | ReplyToolAuthorityRequester,
+    route: ReplyToolAuthorityRoute,
+  ) => {
+    const prepared = await prepare(projectInput(caller), route);
+    projectionRead = prepared;
+    return prepared.read();
+  };
+  const project = (
+    caller: ReplyToolAuthorityOverlay | ReplyToolAuthorityRequester,
+    route: ReplyToolAuthorityRoute,
+  ) => {
+    const prepared = projectionRead ?? fingerprintRead;
+    if (!prepared) {
+      throw new Error("Reply tool authority requires asynchronous preparation");
+    }
+    return prepared.evaluate(projectInput(caller), route);
+  };
   const result = {
     close,
     requesterPrincipalKey,
@@ -540,23 +580,17 @@ export function prepareReplyToolAuthority(
       fingerprintRead = prepared;
       return prepared.read();
     },
-    projectAsync: async (overlay: ReplyToolAuthorityOverlay, route: ReplyToolAuthorityRoute) => {
-      const prepared = await prepare(projectInput(overlay), route);
-      projectionRead = prepared;
-      return prepared.read();
-    },
-    project: (overlay: ReplyToolAuthorityOverlay, route: ReplyToolAuthorityRoute) => {
+    projectAsync,
+    project(overlay: ReplyToolAuthorityOverlay, route: ReplyToolAuthorityRoute) {
       warnPluginSdkDeprecation({
         family: "reply-tool-authority-sync-preparation",
         method: "ReplyToolAuthoritySnapshot.project",
         replacement: "await projectAsync()",
       });
-      const prepared = projectionRead ?? fingerprintRead;
-      if (!prepared) {
-        throw new Error("Reply tool authority requires asynchronous preparation");
-      }
-      return prepared.evaluate(projectInput(overlay), route);
+      return project(overlay, route);
     },
+    projectRequesterAsync: projectAsync,
+    projectRequester: project,
   };
   bindReplyToolAuthorityCallerRead(
     result.projectAsync,
