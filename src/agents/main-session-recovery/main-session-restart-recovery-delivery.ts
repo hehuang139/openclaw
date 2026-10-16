@@ -22,6 +22,42 @@ import { isDeliverableMessageChannel } from "../../utils/message-channel.js";
 import type { MainSessionRecoveryStoreTarget } from "./main-session-recovery-store.js";
 import { mainSessionRecoveryLog } from "./main-session-restart-recovery-shared.js";
 
+export async function resolvePendingFinalRecoveryAction(
+  pending: NonNullable<SessionEntry["pendingFinalDelivery"]>,
+  stateDir?: string,
+): Promise<"complete" | "defer" | "fail" | "notice" | "retry"> {
+  const deliveries = pending.deliveries;
+  if (!deliveries?.length) {
+    return "fail";
+  }
+  if (deliveries.every(({ state }) => state === "delivered" || state === "suppressed")) {
+    return "complete";
+  }
+  const { findDeliveryIntentOwners } =
+    await import("../../infra/outbound/delivery-queue-storage.js");
+  const owners = await findDeliveryIntentOwners(
+    deliveries.map(({ id }) => id),
+    stateDir,
+  );
+  if (owners.some((owner) => owner?.status === "pending" || owner?.settlementPending)) {
+    return "defer";
+  }
+  if (
+    pending.kind === "replayable" &&
+    deliveries.every(({ state }) => state === "prepared") &&
+    owners.every((owner) => owner === null)
+  ) {
+    return "retry";
+  }
+  // Residual ambiguity (unknown custody, settled owners, unreplayable mixes):
+  // complete the session and record durable notice debt instead of failing it.
+  // A fire-and-forget failure notice is lost during the very outage that made
+  // the outcome ambiguous; the debt survives until the next same-route turn.
+  // Records without notice identity cannot carry debt, so they keep the
+  // visible fail path instead of completing silently.
+  return pending.context && pending.intentId ? "notice" : "fail";
+}
+
 export function hasRestartRecoveryMessageActionAuthority(entry: SessionEntry): boolean {
   const authority = resolveRestartRecoveryChannelAuthority(entry);
   // Keep the pre-dispatch gate identical to recovered capability minting.
