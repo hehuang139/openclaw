@@ -40,7 +40,7 @@ export function Tabs(props: TabsProps) {
   );
   // A hosted tablist must install its styles in the actual shadow root.
   createEffect(
-    () => [props.shadowStyles, props.items, props.active, props.defaultActive] as const,
+    () => [props.shadowStyles, props.items, props.active] as const,
     ([extra]) => {
       const styles = bindShadowStyles(element, [tabsStyles, ...(extra ?? [])]);
       return () => styles.dispose();
@@ -56,7 +56,7 @@ export function Tabs(props: TabsProps) {
       class={["oc-tabs", props.class]}
       role="tablist"
       aria-label={props.ariaLabel}
-      aria-orientation={props.orientation ?? "horizontal"}
+      aria-orientation="horizontal"
     >
       <For each={props.items} keyed={(item) => item.value}>
         {(item) => {

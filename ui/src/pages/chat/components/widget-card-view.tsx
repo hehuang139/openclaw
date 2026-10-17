@@ -58,8 +58,6 @@ type WidgetCardOptions = {
   messageTimestamp?: number;
   boardProvider?: BoardProvider;
   widgetLayout?: import("../session-message-cache.ts").ChatWidgetLayout;
-  browserTabRevision?: string;
-  browserTabLatest?: boolean;
 };
 
 async function pinWidget(
@@ -723,13 +721,7 @@ export function ToolPreview(props: ToolPreviewProps) {
         </Show>
       }
     >
-      {(preview) => (
-        <openclaw-browser-tab-card
-          prop:preview={preview()}
-          prop:revision={props.options?.browserTabRevision}
-          prop:latest={props.options?.browserTabLatest ?? false}
-        />
-      )}
+      {(preview) => <openclaw-browser-tab-card prop:preview={preview()} prop:latest={false} />}
     </Show>
   );
 }

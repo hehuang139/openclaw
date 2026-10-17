@@ -22,7 +22,6 @@ import {
 import { uploadsEnabled } from "../../../lib/uploads.ts";
 import { handleChatAttachmentMenuSelection } from "./chat-attachment-inputs.ts";
 import { useSingleAttachmentPicker } from "./chat-attachment-picker-policy.ts";
-import { ComposerContent } from "./chat-composer-content.tsx";
 import {
   handleComposerLibrarySelection,
   composerLibraryMenuItems,
@@ -511,48 +510,44 @@ function PlusMenuSurface(props: { menu: ChatComposerPlusMenuContentProps }) {
     );
   });
   return (
-    <>
-      <div
-        ref={(element) => {
-          host = element;
+    <div
+      ref={(element) => {
+        host = element;
+      }}
+      class="agent-chat__attach-menu agent-chat__capability-menu"
+      data-view={view()}
+    >
+      <Menu
+        lazy
+        id={`chat-composer-plus-${id}`}
+        panelClass="agent-chat__capability-menu-panel"
+        placement="top-start"
+        pointerFocus="trigger"
+        label={t("chat.composer.addAttachment")}
+        open={props.menu.open}
+        disabled={props.menu.disabled}
+        triggerClass={`agent-chat__input-btn agent-chat__input-btn--attach${countSessionToolOverrides(props.menu.toolOverrides) ? " agent-chat__input-btn--has-overrides" : ""}`}
+        triggerAttributes={{ title: t("chat.composer.addAttachment") }}
+        trigger={<Icon name="plus" />}
+        items={items()}
+        ref={(next) => {
+          handle = next;
         }}
-        class="agent-chat__attach-menu agent-chat__capability-menu"
-        data-view={view()}
-      >
-        <Menu
-          lazy
-          id={`chat-composer-plus-${id}`}
-          panelClass="agent-chat__capability-menu-panel"
-          placement="top-start"
-          pointerFocus="trigger"
-          label={t("chat.composer.addAttachment")}
-          open={props.menu.open}
-          disabled={props.menu.disabled}
-          triggerClass={`agent-chat__input-btn agent-chat__input-btn--attach${countSessionToolOverrides(props.menu.toolOverrides) ? " agent-chat__input-btn--has-overrides" : ""}`}
-          triggerAttributes={{ title: t("chat.composer.addAttachment") }}
-          trigger={<Icon name="plus" />}
-          items={items()}
-          ref={(next) => {
-            handle = next;
-          }}
-          onSelect={(item, event) => handleMenuSelection(item, event, handle.overlay, props)}
-          onNavigate={({ value }) =>
-            props.menu.onNavigate(value === "manage-skills" ? "skills" : "plugins")
+        onSelect={(item, event) => handleMenuSelection(item, event, handle.overlay, props)}
+        onNavigate={({ value }) =>
+          props.menu.onNavigate(value === "manage-skills" ? "skills" : "plugins")
+        }
+        onOpenChange={(open) => {
+          host.toggleAttribute("open", open);
+          if (open) {
+            props.menu.onLoadSkills();
           }
-          onOpenChange={(open) => {
-            host.toggleAttribute("open", open);
-            if (open) {
-              props.menu.onLoadSkills();
-            }
-            if (open !== props.menu.open) {
-              props.menu.onOpenChange(open);
-            }
-          }}
-        />
-      </div>
-      <ComposerContent>{props.menu.addServerDialog}</ComposerContent>
-      <ComposerContent>{props.menu.libraryDialog}</ComposerContent>
-    </>
+          if (open !== props.menu.open) {
+            props.menu.onOpenChange(open);
+          }
+        }}
+      />
+    </div>
   );
 }
 

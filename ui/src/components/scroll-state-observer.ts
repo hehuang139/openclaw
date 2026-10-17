@@ -3,7 +3,6 @@ import { cancelLayout, scheduleLayout } from "../lib/layout-frame.ts";
 export type ScrollState = { scrollable: boolean; atStart: boolean; atEnd: boolean };
 type Observation = {
   horizontal: boolean;
-  trackScroll: boolean;
   publish: (state: ScrollState) => void;
 };
 const observations = new Map<HTMLElement, Set<Observation>>();
@@ -44,10 +43,7 @@ function schedule(element: HTMLElement): void {
 
 function onScroll(event: Event): void {
   const element = event.currentTarget;
-  if (
-    element instanceof HTMLElement &&
-    [...(observations.get(element) ?? [])].some((entry) => entry.trackScroll)
-  ) {
+  if (element instanceof HTMLElement) {
     schedule(element);
   }
 }
@@ -57,7 +53,6 @@ export function observeScrollState(
   element: HTMLElement,
   publish: (state: ScrollState) => void,
   horizontal = false,
-  trackScroll = true,
 ): { schedule: () => void; disconnect: () => void } {
   let entries = observations.get(element);
   if (!entries) {
@@ -74,7 +69,7 @@ export function observeScrollState(
     resizeObserver?.observe(element);
     element.addEventListener("scroll", onScroll, { passive: true });
   }
-  const entry = { horizontal, trackScroll, publish };
+  const entry = { horizontal, publish };
   entries.add(entry);
   schedule(element);
   return {

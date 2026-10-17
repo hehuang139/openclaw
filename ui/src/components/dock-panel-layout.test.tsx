@@ -139,12 +139,13 @@ describe("DockLayout open intent", () => {
 
 it("clamps to viewport changes only while attached", () => {
   let width = 520;
+  const layout = createLayout("right");
+  vi.spyOn(layout, "maxWidth").mockImplementation(() => width);
   const dock = createDockLayout({
     ...createNotifications(),
-    layout: createLayout("right"),
+    layout,
     reservationPrefix: "test-resize-lifetime",
     isAvailable: () => true,
-    maxWidth: () => width,
   });
   dock.connect();
   dock.setOpen(true);
@@ -211,6 +212,7 @@ describe("DockLayout inline columns", () => {
       defaultHeight: 320,
       defaultWidth: 280,
     });
+    vi.spyOn(layout, "maxWidth").mockReturnValue(420);
     const reservation = "--oc-test-inline-reserve-right";
     document.documentElement.style.setProperty(reservation, "17px");
     const host = { ...createNotifications(), isEmbedded: () => true };
@@ -219,7 +221,6 @@ describe("DockLayout inline columns", () => {
       layout,
       reservationPrefix: "test-inline",
       isAvailable: () => true,
-      maxWidth: () => 420,
     });
 
     controller.connect();
@@ -250,7 +251,6 @@ describe("DockLayout inline columns", () => {
       layout,
       reservationPrefix: "test-inline",
       isAvailable: () => true,
-      maxWidth: () => 420,
     });
     restored.connect();
     expect(restored.width).toBe(380);
