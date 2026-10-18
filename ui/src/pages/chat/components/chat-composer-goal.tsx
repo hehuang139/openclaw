@@ -46,7 +46,8 @@ const goalStatusIcons = {
 
 // Keep the one-second clock local to its span; it must not invalidate the composer.
 function GoalElapsed(props: { goal: SessionGoal }) {
-  const [now, setNow] = createSignal(Date.now());
+  // Resuming samples the current clock before the next interval tick.
+  const [now, setNow] = createSignal(() => (props.goal.status === "active" ? Date.now() : 0));
   createInterval(
     () => setNow(Date.now()),
     () => (props.goal.status === "active" ? 1000 : undefined),

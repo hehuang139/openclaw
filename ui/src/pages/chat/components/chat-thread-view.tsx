@@ -149,7 +149,7 @@ export function ChatThread(input: { props: ChatThreadProps; transcript: ChatTran
     }
     if (showLoadingSkeleton() || isEmpty()) {
       return (
-        <div class="chat-thread-inner">
+        <div class="chat-thread-inner" ref={current().session.scrollElementRef}>
           {sentinel()}
           {isEmpty() && !showLoadingSkeleton() && input.props.historyPagination ? (
             <ChatHistoryBoundary {...input.props.historyPagination} />
