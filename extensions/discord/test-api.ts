@@ -2,12 +2,6 @@
 export const loadDiscordDraftPreview = () =>
   import("./src/monitor/message-handler.draft-preview.js");
 export { RequestClient } from "./src/internal/discord.js";
-// Product ingress proofs use the registered runtime and fixed Discord transport fixtures.
-export { createNoopThreadBindingManager } from "./src/monitor/thread-bindings.js";
-export {
-  createThreadClient,
-  createDiscordMessage,
-} from "./src/monitor/message-handler.preflight.test-helpers.js";
 export {
   discordVoiceTranscriptsSourceProvider,
   setDiscordTranscriptsVoiceManager,

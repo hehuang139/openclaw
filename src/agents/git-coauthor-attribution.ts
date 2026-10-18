@@ -1,9 +1,9 @@
-import { MAX_SESSION_PARTICIPANTS } from "../config/sessions/session-entry-provenance.js";
-import { readSessionEntriesFromStoreInWorker } from "../config/sessions/session-entry-read-runtime.js";
 import {
+  MAX_SESSION_PARTICIPANTS,
   isMainGitContributorScope,
-  selectSessionGitContributorProfileIds,
-} from "../config/sessions/session-git-contributors.js";
+  inheritSessionGitContributorProfileIds,
+} from "../config/sessions/session-entry-provenance.js";
+import { readSessionEntriesFromStoreInWorker } from "../config/sessions/session-entry-read-runtime.js";
 import { resolveSessionStorePathForScope } from "../config/sessions/session-store-path.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { isIncognitoSessionKey } from "../routing/session-key.js";
@@ -97,10 +97,10 @@ async function resolveAttribution(
   const source = {
     ...params,
     sessionKey: params.sessionKey,
-    requesterProfileIds: params.requesterProfileId ? [params.requesterProfileId] : [],
+    requesterProfileId: params.requesterProfileId,
   };
   const profileIds = isMainGitContributorScope(source)
-    ? (selectSessionGitContributorProfileIds(entry, source) ?? [])
+    ? (inheritSessionGitContributorProfileIds(entry, source) ?? [])
     : [...new Set([...profileRecords.keys(), ...inheritedProfileIds])];
   if (profileIds.length === 0) {
     return empty;

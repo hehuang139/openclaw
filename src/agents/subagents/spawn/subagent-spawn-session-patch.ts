@@ -5,8 +5,10 @@ import {
   runWithSessionActorStorage,
   type SessionActorStorageBinding,
 } from "../../../config/sessions/session-actor-storage-binding.js";
-import { buildSessionCreationStamp } from "../../../config/sessions/session-entry-provenance.js";
-import { selectSessionGitContributorProfileIds } from "../../../config/sessions/session-git-contributors.js";
+import {
+  buildSessionCreationStamp,
+  inheritSessionGitContributorProfileIds,
+} from "../../../config/sessions/session-entry-provenance.js";
 import {
   sessionEntryCommitGuardOptions,
   composeSessionSourceAssertion,
@@ -301,15 +303,13 @@ export async function createInitialSubagentSession(input: {
                     ...params.creationPolicy,
                     ...(!params.incognito
                       ? {
-                          inheritedGitContributorProfileIds: selectSessionGitContributorProfileIds(
+                          inheritedGitContributorProfileIds: inheritSessionGitContributorProfileIds(
                             parentEntry,
                             {
                               config: params.cfg,
                               agentId: params.requesterAgentId,
                               sessionKey: params.requesterInternalKey,
-                              requesterProfileIds: params.gitContributorProfileId
-                                ? [params.gitContributorProfileId]
-                                : [],
+                              requesterProfileId: params.gitContributorProfileId,
                             },
                           ),
                         }

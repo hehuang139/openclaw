@@ -1,4 +1,4 @@
-import { isMainGitContributorScope } from "../config/sessions/session-git-contributors.js";
+import { isMainGitContributorScope } from "../config/sessions/session-entry-provenance.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { isIncognitoSessionKey } from "../routing/session-key.js";

@@ -7,12 +7,12 @@ import { MODEL_SELECTION_LOCKED_PARENT_FORK_MESSAGE } from "../auto-reply/reply/
 import type { InternalSessionEntry, SessionEntry } from "../config/sessions.js";
 import {
   inheritSessionCreationPolicy,
+  inheritSessionGitContributorProfileIds,
   inheritSpawnSessionOwner,
   type SessionOwnerAssignment,
 } from "../config/sessions/session-entry-provenance.js";
 import { readSessionEntryReadOnlyInWorker } from "../config/sessions/session-entry-read-runtime.js";
 import { inheritSessionSelection } from "../config/sessions/session-entry-selection.js";
-import { selectSessionGitContributorProfileIds } from "../config/sessions/session-git-contributors.js";
 import { isModelSelectionLocked } from "../sessions/model-overrides.js";
 import { waitForSessionParticipantRecording } from "../sessions/session-participant-recording.js";
 import { readResidentUserProfileId } from "../state/user-profile-list.js";
@@ -142,13 +142,11 @@ export function resolveSessionCreateInheritance(params: {
       ...params.request.creation,
       ...inheritSessionCreationPolicy(params.parent.entry, params.request.creation.actor),
       inheritedGitContributorProfileIds: params.parent.target
-        ? selectSessionGitContributorProfileIds(params.parent.entry, {
+        ? inheritSessionGitContributorProfileIds(params.parent.entry, {
             config: params.request.cfg,
             agentId: params.parent.target.agentId,
             sessionKey: params.parent.target.canonicalKey,
-            requesterProfileIds: params.request.creation.gitContributorProfileId
-              ? [params.request.creation.gitContributorProfileId]
-              : [],
+            requesterProfileId: params.request.creation.gitContributorProfileId,
           })
         : [],
     },

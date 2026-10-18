@@ -68,9 +68,9 @@ import {
   SUBAGENT_ANNOUNCE_CLAUDE_CLI_DELIVERY_CASES,
   SUBAGENT_ANNOUNCE_EMBEDDED_DELIVERY_CASES,
 } from "./attempt-execution.announce.test-support.js";
-import { registerCommandCliAdmissionTests } from "./attempt-execution.cli-admission.test-support.js";
 import {
   cliRuntimeConfig,
+  registerCommandCliAdmissionTests,
   createCliImageCapabilityPlugins,
   makeCliResult,
   makeRunAgentAttemptParams,
