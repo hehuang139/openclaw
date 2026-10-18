@@ -39,6 +39,15 @@ import { withUpdateFailureTriage } from "./update-command-triage.js";
 import { withUpdateCommandRecoveryUnwind } from "./update-command-unwind.js";
 
 const dirs = useAutoCleanupTempDirTracker(afterEach);
+function withDatabase<T>(file: string, action: (db: DatabaseSync) => T): T {
+  const db = new DatabaseSync(file);
+  try {
+    return action(db);
+  } finally {
+    db.close();
+  }
+}
+
 afterEach(() => {
   closeOpenClawStateDatabaseForTest();
   vi.restoreAllMocks();
@@ -190,25 +199,19 @@ it.each([
             ).toBe(true);
             run.executorFence!.assertCurrent();
             if (trial.revoked) {
-              const db = new DatabaseSync(databasePath);
-              try {
-                db.prepare(
-                  "UPDATE managed_update_handoffs SET owner = ? WHERE install_root = ?",
-                ).run("replacement-owner", root);
-              } finally {
-                db.close();
-              }
+              withDatabase(databasePath, (db) =>
+                db
+                  .prepare("UPDATE managed_update_handoffs SET owner = ? WHERE install_root = ?")
+                  .run("replacement-owner", root),
+              );
             }
             if (trial.releaseDenied) {
               // Only final lease deletion is denied; admission and inner unwind stay real.
-              const db = new DatabaseSync(databasePath);
-              try {
+              withDatabase(databasePath, (db) =>
                 db.exec(
                   "CREATE TRIGGER deny_terminal_release BEFORE DELETE ON managed_update_handoffs BEGIN SELECT RAISE(FAIL, 'fixture final lease delete denied'); END",
-                );
-              } finally {
-                db.close();
-              }
+                ),
+              );
             }
             throw new UpdateCommandFailure(result, 7, "fixture package failure");
           });
@@ -282,12 +285,7 @@ it.each([
       expect(code, stderr).toBe(0);
     }
     if (trial.releaseDenied) {
-      const db = new DatabaseSync(databasePath);
-      try {
-        db.exec("DROP TRIGGER IF EXISTS deny_terminal_release");
-      } finally {
-        db.close();
-      }
+      withDatabase(databasePath, (db) => db.exec("DROP TRIGGER IF EXISTS deny_terminal_release"));
       const store = createManagedHandoffLeaseStore();
       const retained = store.read(root);
       if (retained.kind === "current") {

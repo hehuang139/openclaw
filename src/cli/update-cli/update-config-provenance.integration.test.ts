@@ -26,19 +26,19 @@ import {
 } from "../../test-utils/channel-plugins.js";
 
 const controls = vi.hoisted(() => ({ root: "" }));
-
-vi.mock("../../plugins/manifest-registry.js", () => ({
-  loadPluginManifestRegistryCore: () => ({
+function manifest() {
+  return {
     plugins: [createPluginManifestRecordFixture({ id: "discord", channels: ["discord"] })],
     diagnostics: [],
-  }),
+  };
+}
+
+vi.mock("../../plugins/manifest-registry.js", () => ({
+  loadPluginManifestRegistryCore: () => manifest(),
 }));
 vi.mock("../../plugins/plugin-registry.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../plugins/plugin-registry.js")>()),
-  loadPluginManifestRegistryForPluginRegistry: () => ({
-    plugins: [createPluginManifestRecordFixture({ id: "discord", channels: ["discord"] })],
-    diagnostics: [],
-  }),
+  loadPluginManifestRegistryForPluginRegistry: () => manifest(),
 }));
 vi.mock("../../plugins/doctor-contract-registry.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../plugins/doctor-contract-registry.js")>()),
@@ -146,29 +146,35 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+const narrowerRoute = {
+  agentId: "research",
+  match: { channel: "discord", peer: { kind: "direct", id: "research-user" } },
+};
+const accounts = { discord: { accounts: { default: {} } } };
+
+async function prepareConfig(home: string, config: Record<string, unknown>) {
+  const stateDir = path.join(home, ".openclaw");
+  const configPath = path.join(stateDir, "openclaw.json");
+  vi.stubEnv("OPENCLAW_CONFIG_PATH", configPath);
+  vi.stubEnv("OPENCLAW_STATE_DIR", stateDir);
+  const original = JSON.stringify(config);
+  await fs.mkdir(stateDir, { recursive: true });
+  await fs.writeFile(configPath, original);
+  resetConfigRuntimeState();
+  const prepared = await createConfigIO({
+    pluginValidation: "skip",
+  }).readConfigFileSnapshotForWrite();
+  return { ...prepared, configPath, original };
+}
+
 describe("update config provenance", () => {
   it("reports unresolved ownership without writing when the original roster is unavailable", async () => {
     await withTempHome(async (home) => {
-      const stateDir = path.join(home, ".openclaw");
-      const configPath = path.join(stateDir, "openclaw.json");
-      vi.stubEnv("OPENCLAW_CONFIG_PATH", configPath);
-      vi.stubEnv("OPENCLAW_STATE_DIR", stateDir);
-      const original = JSON.stringify({
+      const { snapshot, writeOptions, configPath, original } = await prepareConfig(home, {
         agents: { ownership: "explicit", entries: { ops: {}, research: {} } },
-        channels: { discord: { accounts: { default: {} } } },
-        bindings: [
-          {
-            agentId: "research",
-            match: { channel: "discord", peer: { kind: "direct", id: "research-user" } },
-          },
-        ],
+        channels: accounts,
+        bindings: [narrowerRoute],
       });
-      await fs.mkdir(stateDir, { recursive: true });
-      await fs.writeFile(configPath, original);
-      resetConfigRuntimeState();
-      const { snapshot, writeOptions } = await createConfigIO({
-        pluginValidation: "skip",
-      }).readConfigFileSnapshotForWrite();
       const result = await repairLegacyConfigForUpdateChannel({
         configSnapshot: { ...snapshot, sourceConfigBeforeMigrations: undefined },
         configWriteOptions: writeOptions,
@@ -193,28 +199,12 @@ describe("update config provenance", () => {
     "preserves the historical account owner and narrower route through %s",
     async (flow) => {
       await withTempHome(async (home) => {
-        const stateDir = path.join(home, ".openclaw");
-        const configPath = path.join(stateDir, "openclaw.json");
-        vi.stubEnv("OPENCLAW_CONFIG_PATH", configPath);
-        vi.stubEnv("OPENCLAW_STATE_DIR", stateDir);
-        const narrowerRoute = {
-          agentId: "research",
-          match: { channel: "discord", peer: { kind: "direct", id: "research-user" } },
-        };
-        await fs.mkdir(stateDir, { recursive: true });
-        await fs.writeFile(
-          configPath,
-          JSON.stringify({
-            gateway: { mode: "local", bind: "localhost" },
-            agents: { list: [{ id: "ops" }, { id: "research" }] },
-            channels: { discord: { accounts: { default: {} } } },
-            bindings: [narrowerRoute],
-          }),
-        );
-        resetConfigRuntimeState();
-        const { snapshot, writeOptions } = await createConfigIO({
-          pluginValidation: "skip",
-        }).readConfigFileSnapshotForWrite();
+        const { snapshot, writeOptions, configPath } = await prepareConfig(home, {
+          gateway: { mode: "local", bind: "localhost" },
+          agents: { list: [{ id: "ops" }, { id: "research" }] },
+          channels: accounts,
+          bindings: [narrowerRoute],
+        });
         expect(snapshot.sourceConfigBeforeMigrations).toHaveProperty("agents.list", [
           { id: "ops" },
           { id: "research" },
@@ -268,27 +258,16 @@ describe("update config provenance", () => {
     async ({ flow, requestedChannel }) => {
       await withTempHome(async (home) => {
         controls.root = home;
-        const stateDir = path.join(home, ".openclaw");
-        const configPath = path.join(stateDir, "openclaw.json");
-        vi.stubEnv("OPENCLAW_CONFIG_PATH", configPath);
-        vi.stubEnv("OPENCLAW_STATE_DIR", stateDir);
         vi.stubEnv("UPDATE_PROVENANCE_TOKEN", "synthetic-before");
-        await fs.mkdir(stateDir, { recursive: true });
-        await fs.writeFile(
-          configPath,
-          JSON.stringify({
-            gateway: {
-              mode: "local",
-              ...(flow === "legacy" ? { bind: "localhost" } : {}),
-              auth: { mode: "token", token: "${UPDATE_PROVENANCE_TOKEN}" },
-            },
-          }),
-        );
         vi.stubEnv(POST_CORE_UPDATE_REQUESTED_CHANNEL_ENV, requestedChannel);
-        resetConfigRuntimeState();
-        const prepared = await createConfigIO({
-          pluginValidation: "skip",
-        }).readConfigFileSnapshotForWrite();
+        const prepared = await prepareConfig(home, {
+          gateway: {
+            mode: "local",
+            ...(flow === "legacy" ? { bind: "localhost" } : {}),
+            auth: { mode: "token", token: "${UPDATE_PROVENANCE_TOKEN}" },
+          },
+        });
+        const { configPath } = prepared;
         expect(prepared.snapshot.sourceConfig.gateway?.auth?.token).toBe("synthetic-before");
         if (flow === "plugins") {
           expect(prepared.snapshot.valid).toBe(true);

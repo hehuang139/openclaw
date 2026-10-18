@@ -20,6 +20,34 @@ import { updateCommand } from "./update-command.js";
 
 installFreshUpdateFixture();
 
+function selectVersion(version = "2026.9.4") {
+  vi.mocked(shared.resolveTargetVersion).mockResolvedValue({ version });
+  vi.mocked(packageMetadata.fetchNpmPackageTargetStatus).mockResolvedValue({
+    version,
+    nodeEngine: null,
+    schemaVersions: { state: OPENCLAW_STATE_SCHEMA_VERSION, agent: 20 },
+  });
+}
+
+function prepareTimedUpdate(trigger: "cli" | "campaign" = "cli") {
+  const record = createUpdateRun({ trigger });
+  vi.stubEnv("OPENCLAW_UPDATE_RUN_ID", record.runId);
+  vi.stubEnv("OPENCLAW_UPDATE_RUN_HANDOFF", "1");
+  const prepare = vi.mocked(commandRun.prepareUpdateCommand).getMockImplementation()!;
+  vi.mocked(commandRun.prepareUpdateCommand).mockImplementation(async (opts) => ({
+    ...(await prepare(opts)),
+    timeoutMs: shared.parseUpdateTimeoutMs(opts.timeout),
+  }));
+  selectVersion();
+  vi.spyOn(runtimePlan, "resolvePackageRuntimePreflight").mockResolvedValue({
+    ok: true,
+    value: { nodeRunner: process.execPath },
+  });
+  return record;
+}
+
+const updateOptions = { admission: "installed", yes: true, json: true } as const;
+
 it.each([
   { trigger: "cli", timeout: undefined },
   { trigger: "campaign", timeout: undefined },
@@ -27,24 +55,7 @@ it.each([
 ] as const)(
   "keeps $trigger step defaults separate from explicit timeout $timeout",
   async ({ trigger, timeout }) => {
-    const record = createUpdateRun({ trigger: trigger === "campaign" ? "campaign" : "cli" });
-    vi.stubEnv("OPENCLAW_UPDATE_RUN_ID", record.runId);
-    vi.stubEnv("OPENCLAW_UPDATE_RUN_HANDOFF", "1");
-    const prepare = vi.mocked(commandRun.prepareUpdateCommand).getMockImplementation()!;
-    vi.mocked(commandRun.prepareUpdateCommand).mockImplementation(async (opts) => ({
-      ...(await prepare(opts)),
-      timeoutMs: shared.parseUpdateTimeoutMs(opts.timeout),
-    }));
-    vi.mocked(shared.resolveTargetVersion).mockResolvedValue({ version: "2026.9.4" });
-    vi.mocked(packageMetadata.fetchNpmPackageTargetStatus).mockResolvedValue({
-      version: "2026.9.4",
-      nodeEngine: null,
-      schemaVersions: { state: OPENCLAW_STATE_SCHEMA_VERSION, agent: 20 },
-    });
-    vi.spyOn(runtimePlan, "resolvePackageRuntimePreflight").mockResolvedValue({
-      ok: true,
-      value: { nodeRunner: process.execPath },
-    });
+    const record = prepareTimedUpdate(trigger);
     const execute = vi
       .spyOn(execution, "executeMutableUpdate")
       .mockImplementation(async (params) => {
@@ -53,10 +64,8 @@ it.each([
       });
 
     await updateCommand({
-      admission: "installed",
+      ...updateOptions,
       tag: "2026.9.4",
-      yes: true,
-      json: true,
       restart: false,
       timeout,
     });
@@ -78,12 +87,7 @@ it.each([
 afterEach(() => vi.useRealTimers());
 
 it("forwards an inherited activation budget for already-current updates without --timeout", async () => {
-  vi.mocked(shared.resolveTargetVersion).mockResolvedValue({ version: "2026.9.3" });
-  vi.mocked(packageMetadata.fetchNpmPackageTargetStatus).mockResolvedValue({
-    version: "2026.9.3",
-    nodeEngine: null,
-    schemaVersions: { state: OPENCLAW_STATE_SCHEMA_VERSION, agent: 20 },
-  });
+  selectVersion("2026.9.3");
   const admit = commandRun.admitUpdateCommandRun;
   vi.spyOn(commandRun, "admitUpdateCommandRun").mockImplementation(async (params) => {
     const run = await admit(params);
@@ -119,34 +123,15 @@ it("forwards an inherited activation budget for already-current updates without 
     finishUpdateRun(run.runId, { status: "skipped", reason: "already-current" }, { env: run.env });
   });
   await updateCommand({
-    admission: "installed",
+    ...updateOptions,
     tag: "2026.9.3",
-    yes: true,
-    json: true,
     restart: false,
   });
   expect(budgets).toEqual([60_000]);
 });
 
 it("ends an unsettled candidate and unready predecessor within one --timeout budget", async () => {
-  const record = createUpdateRun({ trigger: "cli" });
-  vi.stubEnv("OPENCLAW_UPDATE_RUN_ID", record.runId);
-  vi.stubEnv("OPENCLAW_UPDATE_RUN_HANDOFF", "1");
-  vi.mocked(shared.resolveTargetVersion).mockResolvedValue({ version: "2026.9.4" });
-  vi.mocked(packageMetadata.fetchNpmPackageTargetStatus).mockResolvedValue({
-    version: "2026.9.4",
-    nodeEngine: null,
-    schemaVersions: { state: OPENCLAW_STATE_SCHEMA_VERSION, agent: 20 },
-  });
-  const prepare = vi.mocked(commandRun.prepareUpdateCommand).getMockImplementation()!;
-  vi.mocked(commandRun.prepareUpdateCommand).mockImplementation(async (opts) => ({
-    ...(await prepare(opts)),
-    timeoutMs: shared.parseUpdateTimeoutMs(opts.timeout),
-  }));
-  vi.spyOn(runtimePlan, "resolvePackageRuntimePreflight").mockResolvedValue({
-    ok: true,
-    value: { nodeRunner: process.execPath },
-  });
+  prepareTimedUpdate();
   const observing = createDeferredCore();
   const health = vi.fn<GatewayService["readRuntime"]>(() => {
     observing.resolve();
@@ -182,10 +167,8 @@ it("ends an unsettled candidate and unready predecessor within one --timeout bud
   vi.useFakeTimers({ toFake: ["Date", "performance", "setTimeout", "clearTimeout"] });
   const output = vi.mocked(defaultRuntime.writeJson);
   const running = updateCommand({
-    admission: "installed",
+    ...updateOptions,
     tag: "2026.9.4",
-    yes: true,
-    json: true,
     timeout: "60",
   }).catch((error: unknown) => error);
   await observing.promise;

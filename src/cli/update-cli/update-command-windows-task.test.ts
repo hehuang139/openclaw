@@ -26,35 +26,67 @@ vi.mock("../../daemon/schtasks.js", async (importOriginal) => ({
 }));
 vi.mock("../../runtime.js", () => ({ defaultRuntime: { error: vi.fn() } }));
 
+function recovery(
+  options: Parameters<typeof createWindowsTaskAutoStartRecovery>[0] = { serviceEnv: {} },
+) {
+  return createWindowsTaskAutoStartRecovery({ alreadySuspended: true, ...options });
+}
+
+function mockEnable(afterDispatch: () => void | Promise<void> = () => {}) {
+  vi.mocked(resumeScheduledTaskAutoStartAfterUpdate).mockImplementationOnce(
+    async (_env, options) => {
+      await options?.beforeMutation?.();
+      const pending = afterDispatch();
+      if (pending) {
+        await pending;
+      }
+      return true;
+    },
+  );
+}
+
+function isolatedRoot(prefix: string) {
+  const root = dirs.make(prefix);
+  vi.spyOn(openClawTmp, "resolvePreferredOpenClawTmpDir").mockReturnValue(
+    path.join(root, "private-tmp"),
+  );
+  return root;
+}
+
+async function rebindExecutor(
+  store: ReturnType<typeof createManagedHandoffLeaseStore>,
+  root: string,
+) {
+  const original = store.read(root);
+  if (original.kind !== "current") {
+    throw new Error("missing actual executor");
+  }
+  await Promise.resolve();
+  expect(store.bind(original.lease, process.pid)).not.toBeNull();
+}
+
 it("revokes restoration while its ownership inspection is pending", async () => {
   const inspected = createDeferred();
   const releaseInspection = createDeferred();
   const dispatched: string[] = [];
-  vi.mocked(resumeScheduledTaskAutoStartAfterUpdate).mockImplementationOnce(
-    async (_env, options) => {
-      await options?.beforeMutation?.();
-      dispatched.push("enable");
-      return true;
-    },
-  );
-  const recovery = createWindowsTaskAutoStartRecovery({
+  mockEnable(() => {
+    dispatched.push("enable");
+  });
+  const task = recovery({
     serviceEnv: {},
-    alreadySuspended: true,
     assertCurrentService: async () => {
       inspected.resolve();
       await releaseInspection.promise;
     },
   });
-  const restored = expect(recovery.restore(true)).rejects.toThrow(
-    "restoration authority has closed",
-  );
+  const restored = expect(task.restore(true)).rejects.toThrow("restoration authority has closed");
   await inspected.promise;
-  const settled = recovery.complete(false);
+  const settled = task.complete(false);
   releaseInspection.resolve();
   await restored;
   await settled;
-  await recovery.restore(true);
-  expect(() => recovery.assertRecoveryCurrent()).toThrow("authority has closed or transferred");
+  await task.restore(true);
+  expect(() => task.assertRecoveryCurrent()).toThrow("authority has closed or transferred");
   expect(dispatched).toEqual([]);
   expect(suspendScheduledTaskAutoStartForUpdate).not.toHaveBeenCalled();
 });
@@ -63,15 +95,11 @@ it("drains a dispatched enable before compensating failed verification", async (
   const dispatched = createDeferred();
   const finishEnable = createDeferred();
   const actions: string[] = [];
-  vi.mocked(resumeScheduledTaskAutoStartAfterUpdate).mockImplementationOnce(
-    async (_env, options) => {
-      await options?.beforeMutation?.();
-      actions.push("enable");
-      dispatched.resolve();
-      await finishEnable.promise;
-      return true;
-    },
-  );
+  mockEnable(async () => {
+    actions.push("enable");
+    dispatched.resolve();
+    await finishEnable.promise;
+  });
   vi.mocked(suspendScheduledTaskAutoStartForUpdate).mockImplementationOnce(
     async (_env, options) => {
       expect(options?.restoreOnFailure).toBe(false);
@@ -80,13 +108,10 @@ it("drains a dispatched enable before compensating failed verification", async (
       return true;
     },
   );
-  const recovery = createWindowsTaskAutoStartRecovery({
-    serviceEnv: {},
-    alreadySuspended: true,
-  });
-  const restored = recovery.restore(true);
+  const task = recovery();
+  const restored = task.restore(true);
   await dispatched.promise;
-  const settled = recovery.complete(false);
+  const settled = task.complete(false);
   await Promise.resolve();
   expect(actions).toEqual(["enable"]);
   finishEnable.resolve();
@@ -104,34 +129,24 @@ afterEach(() => {
 
 it("refuses caller recovery after transferring native task ownership", async () => {
   vi.mocked(suspendScheduledTaskAutoStartForUpdate).mockClear();
-  const recovery = createWindowsTaskAutoStartRecovery({
-    serviceEnv: {},
-    alreadySuspended: true,
-  });
+  const task = recovery();
   try {
-    recovery.assertRecoveryCurrent();
-    recovery.handoff(async () => {});
-    expect(() => recovery.assertRecoveryCurrent()).toThrow("authority has closed or transferred");
+    task.assertRecoveryCurrent();
+    task.handoff(async () => {});
+    expect(() => task.assertRecoveryCurrent()).toThrow("authority has closed or transferred");
   } finally {
-    await recovery.complete(true);
+    await task.complete(true);
   }
   expect(suspendScheduledTaskAutoStartForUpdate).not.toHaveBeenCalled();
 });
 
 it("refuses native compensation after its original live executor changes during inspection", async () => {
-  const root = dirs.make("windows-compensation-owner-");
-  vi.spyOn(openClawTmp, "resolvePreferredOpenClawTmpDir").mockReturnValue(
-    path.join(root, "private-tmp"),
-  );
+  const root = isolatedRoot("windows-compensation-owner-");
   const actions: string[] = [];
   const store = createManagedHandoffLeaseStore();
-  vi.mocked(resumeScheduledTaskAutoStartAfterUpdate).mockImplementationOnce(
-    async (_env, options) => {
-      await options?.beforeMutation?.();
-      actions.push("enable");
-      return true;
-    },
-  );
+  mockEnable(() => {
+    actions.push("enable");
+  });
   vi.mocked(suspendScheduledTaskAutoStartForUpdate).mockImplementationOnce(
     async (_env, options) => {
       await options?.beforeMutation?.();
@@ -144,33 +159,27 @@ it("refuses native compensation after its original live executor changes during 
     withUpdateCommandExecutor(randomUUID(), async (executor) => {
       const fence = await executor.enter(root);
       let compensating = false;
-      const recovery = createWindowsTaskAutoStartRecovery({
+      const task = recovery({
         serviceEnv: {},
-        alreadySuspended: true,
         assertCurrent: fence.assertCurrent,
         assertCurrentService: async () => {
           if (!compensating) {
             return;
           }
-          const original = store.read(root);
-          if (original.kind !== "current") {
-            throw new Error("missing actual executor");
-          }
-          await Promise.resolve();
-          expect(store.bind(original.lease, process.pid)).not.toBeNull();
+          await rebindExecutor(store, root);
         },
       });
       try {
-        await recovery.restore(true);
+        await task.restore(true);
         compensating = true;
         try {
-          await recovery.complete(false);
+          await task.complete(false);
         } catch (error) {
           failure = error;
         }
-        expect(() => recovery.assertRecoveryCurrent()).toThrow(/executor/);
+        expect(() => task.assertRecoveryCurrent()).toThrow(/executor/);
       } finally {
-        await recovery.complete(false);
+        await task.complete(false);
       }
     }),
   ).rejects.toThrow(/executor/);
@@ -179,10 +188,7 @@ it("refuses native compensation after its original live executor changes during 
 });
 
 it("retains the native failure when interrupted cleanup also loses its executor", async () => {
-  const root = dirs.make("windows-interrupted-owner-");
-  vi.spyOn(openClawTmp, "resolvePreferredOpenClawTmpDir").mockReturnValue(
-    path.join(root, "private-tmp"),
-  );
+  const root = isolatedRoot("windows-interrupted-owner-");
   const exited = vi.fn<typeof process.exit>();
   vi.spyOn(process, "exit").mockImplementation(exited);
   const listeners = process.listeners("SIGINT");
@@ -190,21 +196,11 @@ it("retains the native failure when interrupted cleanup also loses its executor"
   const run = createUpdateRun({ trigger: "cli" }, { env });
   const store = createManagedHandoffLeaseStore();
   const nativeFailure = new Error("native disable failed after dispatch");
-  vi.mocked(resumeScheduledTaskAutoStartAfterUpdate).mockImplementationOnce(
-    async (_env, options) => {
-      await options?.beforeMutation?.();
-      return true;
-    },
-  );
+  mockEnable();
   vi.mocked(suspendScheduledTaskAutoStartForUpdate).mockImplementationOnce(
     async (_env, options) => {
       await options?.beforeMutation?.();
-      const original = store.read(root);
-      if (original.kind !== "current") {
-        throw new Error("missing actual executor");
-      }
-      await Promise.resolve();
-      expect(store.bind(original.lease, process.pid)).not.toBeNull();
+      await rebindExecutor(store, root);
       throw nativeFailure;
     },
   );
@@ -217,14 +213,13 @@ it("retains the native failure when interrupted cleanup also loses its executor"
         return withUpdateCommandExecutor(run.runId, async (executor) => {
           const executorFence = await executor.enter(root);
           const recoveryListeners = process.listeners("SIGINT");
-          const recovery = createWindowsTaskAutoStartRecovery({
+          const task = recovery({
             serviceEnv: env,
-            alreadySuspended: true,
             assertCurrent: executorFence.assertCurrent,
             updateRun: { runId: run.runId, env, executorFence },
           });
           try {
-            await recovery.restore(true);
+            await task.restore(true);
             const onSignal = process
               .listeners("SIGINT")
               .find((listener) => !recoveryListeners.includes(listener));
@@ -235,12 +230,12 @@ it("retains the native failure when interrupted cleanup also loses its executor"
             expect(process.exitCode).toBe(previousExitCode);
             expect(exited).not.toHaveBeenCalled();
             try {
-              await recovery.complete(false);
+              await task.complete(false);
             } catch (error) {
               failure = error;
             }
           } finally {
-            await recovery.complete(false);
+            await task.complete(false);
           }
         });
       }),

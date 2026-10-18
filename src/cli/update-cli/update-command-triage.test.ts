@@ -90,6 +90,16 @@ async function createInstalledTriage(exitCode = 0) {
   } satisfies UpdateTriageTarget;
 }
 
+function failUpdate(
+  target: UpdateTriageTarget,
+  options: Parameters<typeof withUpdateFailureTriage>[0] = {},
+  failure: unknown = new UpdateCommandFailure(failedUpdate),
+) {
+  return withUpdateFailureTriage(options, target, async () => {
+    throw failure;
+  });
+}
+
 async function readReceipt(target: { root: string }) {
   return JSON.parse(await fs.readFile(path.join(target.root, "receipt.json"), "utf8")) as {
     args: string[];
@@ -135,42 +145,6 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 describe("update failure triage boundary", () => {
-  it.each([0])(
-    "runs the installed triage after cleanup without changing update failure (triage exit %i)",
-    async (triageExitCode) => {
-      const target = await createInstalledTriage(triageExitCode);
-      await expect(
-        withUpdateFailureTriage({ json: true }, target, async () => {
-          try {
-            defaultRuntime.writeJson(failedUpdate);
-            throw new UpdateCommandFailure(failedUpdate);
-          } finally {
-            await fs.writeFile(path.join(target.root, "released"), "done");
-          }
-        }),
-      ).rejects.toMatchObject({ code: 1 });
-
-      const receipt = await readReceipt(target);
-      expect(receipt).toMatchObject({
-        released: true,
-        stateDir: target.env.OPENCLAW_STATE_DIR,
-        configPath: target.env.OPENCLAW_CONFIG_PATH,
-        failure: {
-          result: { mode: "npm", reason: "global-install-failed", before: { version: "2026.8.1" } },
-        },
-      });
-      expect(receipt.updateInProgress).toBeUndefined();
-      expect(receipt.serviceMarker).toBeUndefined();
-      expect(receipt.args).toContain("--json");
-      expect(JSON.stringify(receipt.failure)).toContain("ENOSPC");
-      expect(defaultRuntime.exit).not.toHaveBeenCalled();
-      expect(defaultRuntime.writeJson).toHaveBeenCalledExactlyOnceWith(failedUpdate);
-      expect(defaultRuntime.log).not.toHaveBeenCalled();
-      expect(defaultRuntime.error).toHaveBeenCalledWith(expect.stringContaining('"promptPath":'));
-      expect(runInteractiveUpdateFailureAction).not.toHaveBeenCalled();
-    },
-  );
-
   it.each([
     { opts: { yes: true }, terminal: true, flag: "--non-interactive" },
     { opts: { json: true }, terminal: true, flag: "--json" },
@@ -203,11 +177,25 @@ describe("update failure triage boundary", () => {
           }),
         ).rejects.toMatchObject({ code: 1 });
       });
-      expect(await readReceipt(target)).toMatchObject({
+      const receipt = await readReceipt(target);
+      expect(receipt).toMatchObject({
         released: true,
         args: ["triage", "--update-result", expect.any(String), flag],
+        stateDir: target.env.OPENCLAW_STATE_DIR,
+        configPath: target.env.OPENCLAW_CONFIG_PATH,
+        failure: {
+          result: { mode: "npm", reason: result.reason, before: { version: "2026.8.1" } },
+        },
       });
+      expect(receipt.updateInProgress).toBeUndefined();
+      expect(receipt.serviceMarker).toBeUndefined();
+      expect(JSON.stringify(receipt.failure)).toContain("ENOSPC");
+      expect(defaultRuntime.exit).not.toHaveBeenCalled();
       expect(defaultRuntime.writeJson).toHaveBeenCalledExactlyOnceWith(result);
+      if ("json" in opts) {
+        expect(defaultRuntime.log).not.toHaveBeenCalled();
+        expect(defaultRuntime.error).toHaveBeenCalledWith(expect.stringContaining('"promptPath":'));
+      }
       const output = [
         ...vi.mocked(defaultRuntime.log).mock.calls,
         ...vi.mocked(defaultRuntime.error).mock.calls,
@@ -221,97 +209,80 @@ describe("update failure triage boundary", () => {
     },
   );
 
-  it.each([{ yes: false, terminal: false }])(
-    "preserves non-interactive updater failures (yes=$yes, terminal=$terminal)",
-    async ({ yes, terminal }) => {
-      const target: UpdateTriageTarget & { root: string } = await createInstalledTriage();
-      const failure = new Error("Package verification failed unexpectedly");
-      target.failureResult = {
-        ...failedUpdate,
-        recovery: { serviceRestartSafe: false, reason: "runtime-verification-failed" },
-      };
+  it("preserves non-interactive updater failures", async () => {
+    const target: UpdateTriageTarget & { root: string } = await createInstalledTriage();
+    const failure = new Error("Package verification failed unexpectedly");
+    target.failureResult = {
+      ...failedUpdate,
+      recovery: { serviceRestartSafe: false, reason: "runtime-verification-failed" },
+    };
 
-      await withTriageTerminal(terminal, async () => {
-        await expect(
-          withUpdateFailureTriage({ yes }, target, async () => {
-            throw failure;
-          }),
-        ).rejects.toBe(failure);
-      });
+    await withTriageTerminal(false, async () => {
+      await expect(failUpdate(target, { yes: false }, failure)).rejects.toBe(failure);
+    });
 
-      const receipt = await readReceipt(target);
-      expect(receipt.args).toContain("--non-interactive");
-      expect(receipt.failure).toMatchObject({
-        error: failure.message,
-        result: { recovery: { serviceRestartSafe: false } },
-      });
-      expect(defaultRuntime.exit).not.toHaveBeenCalled();
-      expect(runInteractiveUpdateFailureAction).not.toHaveBeenCalled();
-    },
-  );
+    const receipt = await readReceipt(target);
+    expect(receipt.args).toContain("--non-interactive");
+    expect(receipt.failure).toMatchObject({
+      error: failure.message,
+      result: { recovery: { serviceRestartSafe: false } },
+    });
+    expect(defaultRuntime.exit).not.toHaveBeenCalled();
+    expect(runInteractiveUpdateFailureAction).not.toHaveBeenCalled();
+  });
 
-  it.each(["reported"] as const)(
-    "exports the final managed %s failure after cleanup without launching triage",
-    async (kind) => {
-      const { target, contextPath } = await createManagedTriageTarget();
-      const result: UpdateRunResult = {
-        ...failedUpdate,
+  it("exports the final managed failure after cleanup without launching triage", async () => {
+    const { target, contextPath } = await createManagedTriageTarget();
+    const result: UpdateRunResult = {
+      ...failedUpdate,
+      after: { version: "2026.9.1" },
+      recovery: { serviceRestartSafe: true, version: "2026.9.1" },
+    };
+    const targetWithResult: UpdateTriageTarget = { ...target, failureResult: result };
+    await fs.writeFile(contextPath, JSON.stringify({ error: "Stale pre-recovery result" }));
+    const secret = "sk-test-managed-triage-secret-1234567890";
+    const detail = `Fresh Doctor failed token=${secret}; original Doctor diagnostic`;
+    const failure = new UpdateCommandFailure(result, 1, detail);
+    const completion = withUpdateFailureTriage({ json: true }, targetWithResult, async () => {
+      try {
+        throw failure;
+      } finally {
+        failure.result.recovery = {
+          serviceRestartSafe: false,
+          reason: "runtime-verification-failed",
+        };
+        await fs.writeFile(path.join(target.root, "released"), "done");
+      }
+    });
+    await expect(completion).rejects.toMatchObject({ code: 1 });
+    expect(defaultRuntime.exit).not.toHaveBeenCalled();
+
+    const raw = await fs.readFile(contextPath, "utf8");
+    expect(JSON.parse(raw)).toMatchObject({
+      error: expect.stringContaining("original Doctor diagnostic"),
+      result: {
+        before: { version: "2026.8.1" },
         after: { version: "2026.9.1" },
-        recovery: { serviceRestartSafe: true, version: "2026.9.1" },
-      };
-      const targetWithResult: UpdateTriageTarget = { ...target, failureResult: result };
-      await fs.writeFile(contextPath, JSON.stringify({ error: "Stale pre-recovery result" }));
-      const secret = "sk-test-managed-triage-secret-1234567890";
-      const detail = `Fresh Doctor failed token=${secret}; original Doctor diagnostic`;
-      const failure =
-        kind === "reported" ? new UpdateCommandFailure(result, 1, detail) : new Error(detail);
-      const observedResult = failure instanceof UpdateCommandFailure ? failure.result : result;
-      const completion = withUpdateFailureTriage({ json: true }, targetWithResult, async () => {
-        try {
-          throw failure;
-        } finally {
-          observedResult.recovery = {
-            serviceRestartSafe: false,
-            reason: "runtime-verification-failed",
-          };
-          await fs.writeFile(path.join(target.root, "released"), "done");
-        }
-      });
-      if (kind === "reported") {
-        await expect(completion).rejects.toMatchObject({ code: 1 });
-        expect(defaultRuntime.exit).not.toHaveBeenCalled();
-      } else {
-        await expect(completion).rejects.toBe(failure);
-        expect(defaultRuntime.exit).not.toHaveBeenCalled();
-      }
-
-      const raw = await fs.readFile(contextPath, "utf8");
-      expect(JSON.parse(raw)).toMatchObject({
-        error: expect.stringContaining("original Doctor diagnostic"),
-        result: {
-          before: { version: "2026.8.1" },
-          after: { version: "2026.9.1" },
-          recovery: { serviceRestartSafe: false, reason: "runtime-verification-failed" },
-          steps: [{ stderrTail: "ENOSPC" }],
-        },
-      });
-      expect(defaultRuntime.error).toHaveBeenCalledWith(
-        expect.stringContaining("openclaw triage --run --update-result"),
-      );
-      expect(raw).not.toContain(secret);
-      expect(raw).not.toContain("Stale pre-recovery result");
-      expect(Buffer.byteLength(raw)).toBeLessThanOrEqual(4 * 1024 + 1);
-      if (process.platform !== "win32") {
-        expect((await fs.stat(contextPath)).mode & 0o777).toBe(0o600);
-      }
-      await expect(fs.stat(path.join(target.root, "receipt.json"))).rejects.toMatchObject({
-        code: "ENOENT",
-      });
-      expect(defaultRuntime.writeJson).not.toHaveBeenCalled();
-      expect(defaultRuntime.log).not.toHaveBeenCalled();
-      expect(runInteractiveUpdateFailureAction).not.toHaveBeenCalled();
-    },
-  );
+        recovery: { serviceRestartSafe: false, reason: "runtime-verification-failed" },
+        steps: [{ stderrTail: "ENOSPC" }],
+      },
+    });
+    expect(defaultRuntime.error).toHaveBeenCalledWith(
+      expect.stringContaining("openclaw triage --run --update-result"),
+    );
+    expect(raw).not.toContain(secret);
+    expect(raw).not.toContain("Stale pre-recovery result");
+    expect(Buffer.byteLength(raw)).toBeLessThanOrEqual(4 * 1024 + 1);
+    if (process.platform !== "win32") {
+      expect((await fs.stat(contextPath)).mode & 0o777).toBe(0o600);
+    }
+    await expect(fs.stat(path.join(target.root, "receipt.json"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    expect(defaultRuntime.writeJson).not.toHaveBeenCalled();
+    expect(defaultRuntime.log).not.toHaveBeenCalled();
+    expect(runInteractiveUpdateFailureAction).not.toHaveBeenCalled();
+  });
 
   it("leaves the outer managed export untouched in a post-core child", async () => {
     const { target, contextPath } = await createManagedTriageTarget();
@@ -319,11 +290,7 @@ describe("update failure triage boundary", () => {
     const original = JSON.stringify({ error: "Outer updater owns final recovery" });
     await fs.writeFile(contextPath, original);
 
-    await expect(
-      withUpdateFailureTriage({}, target, async () => {
-        throw new UpdateCommandFailure(failedUpdate, 1);
-      }),
-    ).rejects.toMatchObject({ code: 1 });
+    await expect(failUpdate(target)).rejects.toMatchObject({ code: 1 });
 
     await expect(fs.readFile(contextPath, "utf8")).resolves.toBe(original);
     await expect(fs.stat(path.join(target.root, "receipt.json"))).rejects.toMatchObject({
@@ -332,25 +299,20 @@ describe("update failure triage boundary", () => {
     expect(defaultRuntime.exit).not.toHaveBeenCalled();
   });
 
-  it.each([{ name: "managed helper child", opts: {}, env: { OPENCLAW_UPDATE_RUN_HANDOFF: "1" } }])(
-    "leaves triage to the owner for $name",
-    async ({ opts, env }) => {
-      const target = await createInstalledTriage();
-      Object.assign(target.env, env);
-      await expect(
-        withUpdateFailureTriage(opts, target, async () => {
-          throw new UpdateCommandFailure(failedUpdate, 80);
-        }),
-      ).rejects.toMatchObject({ code: 80 });
-      await expect(fs.stat(path.join(target.root, "receipt.json"))).rejects.toMatchObject({
-        code: "ENOENT",
-      });
-      await expect(fs.stat(target.env.OPENCLAW_STATE_DIR)).rejects.toMatchObject({
-        code: "ENOENT",
-      });
-      expect(defaultRuntime.exit).not.toHaveBeenCalled();
-    },
-  );
+  it("leaves triage to the owner for a managed helper child", async () => {
+    const target = await createInstalledTriage();
+    target.env.OPENCLAW_UPDATE_RUN_HANDOFF = "1";
+    await expect(
+      failUpdate(target, {}, new UpdateCommandFailure(failedUpdate, 80)),
+    ).rejects.toMatchObject({ code: 80 });
+    await expect(fs.stat(path.join(target.root, "receipt.json"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    await expect(fs.stat(target.env.OPENCLAW_STATE_DIR)).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    expect(defaultRuntime.exit).not.toHaveBeenCalled();
+  });
 
   it("uses a new report identity for each distinct CLI update execution", async () => {
     const target = await createInstalledTriage();
@@ -358,11 +320,7 @@ describe("update failure triage boundary", () => {
 
     await withTriageTerminal(true, async () => {
       for (let index = 0; index < 2; index += 1) {
-        await expect(
-          withUpdateFailureTriage({}, target, async () => {
-            throw new UpdateCommandFailure(failedUpdate);
-          }),
-        ).rejects.toMatchObject({ code: 1 });
+        await expect(failUpdate(target)).rejects.toMatchObject({ code: 1 });
       }
     });
 
@@ -389,11 +347,7 @@ describe("update failure triage boundary", () => {
 
     await withEnvAsync({ PATH: bin, HOME: target.root, USERPROFILE: target.root }, () =>
       withTriageTerminal(true, async () => {
-        await expect(
-          withUpdateFailureTriage({}, target, async () => {
-            throw new UpdateCommandFailure(failedUpdate);
-          }),
-        ).rejects.toMatchObject({ code: 1 });
+        await expect(failUpdate(target)).rejects.toMatchObject({ code: 1 });
       }),
     );
 
@@ -407,11 +361,7 @@ describe("update failure triage boundary", () => {
     const target = await createInstalledTriage();
     await fs.writeFile(target.env.OPENCLAW_STATE_DIR, "not a directory");
     const failure = new Error("Original update failure");
-    await expect(
-      withUpdateFailureTriage({}, target, async () => {
-        throw failure;
-      }),
-    ).rejects.toBe(failure);
+    await expect(failUpdate(target, {}, failure)).rejects.toBe(failure);
     expect(defaultRuntime.error).toHaveBeenCalledWith(
       expect.stringContaining("Triage could not complete:"),
     );
