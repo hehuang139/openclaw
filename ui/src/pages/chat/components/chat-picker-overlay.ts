@@ -163,7 +163,7 @@ function connectChatComposerPickerDismissal(ownerDocument: Document): () => void
     for (const { element } of invocationMenus.get(ownerDocument) ?? []) {
       if (element.isConnected && !path.includes(element)) {
         element.parentElement?.dispatchEvent(
-          new CustomEvent(CHAT_COMPOSER_DISMISS_INVOCATIONS_EVENT),
+          new CustomEvent(CHAT_COMPOSER_DISMISS_INVOCATIONS_EVENT, { bubbles: true }),
         );
       }
     }
@@ -195,7 +195,7 @@ function connectChatComposerPickerDismissal(ownerDocument: Document): () => void
     event.preventDefault();
     event.stopPropagation();
     menu.element.parentElement?.dispatchEvent(
-      new CustomEvent(CHAT_COMPOSER_DISMISS_INVOCATIONS_EVENT),
+      new CustomEvent(CHAT_COMPOSER_DISMISS_INVOCATIONS_EVENT, { bubbles: true }),
     );
     menu.getTextarea()?.focus({ preventScroll: true });
   }
