@@ -15,7 +15,7 @@ import { generateSecureUuid } from "../infra/secure-random.js";
 import type { EngineConnection } from "../infra/sql-connection.js";
 import { deferSqlitePostCommitPublication } from "../infra/sqlite-post-commit.js";
 import { getAdmittedSqliteSchemaFacts } from "../infra/sqlite-schema-facts.js";
-import { runSqliteDeferredTransactionSync } from "../infra/sqlite-transaction.js";
+import { runSqliteReadSnapshotSync } from "../infra/sqlite-transaction.js";
 import type { GatewayAccessGrantRef } from "../plugins/gateway-access-policy.types.js";
 import { updateConfigMachineStateInDatabase } from "./config-machine-state-write.js";
 import { readConfigMachineStateRowInDatabase } from "./config-machine-state.js";
@@ -346,7 +346,7 @@ export function listUserChannelIdentitiesInDatabase(
   db: EngineConnection,
   profileId: string,
 ): UserChannelIdentityLink[] {
-  return runSqliteDeferredTransactionSync(db, () => {
+  return runSqliteReadSnapshotSync(db, () => {
     if (!hasIdentityTables(db)) {
       return [];
     }
@@ -371,7 +371,7 @@ export function resolveUserChannelIdentityInDatabase(
   db: EngineConnection,
   identity: UserChannelIdentitySelector,
 ): UserChannelIdentityAuthorityFacts | undefined {
-  return runSqliteDeferredTransactionSync(
+  return runSqliteReadSnapshotSync(
     db,
     () => {
       if (!hasIdentityTables(db)) {
