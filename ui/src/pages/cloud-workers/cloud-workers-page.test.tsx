@@ -5,8 +5,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   validateConfigPatchParams,
   type ConfigPatchParams,
+  type EnvironmentsListResult,
 } from "../../../../packages/gateway-protocol/src/index.js";
 import { applyMergePatch } from "../../../../src/config/merge-patch.js";
+import { createDeferred } from "../../../../test/helpers/promise.js";
 import type { GatewayBrowserClient } from "../../api/gateway.ts";
 import type { ApplicationContext } from "../../app/context.ts";
 import { showConfirmDialog } from "../../components/confirm-dialog.ts";
@@ -14,6 +16,10 @@ import { i18n } from "../../i18n/index.ts";
 import { createGatewayHarness } from "../../lib/config/config-test-harness.ts";
 import { createRuntimeConfigCapability } from "../../lib/config/runtime-config-capability.ts";
 import { ApplicationProvider } from "../../lib/reactive/context.ts";
+import {
+  createGatewayRequestMock,
+  createTestGatewayClient,
+} from "../../test-helpers/gateway-client.ts";
 import { gatewayHelloForMethods } from "../../test-helpers/gateway-methods.ts";
 import { mountSolid } from "../../test-helpers/mount-solid.ts";
 import { flush, waitForSolid } from "../../test-helpers/solid-settle.ts";
@@ -47,6 +53,79 @@ const operatingSystems = [
   { id: "windows/wsl2", label: "Windows (WSL2)" },
   { id: "future-os", label: "Future OS", disabledReason: "Upgrade the worker provider." },
 ];
+
+it("retires a pending profile catalog when permissions change on the same connection", async () => {
+  const pendingCatalog = createDeferred<EnvironmentsListResult>();
+  const config = {
+    cloudWorkers: {
+      profiles: {
+        worker: { provider: "crabbox", settings: { provider: "aws", class: "standard" } },
+      },
+    },
+  };
+  const request = createGatewayRequestMock(async (method, params) => {
+    if (method === "config.get") {
+      return {
+        config,
+        sourceConfig: config,
+        raw: JSON.stringify(config),
+        hash: "initial",
+        appliedConfigHash: "initial",
+        valid: true,
+        issues: [],
+      };
+    }
+    if (method === "environments.list") {
+      return isRecord(params) && params.projection === "profiles"
+        ? pendingCatalog.promise
+        : { environments: [] };
+    }
+    throw new Error(`Unexpected request ${method}`);
+  });
+  const client = createTestGatewayClient(request);
+  const transport = vi.spyOn(client, "request");
+  const source = createGatewayHarness(client);
+  source.publish(true, client, gatewayHelloForMethods(["config.patch", "environments.list"]));
+  const gateway = Object.assign(source.gateway, {
+    connection: { gatewayUrl: "ws://gateway.example.test", token: "", password: "" },
+  });
+  const runtimeConfig = createRuntimeConfigCapability(gateway);
+  // SAFETY: This mounted page uses only Gateway, RuntimeConfig, and navigation capabilities.
+  const context = { gateway, runtimeConfig, navigate: vi.fn() } as ApplicationContext;
+  const view = mountSolid(() => (
+    <ApplicationProvider value={context}>
+      <CloudWorkersPage />
+    </ApplicationProvider>
+  ));
+  try {
+    await waitForSolid(() => expect(view.getByText("worker", { selector: "code" })).toBeTruthy());
+    const catalogIndex = () =>
+      transport.mock.calls.findLastIndex(
+        ([method, params]) =>
+          method === "environments.list" && isRecord(params) && params.projection === "profiles",
+      );
+    await waitForSolid(() => {
+      expect(catalogIndex()).toBeGreaterThanOrEqual(0);
+      expect(transport.mock.calls[catalogIndex()][2]?.signal?.aborted).toBe(false);
+    });
+    const catalogSignal = transport.mock.calls[catalogIndex()][2]?.signal;
+    const catalogCompletion = transport.mock.results[catalogIndex()].value;
+    expect(catalogSignal?.aborted).toBe(false);
+
+    source.publish(true, client, gatewayHelloForMethods([]));
+    expect(catalogSignal?.aborted).toBe(true);
+    await waitForSolid(() => expect(view.getByText("Unavailable")).toBeTruthy());
+    pendingCatalog.resolve({ environments: [], profiles: [{ id: "worker" }] });
+    await catalogCompletion;
+    flush();
+
+    expect(view.queryByText("Advertised")).toBeNull();
+    expect(view.getByText("Unavailable")).toBeTruthy();
+  } finally {
+    view.unmount();
+    runtimeConfig.dispose();
+  }
+});
 
 describe("Cloud Workers mutation requests", () => {
   it.each([
