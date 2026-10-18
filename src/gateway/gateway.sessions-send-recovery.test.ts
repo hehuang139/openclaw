@@ -207,12 +207,19 @@ it.for(["SIGTERM", "SIGKILL"] as const)(
         );
       const expectPersistedSteer = async () => {
         const result = await client!.request<{
-          messages: Array<{ role?: string; content?: unknown }>;
+          messages: Array<{
+            role?: string;
+            content?: unknown;
+            provenance?: { kind?: string; sourceTool?: string };
+          }>;
         }>("chat.history", { sessionKey: steerTarget }, { signal });
         expect(
           result.messages.filter(
             (message) =>
-              message.role === "user" && JSON.stringify(message.content).includes("STEER_UPDATE"),
+              message.role === "assistant" &&
+              message.provenance?.kind === "inter_session" &&
+              message.provenance.sourceTool === "sessions_send" &&
+              JSON.stringify(message.content).includes("STEER_UPDATE"),
           ),
         ).toHaveLength(1);
       };
@@ -389,7 +396,14 @@ it.for(["SIGTERM", "SIGKILL"] as const)(
         expect(gateway.child?.pid).not.toBe(firstPid);
         client = await connect();
         await expectPersistedSteer();
-        await vi.waitFor(() => expect(recoveredResponse).toBeDefined(), { timeout: 60_000 });
+        try {
+          await vi.waitFor(() => expect(recoveredResponse).toBeDefined(), { timeout: 60_000 });
+        } catch (error) {
+          throw new Error(
+            `Recovery did not reach the first chat input. Observed: ${JSON.stringify(observed)}\n${gateway.logs()}`,
+            { cause: error },
+          );
+        }
         // Stored text is trimmed; the original request identity must still dedupe
         // an original-payload retry while recovery owns an active reservation.
         const activeRetry = await client.request<{ runId: string }>("chat.send", chatRequests[0], {

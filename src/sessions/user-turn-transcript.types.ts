@@ -215,6 +215,7 @@ export type UserTurnTranscriptRecorder = {
   /** Durable input custody leaves the active transcript unchanged until execution owns it. */
   stageApproved?: (options: {
     runId: string;
+    retryInterrupted?: boolean;
     storageTarget?: UserTurnPersistenceOptions["storageTarget"];
     lifecycleAdmission?: SessionInputLifecycleAdmission;
     assertCurrent: () => void;

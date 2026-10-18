@@ -55,10 +55,11 @@ describe("sessions_send steering custody", () => {
         await withDelayedSessionToolsSteering(
           cfg,
           async (receiver) => {
-            const result = await createSessionsSendTool({
+            const acknowledged = vi.fn();
+            const sent = createSessionsSendTool({
               config: cfg,
               agentSessionKey: REQUESTER,
-              ...(reportSettlement ? { idempotencyKey: "participant-delayed-steer" } : {}),
+              idempotencyKey: "participant-delayed-steer",
             }).execute("participant-steer", {
               sessionKey: PARTICIPANT_SHARED,
               user: bob.profileId,
@@ -68,18 +69,19 @@ describe("sessions_send steering custody", () => {
               mode: "steer",
               timeoutSeconds: 0,
             });
-            expect(result.details).toMatchObject({
-              status: "accepted",
-              targetDisposition: "steered",
-            });
+            void sent.then(acknowledged, acknowledged);
+            await receiver.waitForAccepted();
+            await setImmediate();
+            expect(acknowledged).not.toHaveBeenCalled();
             expect(receiver.pendingCount()).toBe(1);
             await turn.complete();
+            await setImmediate();
+            expect(acknowledged).not.toHaveBeenCalled();
+            const receiverLeases = turn.authorityLeases.filter(
+              (lease) => lease.profileId === bob.profileId && lease.releases === 0,
+            );
+            expect(receiverLeases.length).toBeGreaterThan(0);
             if (!reportSettlement) {
-              await setImmediate();
-              const receiverLeases = turn.authorityLeases.filter(
-                (lease) => lease.profileId === bob.profileId && lease.releases === 0,
-              );
-              expect(receiverLeases.length).toBeGreaterThan(0);
               if (outcome === "abort") {
                 expect(receiver.abort()).toBe(true);
               } else {
@@ -88,19 +90,7 @@ describe("sessions_send steering custody", () => {
                 }
                 receiver.end();
               }
-              // Join the already-resolved custody continuation, without a timed wait or polling.
-              await setImmediate();
-              for (const lease of receiverLeases) {
-                expect(lease.releases).toBe(1);
-              }
-              expect(
-                turn.authorityLeases.filter(
-                  (lease) => lease.profileId === bob.profileId && lease.releases === 0,
-                ),
-              ).toHaveLength(0);
-              return;
-            }
-            if (outcome === "source revoked") {
+            } else if (outcome === "source revoked") {
               turn.revoke(bob.profileId);
               await expect(receiver.commit()).rejects.toThrow(/authority|access|revoked/i);
             } else if (outcome === "receiver cancelled") {
@@ -110,6 +100,30 @@ describe("sessions_send steering custody", () => {
               await receiver.commit();
               expect(receiver.pendingCount()).toBe(0);
             }
+            const result = await sent;
+            expect(result.details).toMatchObject(
+              outcome === "sender completed"
+                ? { status: "accepted", targetDisposition: "steered" }
+                : {
+                    status: "error",
+                    error: expect.stringMatching(
+                      outcome === "source revoked"
+                        ? /authority|access|revoked/i
+                        : /queue_message_failed reason=injection_unavailable/,
+                    ),
+                  },
+            );
+            expect(receiver.pendingCount()).toBe(0);
+            // Join recipient custody cleanup without a timed wait or polling.
+            await setImmediate();
+            for (const lease of receiverLeases) {
+              expect(lease.releases).toBe(1);
+            }
+            expect(
+              turn.authorityLeases.filter(
+                (lease) => lease.profileId === bob.profileId && lease.releases === 0,
+              ),
+            ).toHaveLength(0);
             const messages = (
               await loadTranscriptEvents({
                 agentId: "main",

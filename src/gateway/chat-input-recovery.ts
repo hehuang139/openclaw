@@ -1,14 +1,11 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import type { GatewayClientInfo } from "../../packages/gateway-protocol/src/client-info.js";
-import type { createOperatorInputRecoverySource } from "../agents/operator-run-recovery-source.js";
-import { shouldComputeCommandAuthorized } from "../auto-reply/command-detection.js";
 import { MEDIA_ONLY_USER_TEXT } from "../sessions/user-turn-media.js";
 import type { PersistedUserTurnMessage } from "../sessions/user-turn-transcript.types.js";
 import { extractTextFromChatContent } from "../shared/chat-content.js";
 import { resolveGlobalSingleton } from "../shared/global-singleton.js";
 import type { GatewayMethodRegistry } from "./methods/registry.js";
-import type { NormalizedChatSendRequest } from "./server-methods/chat-send-request.js";
 import type { GatewayRequestContext } from "./server-methods/types.js";
 
 export const CHAT_INPUT_RECOVERY_MAX_AGE_MS = 24 * 60 * 60_000;
@@ -20,28 +17,6 @@ export type ChatInputRecoveryTarget = {
   sessionId: string;
   inputId: string;
   runId: string;
-};
-
-type ChatInputRecovery = {
-  version: 1;
-  source: NonNullable<ReturnType<typeof createOperatorInputRecoverySource>>;
-  clientInfo?: GatewayClientInfo;
-  suppressCommandInterpretation: boolean;
-  request: Pick<
-    NormalizedChatSendRequest["p"],
-    | "thinking"
-    | "fastMode"
-    | "fastAutoOnSeconds"
-    | "timeoutMs"
-    | "deliver"
-    | "queueMode"
-    | "replyToId"
-    | "originatingChannel"
-    | "originatingTo"
-    | "originatingAccountId"
-    | "originatingThreadId"
-    | "suppressCommandInterpretation"
-  >;
 };
 
 type ChatInputRecoveryAdmission = {
@@ -61,47 +36,6 @@ export function readChatInputRecoveryAdmission(
 ): ChatInputRecoveryAdmission | undefined {
   const current = admission.getStore();
   return current?.target.runId === runId ? current : undefined;
-}
-
-/** Keep only execution options; approved text and media live in the input itself. */
-export function createChatInputRecovery(params: {
-  request: NormalizedChatSendRequest;
-  source: ReturnType<typeof createOperatorInputRecoverySource>;
-}): ChatInputRecovery | undefined {
-  const { request, source } = params;
-  // Attached-client capabilities cannot be re-created after the connection ends.
-  if (
-    !source ||
-    request.toolBindings ||
-    request.goalOperation ||
-    request.turnKind !== "main" ||
-    (request.systemInputProvenance && request.systemInputProvenance.kind !== "external_user")
-  ) {
-    return undefined;
-  }
-  const p = request.p;
-  return {
-    version: 1,
-    source,
-    clientInfo: request.clientInfo,
-    suppressCommandInterpretation:
-      request.suppressCommandInterpretation ||
-      !shouldComputeCommandAuthorized(request.inboundMessage),
-    request: {
-      thinking: p.thinking,
-      fastMode: p.fastMode,
-      fastAutoOnSeconds: p.fastAutoOnSeconds,
-      timeoutMs: p.timeoutMs,
-      deliver: p.deliver,
-      queueMode: p.queueMode,
-      replyToId: p.replyToId,
-      originatingChannel: p.originatingChannel,
-      originatingTo: p.originatingTo,
-      originatingAccountId: p.originatingAccountId,
-      originatingThreadId: p.originatingThreadId,
-      suppressCommandInterpretation: p.suppressCommandInterpretation,
-    },
-  };
 }
 
 /** Re-enter chat admission with exact durable custody and current operator authority. */
@@ -212,9 +146,8 @@ export async function resumeChatInput(
         target,
         message,
         requestFingerprint: row.request_hash.slice("request:".length),
-        // SAFETY: Chat admission owns the serialized client descriptor; it grants no capabilities.
         clientInfo: isRecord(metadata.clientInfo)
-          ? (metadata.clientInfo as GatewayClientInfo)
+          ? (metadata.clientInfo as GatewayClientInfo) // SAFETY: Stored by chat admission.
           : undefined,
         suppressCommandInterpretation: metadata.suppressCommandInterpretation === true,
       },

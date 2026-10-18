@@ -481,6 +481,8 @@ commands keep their retry/discard queue controls.
 
 An ordinary message rejected by the Gateway stays in the conversation with a **Not sent**
 footer. Use **Retry** to try again or **Discard** to remove its pending browser copy.
+An accepted input interrupted before execution can also be retried with its original
+submission ID without restarting the Gateway.
 Discard stays effective after reloading the tab; it does not cancel Gateway work or
 remove messages already in the conversation history.
 

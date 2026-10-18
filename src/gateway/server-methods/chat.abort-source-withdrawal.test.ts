@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../../test/helpers/promise.js";
+import * as pendingInputSource from "../../config/sessions/session-pending-input-source.js";
 import * as withdrawal from "../../config/sessions/session-pending-input-withdrawal.js";
 import { captureSessionTarget } from "../../sessions/session-controller.lifecycle.js";
 import {
@@ -18,6 +19,9 @@ import {
 vi.mock("../session-utils.js", async (original) => ({
   ...(await original<typeof import("../session-utils.js")>()),
   loadGatewaySessionEntryReadOnlyInWorker: async () => ({
+    cfg: {},
+    agentId: "main",
+    canonicalKey: "main",
     entry: { sessionId: "main-session" },
     storePath: "/synthetic/withdrawal/sessions.json",
   }),
@@ -166,6 +170,9 @@ describe("chat.abort exact controller input withdrawal", () => {
     );
     const release = await claimRpcSourceForTest(source);
     const context = createChatAbortContext({ sources: new Map([[" source ", source]]) });
+    const readSource = vi
+      .spyOn(pendingInputSource, "readPendingInputSource")
+      .mockResolvedValue(undefined);
     const discard = vi.spyOn(withdrawal, "discardSessionPendingInput");
     try {
       for (const runId of ["source", " source "]) {
@@ -177,10 +184,21 @@ describe("chat.abort exact controller input withdrawal", () => {
         });
         expect(respond).toHaveBeenCalledWith(true, { ok: true, aborted: false, runIds: [] });
       }
+      expect(readSource).toHaveBeenCalledExactlyOnceWith(
+        {
+          agentId: "main",
+          storePath: "/synthetic/withdrawal/sessions.json",
+          sessionKey: "main",
+          sessionId: "main-session",
+        },
+        "source:user",
+        true,
+      );
       expect(discard).not.toHaveBeenCalled();
       expect(source.input.abortSignal.aborted).toBe(false);
     } finally {
       release();
+      readSource.mockRestore();
       discard.mockRestore();
     }
   });

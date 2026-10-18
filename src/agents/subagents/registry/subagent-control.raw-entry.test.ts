@@ -11,6 +11,7 @@ import { setRuntimeConfigSnapshot } from "../../../config/config.js";
 import {
   appendTranscriptMessage,
   loadSessionEntry,
+  loadTranscriptEvents,
   replaceSessionEntry,
 } from "../../../config/sessions/session-accessor.js";
 import type { OpenClawConfig } from "../../../config/types.openclaw.js";
@@ -427,10 +428,19 @@ it("numbers watched raw children independently and keeps their completion owner"
 });
 
 it("steers its watched raw child while another agent has a newer row", async () => {
-  const { send } = await prepareWatchedRawChildren();
-  const queueMessage = vi.fn<EmbeddedAgentQueueHandle["queueMessage"]>(async () => {});
+  const { children, send } = await prepareWatchedRawChildren();
+  const queueMessage = vi.fn<EmbeddedAgentQueueHandle["queueMessage"]>(async (_text, options) => {
+    const recorder = options?.userTurnTranscriptRecorder;
+    if (!recorder || !(await recorder.persistApproved())) {
+      throw new Error("Steering fixture did not commit the admitted guidance");
+    }
+  });
   const handle: EmbeddedAgentQueueHandle = {
-    ...createEmbeddedRunHandle({ runId: "main-1", queueMessage }),
+    ...createEmbeddedRunHandle({
+      runId: "main-1",
+      queueMessage,
+      supportsTranscriptCommitWait: true,
+    }),
     messageInjectionV2: {
       version: 2,
       isAvailable: () => true,
@@ -448,6 +458,26 @@ it("steers its watched raw child while another agent has a newer row", async () 
       targetDisposition: "steered",
     });
     expect(queueMessage).toHaveBeenCalledOnce();
+    expect(
+      await loadTranscriptEvents({
+        agentId: "main",
+        storePath: children.get("main")!.storePath,
+        sessionKey: "global",
+        sessionId: "main-global",
+      }),
+    ).toContainEqual(
+      expect.objectContaining({
+        message: expect.objectContaining({ role: "user", content: "Continue main" }),
+      }),
+    );
+    expect(
+      await loadTranscriptEvents({
+        agentId: "research",
+        storePath: children.get("research")!.storePath,
+        sessionKey: "global",
+        sessionId: "research-global",
+      }),
+    ).toEqual([]);
     expect(getSubagentRunByRunId("main-1")?.requesterTurnRunId).toBe("main-turn");
     expect(getSubagentRunByRunId("research-2")?.requesterTurnRunId).toBe("research-turn");
   } finally {

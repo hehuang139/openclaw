@@ -16,9 +16,9 @@ import type { PersistedUserTurnMessage } from "../sessions/user-turn-transcript.
 import { setUserProfileRole } from "../state/user-profile-writes.worker.js";
 import { ensureProfileForEmail } from "../state/user-profiles.js";
 import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
+import { createChatInputRecovery } from "./chat-input-recovery-source.js";
 import {
   CHAT_INPUT_RECOVERY_MAX_AGE_MS,
-  createChatInputRecovery,
   readChatInputRecoveryAdmission,
   resumeChatInput,
 } from "./chat-input-recovery.js";

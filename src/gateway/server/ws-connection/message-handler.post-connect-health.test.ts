@@ -7,6 +7,7 @@ import {
   PROTOCOL_VERSION,
   validateUpdateStatusParams,
 } from "../../../../packages/gateway-protocol/src/index.js";
+import { GATEWAY_OWNER_PROFILE_ID } from "../../../../packages/gateway-protocol/src/schema/users.js";
 import { createDeferred } from "../../../../test/helpers/promise.js";
 import type { OpenClawConfig } from "../../../config/types.openclaw.js";
 import { resetDiagnosticEventsForTest } from "../../../infra/diagnostic-events.js";
@@ -417,33 +418,51 @@ describe("attachGatewayWsMessageHandler post-connect health refresh", () => {
     },
   );
 
-  it.each(["probe"])("keeps ephemeral %s connections unidentified", async (mode) => {
-    await withOpenClawTestState(
-      { label: "gateway-owner-ephemeral", prepareProfileCatalog: true },
-      async () => {
-        resolveConnectAuthStateMock.mockResolvedValueOnce({
-          authResult: { ok: true, method: "token" },
-          authOk: true,
-          authMethod: "token",
-          sharedAuthOk: true,
-        });
-        const harness = attachGatewayHarness({
-          connId: `ephemeral-${mode}`,
-          connectNonce: `nonce-${mode}`,
-        });
-        harness.sendConnect("connect", {
-          minProtocol: PROTOCOL_VERSION,
-          maxProtocol: PROTOCOL_VERSION,
-          client: { id: "gateway-client", version: "dev", platform: "test", mode },
-          role: "operator",
-          auth: { token: "owner-fixture" },
-          caps: [],
-        });
-        await waitForFast(() => expect(harness.client).not.toBeNull());
-        expect(harness.client).not.toHaveProperty("authenticatedUserProfile");
-      },
-    );
-  });
+  it.each([
+    ["cli", "token"],
+    ["backend", "token"],
+    ["probe", "token"],
+    ["probe", "none"],
+  ] as const)(
+    "keeps %s input identity independent of presence (auth: %s)",
+    async (mode, authMethod) => {
+      await withOpenClawTestState(
+        { label: "gateway-owner-ephemeral", prepareProfileCatalog: true },
+        async () => {
+          const harness = attachGatewayHarness({
+            connId: `ephemeral-${mode}`,
+            connectNonce: `nonce-${mode}`,
+            resolvedAuth: { mode: authMethod, token: "owner-fixture", allowTailscale: false },
+          });
+          harness.sendConnect("connect", {
+            minProtocol: PROTOCOL_VERSION,
+            maxProtocol: PROTOCOL_VERSION,
+            client: { id: "gateway-client", version: "dev", platform: "test", mode },
+            role: "operator",
+            ...(authMethod === "token" ? { auth: { token: "owner-fixture" } } : {}),
+            caps: [],
+          });
+          await harness.runWhenIdle();
+          expect(harness.frames).toContainEqual(
+            expect.objectContaining({ id: "connect", ok: true }),
+          );
+          if (authMethod === "token") {
+            expect(harness.client).toMatchObject({
+              authenticatedUserProfile: { profileId: GATEWAY_OWNER_PROFILE_ID },
+              connect: { scopes: [] },
+              internal: { authenticatedOperator: true, operatorRoleActor: { kind: "system" } },
+            });
+            expect(harness.registeredProfileId).toBe(GATEWAY_OWNER_PROFILE_ID);
+          } else {
+            expect(harness.client).not.toHaveProperty("authenticatedUserProfile");
+          }
+          expect(harness.client).not.toHaveProperty("authenticatedUserId");
+          expect(upsertPresenceMock).not.toHaveBeenCalled();
+          expect(prewarmGatewaySessionHistoryMock).not.toHaveBeenCalled();
+        },
+      );
+    },
+  );
 
   it("retains the watchdog through registration and holds pipelined frames until hello completion", async () => {
     const close = createCloseMock();

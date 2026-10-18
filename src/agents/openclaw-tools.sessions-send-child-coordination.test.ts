@@ -105,6 +105,7 @@ import {
   type OpenClawTestState,
 } from "../test-utils/openclaw-test-state.js";
 import { createSessionConversationTestRegistry } from "../test-utils/session-conversation-registry.js";
+import type { EmbeddedAgentQueueHandle } from "./embedded-agent-runner/run-state.js";
 import {
   clearTestEmbeddedRun as clearActiveEmbeddedRun,
   createEmbeddedRunHandle,
@@ -316,14 +317,23 @@ describe("sessions_send child coordination", () => {
         });
       await seed("steer-A", 1);
       const previous = () => getSubagentRunByRunId("steer-A")!;
-      const queueB = vi.fn(async () => {});
-      const handleB = createEmbeddedRunHandle({ runId: "steer-B", queueMessage: queueB });
+      const queueB = vi.fn<EmbeddedAgentQueueHandle["queueMessage"]>(async (_text, options) => {
+        const recorder = options?.userTurnTranscriptRecorder;
+        if (!recorder || !(await recorder.persistApproved())) {
+          throw new Error("Steering fixture did not commit the admitted guidance");
+        }
+      });
+      const handleB = createEmbeddedRunHandle({
+        runId: "steer-B",
+        queueMessage: queueB,
+        supportsTranscriptCommitWait: true,
+      });
       handleB.messageInjectionV2 = {
         version: 2,
         isAvailable: () => true,
-        queueMessage: async (_text, options, assertCurrent) => {
+        queueMessage: async (text, options, assertCurrent) => {
           assertCurrent();
-          await queueB();
+          await queueB(text, options);
           options?.onQueueAccepted?.(true);
         },
       };
@@ -362,20 +372,28 @@ describe("sessions_send child coordination", () => {
         await seed("steer-B", 2);
         setActiveEmbeddedRun(sessionId, handleB, childSessionKey);
       };
-      const queueA = vi.fn(async () => {
+      const queueA = vi.fn<EmbeddedAgentQueueHandle["queueMessage"]>(async (_text, options) => {
+        const recorder = options?.userTurnTranscriptRecorder;
+        if (!recorder || !(await recorder.persistApproved())) {
+          throw new Error("Steering fixture did not commit the admitted guidance");
+        }
         if (timing === "after completion") {
           await completePrevious(true);
         } else {
           await replace();
         }
       });
-      const handleA = createEmbeddedRunHandle({ runId: "steer-A", queueMessage: queueA });
+      const handleA = createEmbeddedRunHandle({
+        runId: "steer-A",
+        queueMessage: queueA,
+        supportsTranscriptCommitWait: true,
+      });
       handleA.messageInjectionV2 = {
         version: 2,
         isAvailable: () => true,
-        queueMessage: async (_text, options, assertCurrent) => {
+        queueMessage: async (text, options, assertCurrent) => {
           assertCurrent();
-          await queueA();
+          await queueA(text, options);
           options?.onQueueAccepted?.(true);
         },
       };
