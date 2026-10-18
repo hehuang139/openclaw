@@ -372,12 +372,17 @@ export function prepareReplyToolAuthority(
     operatorAuthority: snapshot.operatorAuthority,
   });
   const projectInput = (caller?: ReplyToolAuthorityOverlay | ReplyToolAuthorityRequester) => {
+    const incomingRequester =
+      caller && !("requesterOrigin" in caller) && caller.allowCollaborativeSteering
+        ? resolveRequesterPrincipalKey({ ...caller, messageChannel: caller.originatingChannel })
+        : undefined;
     if (
       caller &&
       !("requesterOrigin" in caller) &&
       caller.allowCollaborativeSteering &&
       requesterPrincipalKey &&
-      resolveRequesterPrincipalKey({ ...caller, messageChannel: caller.originatingChannel }) &&
+      incomingRequester &&
+      incomingRequester !== requesterPrincipalKey &&
       (!caller.inputProvenance || caller.inputProvenance.kind === "external_user") &&
       isSameReplyToolAuthorityConversation(snapshot, caller)
     ) {
@@ -579,6 +584,11 @@ export function prepareReplyToolAuthority(
     requesterPrincipalKey,
     personalToolOwner: {
       operatorAuthority: snapshot.operatorAuthority,
+      requesterOrigin: captureRequesterOrigin({
+        ...snapshot.run,
+        messageChannel: snapshot.originatingChannel,
+        operatorProfileId: snapshot.operatorAuthority?.profileId,
+      }),
       senderId: snapshot.run.senderId,
       senderName: snapshot.run.senderName,
       gatewayUiCommandTarget: snapshot.run.gatewayUiCommandTarget,
