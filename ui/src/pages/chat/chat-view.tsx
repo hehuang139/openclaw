@@ -265,6 +265,7 @@ export function ChatView(input: { props: ChatProps; application?: ApplicationCon
 }
 
 function ChatContent(input: { props: ChatProps }) {
+  let root: HTMLElement | undefined;
   const application = useOptionalApplication();
   const gateway = application && projectGateway(application.gateway);
   const skillFileHovercard = createSkillFileHovercard({
@@ -330,7 +331,7 @@ function ChatContent(input: { props: ChatProps }) {
   );
   const frame = createMemo(() => {
     questionRevision();
-    return createChatViewFrame(input.props);
+    return createChatViewFrame(input.props, () => root);
   });
   const viewProps = () => ({
     props: input.props,
@@ -364,6 +365,7 @@ function ChatContent(input: { props: ChatProps }) {
   );
   return (
     <section
+      ref={(element) => (root = element)}
       class={["chat", { "chat--bubbles": input.props.chatBubbleMode }]}
       style={
         input.props.chatMessageMaxWidth
@@ -409,6 +411,8 @@ function ChatContent(input: { props: ChatProps }) {
       <Show when={!input.props.suggestionComposer}>
         <ChatCommentController
           paneId={input.props.paneId}
+          onFocusComposer={frame().threadProps.onFocusComposer}
+          visiblePin={(id) => getTranscriptState(input.props.paneId).commentPins?.visiblePin(id)}
           props={input.props}
           disabled={!input.props.canSend}
           sessionKey={input.props.sessionKey}
