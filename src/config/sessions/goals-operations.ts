@@ -258,11 +258,11 @@ export async function mutateSessionGoal(
   }
   const resolved = captureLifecycleDatabaseScope(resolveSqliteScope(options));
   const databaseOptions = toDatabaseOptions(resolved);
-  const input = structuredClone({
+  const input = {
     sessionKey: resolved.sessionKey,
     expectedSessionId: options.expectedSessionId,
     operation: options.operation,
-  });
+  };
   return runExclusiveSqliteSessionWrite(
     resolved,
     async () => {
