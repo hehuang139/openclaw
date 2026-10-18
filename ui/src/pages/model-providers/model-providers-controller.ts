@@ -17,7 +17,6 @@ import { projectAgents, projectRuntimeConfig } from "../../lib/reactive/domain-c
 import { i18nRevision, t } from "../../lib/reactive/i18n.ts";
 import { projectSource } from "../../lib/reactive/projection.ts";
 import { UsageRefreshPolicy } from "../usage/refresh-policy.ts";
-import type { ModelAccountUsageElement } from "./account-usage.tsx";
 import {
   modelProviderConfigBusy,
   modelProviderConfigMutationBlockedReason,
@@ -61,7 +60,6 @@ export function createModelProviders(
     mutationBlockedReason() === null && !modelProviderConfigBusy(context);
   let loaderPending = false;
   let connected = false;
-  const accountUsages = new Set<ModelAccountUsageElement>();
   const state = createModelProvidersState();
   let pendingConnection = false;
   let pendingCredentialInvalidation = false;
@@ -88,9 +86,7 @@ export function createModelProviders(
     onStart: (reason) => {
       supplemental.beginCoreRefresh(reason === "forced");
       if (reason === "forced") {
-        for (const account of accountUsages) {
-          account.refreshUsage();
-        }
+        setState("accountUsageRevision", state.accountUsageRevision + 1);
       }
     },
     onComplete: ({ client, data }) => {
@@ -109,8 +105,7 @@ export function createModelProviders(
     },
   });
   const refreshPolicy = new UsageRefreshPolicy({
-    isLoading: () =>
-      loaderPending || !routeDataObserved || core.loading || supplemental.usageLoading,
+    isLoading: () => loaderPending || !routeDataObserved || core.loading || supplemental.loading,
     // Usage convergence must not restart the independent local-cost request.
     reload: () => supplemental.loadUsage(),
     onIncompleteUsageExhausted: notify,
@@ -484,7 +479,7 @@ export function createModelProviders(
   async function mutateApiKey(
     provider: string,
     configKey: string,
-    apiKey: string | null,
+    apiKey: string,
     action: "edit" | "add" = "edit",
   ) {
     const client = gateway.client;
@@ -526,14 +521,9 @@ export function createModelProviders(
         agentId: state.selectedAgentId,
         provider: configKey,
         apiKey,
-        success: t(
-          action === "add"
-            ? "modelProviders.add.saved"
-            : apiKey === null
-              ? "modelProviders.apiKey.removed"
-              : "modelProviders.apiKey.saved",
-          { provider },
-        ),
+        success: t(action === "add" ? "modelProviders.add.saved" : "modelProviders.apiKey.saved", {
+          provider,
+        }),
       },
     );
     if (!result.ok || !isCurrent()) {
@@ -618,21 +608,22 @@ export function createModelProviders(
     const props: ModelProvidersViewProps = {
       installedAgents: undefined,
       providerQuery: providerQuery(),
-      onProviderQueryChange: setProviderQuery,
       onConnectProvider: () => void login.connectProvider(values.configuredModels),
-      usageClient: !mutationBlockedReason() && usageAvailable ? gatewaySnapshot.client : null,
-      usageAgentId: state.selectedAgentId,
-      registerAccountUsage: (element) => {
-        accountUsages.add(element);
-        return () => accountUsages.delete(element);
-      },
+      accountUsage:
+        !mutationBlockedReason() && usageAvailable && gatewaySnapshot.client
+          ? {
+              client: gatewaySnapshot.client,
+              agentId: state.selectedAgentId,
+              revision: state.accountUsageRevision,
+            }
+          : null,
       connected: gatewaySnapshot.phase === "connected",
       loading: state.data === null && !rosterError && !noSelectableAgents,
       refreshing: core.loading,
       error: rosterError ?? (noSelectableAgents ? t("agents.noAgents") : data.error),
       providerUsageFailed: data.providerUsage?.ok === false,
-      supplementalLoading: loaderPending || supplemental.loading,
       updatedAt: data.updatedAt,
+      onOpenUsage: () => context.navigate("usage"),
       credentialAgentLabel: agentLabel,
       cards: noSelectableAgents ? [] : installedAgents.filterProviders(cards),
       ...values,
@@ -669,7 +660,6 @@ export function createModelProviders(
       onKeyDraftChange: (value) => setState("keyDraft", value),
       onSaveKey: (provider, configKey) =>
         void mutateApiKey(provider, configKey, state.keyDraft.trim()),
-      onRemoveKey: (provider, configKey) => void mutateApiKey(provider, configKey, null),
       onProbe: (cardId, providers) => void profileActions.probe(cardId, providers),
       onRequestLogout: (pending) => void profileActions.requestLogout(pending),
       onProfileOrderChange: (cardId, provider, profileIds) =>

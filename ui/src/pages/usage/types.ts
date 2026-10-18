@@ -84,7 +84,7 @@ type UsageFilterState = {
 
 type UsageDisplayState = {
   chartMode: "tokens" | "cost";
-  dailyChartMode: "total" | "by-type";
+  dailyChartMode: "total" | "by-type" | "by-provider";
   sessionSort: "tokens" | "cost" | "recent" | "messages" | "errors";
   sessionSortDir: "asc" | "desc";
   recentSessions: string[];

@@ -370,7 +370,7 @@ export async function preloadUsage(page: TestUsagePage): Promise<void> {
 
 export function refreshButton(page: TestUsagePage): HTMLButtonElement {
   const button = [...page.querySelectorAll<HTMLButtonElement>("button")].find(
-    (entry) => entry.textContent?.trim() === "Refresh",
+    (entry) => (entry.getAttribute("aria-label") ?? entry.textContent?.trim()) === "Refresh",
   );
   expect(button).toBeDefined();
   return button!;

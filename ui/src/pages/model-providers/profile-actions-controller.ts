@@ -13,7 +13,11 @@ import {
   modelProviderErrorMessage,
   modelProviderMutationWarnings,
 } from "./config-mutation.ts";
-import type { ModelProviderLogoutTarget, ModelProviderPendingLogout } from "./data.ts";
+import type {
+  ModelProviderLogoutTarget,
+  ModelProviderPendingLogout,
+  ModelProviderRemovalTarget,
+} from "./data.ts";
 import type { ModelProvidersData } from "./load.ts";
 import { showProfileActionError, showProfileLogoutSuccess } from "./profiles-view.tsx";
 import { updateRecordEntry } from "./record-state.ts";
@@ -135,21 +139,35 @@ export function createModelProviderProfileActions(options: ProfileActionsOptions
     // authorize a logout under a different scope.
     const controller = new AbortController();
     logoutConfirmation = controller;
+    const removing = "removeTargets" in pending;
     const confirmed = await showConfirmDialog({
-      title: t("modelProviders.logout.actionFor", { account: pending.label }),
-      message: t("modelProviders.logout.confirm", { provider: pending.label }),
-      confirmLabel: t("modelProviders.logout.action"),
+      title: removing
+        ? t("modelProviders.remove.title", { provider: pending.label })
+        : t("modelProviders.logout.actionFor", { account: pending.label }),
+      message: removing
+        ? [
+            t("modelProviders.remove.confirm", { provider: pending.label }),
+            pending.keptSource
+              ? t("modelProviders.remove.kept", { source: pending.keptSource })
+              : "",
+          ].join(" ")
+        : t("modelProviders.logout.confirm", { provider: pending.label }),
+      confirmLabel: t(removing ? "modelProviders.remove.action" : "modelProviders.logout.action"),
       danger: true,
       signal: controller.signal,
     }).finally(() => {
       logoutConfirmation = null;
     });
     if (confirmed && !controller.signal.aborted && options.canMutate()) {
-      await logout(pending.cardId, pending.target);
+      await logout(pending.cardId, removing ? pending.removeTargets : [pending.target]);
     }
   }
 
-  async function logout(cardId: string, target: ModelProviderLogoutTarget): Promise<void> {
+  /** Account targets sign out their profiles; removal targets clear a provider or its API key. */
+  async function logout(
+    cardId: string,
+    targets: Array<ModelProviderLogoutTarget | ModelProviderRemovalTarget>,
+  ): Promise<void> {
     const client = options.getClient();
     const key = `logout:${cardId}`;
     if (!client || !options.canMutate() || options.isBusy(key)) {
@@ -162,12 +180,21 @@ export function createModelProviderProfileActions(options: ProfileActionsOptions
     try {
       const result = await options.getConfig().runExternalMutation(
         async (activeClient) => {
-          const receipt = await activeClient.request<ModelAuthLogoutResult>("models.authLogout", {
-            ...target,
-            agentId,
-          });
-          invalidateModelAuthStatusRequests(activeClient);
-          return receipt;
+          const receipts: ModelAuthLogoutResult[] = [];
+          try {
+            for (const target of targets) {
+              receipts.push(
+                await activeClient.request<ModelAuthLogoutResult>("models.authLogout", {
+                  ...target,
+                  agentId,
+                }),
+              );
+            }
+          } finally {
+            invalidateModelAuthStatusRequests(activeClient);
+          }
+          const warning = receipts.flatMap((receipt) => receipt.warning ?? []).join(" ");
+          return { ...receipts.at(-1)!, ...(warning ? { warning } : {}) };
         },
         { canDispatch: () => isCurrent() && options.canMutate() },
       );

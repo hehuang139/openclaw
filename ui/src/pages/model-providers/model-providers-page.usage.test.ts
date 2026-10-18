@@ -2,7 +2,6 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createDeferred as deferred } from "../../../../test/helpers/promise.js";
-import { waitForSolid } from "../../test-helpers/solid-settle.ts";
 import { EMPTY_MODEL_PROVIDERS_DATA } from "./load.ts";
 import {
   appendPage,
@@ -11,7 +10,9 @@ import {
   createAuthStatus,
   createHarness,
   drainPageUpdates,
+  expandProvider,
   requestCount,
+  waitForProviders,
   advanceUsageRetries,
   focusDocument,
 } from "./model-providers-page.test-support.tsx";
@@ -64,26 +65,52 @@ describe("ModelProvidersPage usage convergence", () => {
       return original(method);
     });
     const page = appendPage(context);
-    await vi.waitFor(() => expect(page.renderRoot.textContent).toContain("90% left"));
+    await waitForProviders(page);
+    const openai = await expandProvider(page, "openai");
+    const anthropic = await expandProvider(page, "anthropic");
+    const limitsText = () =>
+      [...openai.querySelectorAll(".model-providers__account-limits")].map(
+        (limits) => limits.textContent,
+      );
+    await vi.waitFor(() =>
+      expect(limitsText()).toEqual([
+        expect.stringContaining("90% left"),
+        expect.stringContaining("90% left"),
+      ]),
+    );
     expect(accountRequests).toEqual([
       { agentId: "main", profileId: "openai:one" },
       { agentId: "main", profileId: "openai:two" },
     ]);
     expect(
-      page.querySelector('[data-profile-id="anthropic:one"] openclaw-model-account-usage'),
+      [...openai.querySelectorAll('.model-providers__account-limits [role="meter"]')].map((meter) =>
+        meter.getAttribute("aria-valuenow"),
+      ),
+    ).toEqual(["90", "90"]);
+    expect(
+      anthropic.querySelector('[data-profile-id="anthropic:one"] .model-providers__account-limits'),
     ).toBeNull();
     expect(
-      page.querySelector('[data-profile-id="openai:key"] openclaw-model-account-usage'),
+      openai.querySelector('[data-profile-id="openai:key"] .model-providers__account-limits'),
     ).toBeNull();
     runtimeConfig.state.configSaving = true;
     notifyRuntimeConfig();
     await page.updateComplete;
-    expect(page.renderRoot.textContent).toContain("90% left");
+    expect(limitsText()).toEqual([
+      expect.stringContaining("90% left"),
+      expect.stringContaining("90% left"),
+    ]);
     runtimeConfig.state.configSaving = false;
     notifyRuntimeConfig();
     usedPercent = 90;
     page.querySelector<HTMLButtonElement>('button[aria-label="Refresh"]')?.click();
-    await vi.waitFor(() => expect(page.renderRoot.textContent).toContain("10% left"));
+    await vi.waitFor(() =>
+      expect(limitsText()).toEqual([
+        expect.stringContaining("10% left"),
+        expect.stringContaining("10% left"),
+      ]),
+    );
+    expect(accountRequests).toHaveLength(4);
   });
 
   it("waits for the route loader before starting provider requests, including after reconnect", async () => {
@@ -106,10 +133,12 @@ describe("ModelProvidersPage usage convergence", () => {
       agentId: "main",
       data: { ...EMPTY_MODEL_PROVIDERS_DATA, updatedAt: Date.now() },
     };
-    await waitForSolid(() => expect(page.view.props.supplementalLoading).toBe(false));
+    await vi.waitFor(() => expect(requestCount(harness.request, "usage.status")).toBe(1));
+    await drainPageUpdates(page);
     expect(requestCount(harness.request, "models.authStatus")).toBe(0);
     expect(requestCount(harness.request, "usage.status")).toBe(1);
-    expect(requestCount(harness.request, "sessions.usage")).toBe(1);
+    // Local session usage belongs to the Usage page.
+    expect(requestCount(harness.request, "sessions.usage")).toBe(0);
   });
 
   it.each(["reconnect", "manual refresh"] as const)(
@@ -152,36 +181,6 @@ describe("ModelProvidersPage usage convergence", () => {
     },
   );
 
-  it("retries incomplete usage without restarting pending cost", async () => {
-    vi.useFakeTimers();
-    focusDocument();
-    const harness = createHarness("main");
-    harness.setUsageStatus({ updatedAt: 1, providers: [], refreshing: true });
-    const pendingCost = deferred<unknown>();
-    const originalRequest = harness.request.getMockImplementation()!;
-    let costSignal: AbortSignal | undefined;
-    harness.request.mockImplementation(
-      async (method: string, _params?: unknown, options?: { signal?: AbortSignal }) => {
-        if (method === "sessions.usage") {
-          costSignal = options?.signal;
-          return pendingCost.promise;
-        }
-        return originalRequest(method);
-      },
-    );
-
-    const page = appendPage(harness.context);
-    await page.updateComplete;
-    await vi.advanceTimersByTimeAsync(5_000);
-
-    expect(requestCount(harness.request, "usage.status")).toBeGreaterThan(1);
-    expect(requestCount(harness.request, "sessions.usage")).toBe(1);
-    expect(costSignal?.aborted).toBe(false);
-
-    pendingCost.resolve({ aggregates: { byProvider: [] } });
-    await waitForSolid(() => expect(page.view.props.supplementalLoading).toBe(false));
-  });
-
   it("replaces a pending pre-disconnect load before it can publish", async () => {
     const harness = createHarness("main");
     harness.setUsageStatus({ updatedAt: 1, providers: [] });
@@ -213,30 +212,19 @@ describe("ModelProvidersPage usage convergence", () => {
     );
   });
 
-  it("cancels and replaces supplemental work on forced refresh", async () => {
+  it("cancels and replaces provider usage work on forced refresh", async () => {
     const harness = createHarness("main");
     const oldUsage = deferred<unknown>();
-    const oldCost = deferred<unknown>();
     const originalRequest = harness.request.getMockImplementation()!;
     let firstUsageSignal: AbortSignal | undefined;
-    let firstCostSignal: AbortSignal | undefined;
     const replacementUsage = {
       provider: "openai",
       displayName: "OpenAI",
       windows: [{ label: "replacement", usedPercent: 25 }],
     };
     let usageCall = 0;
-    let costCall = 0;
     harness.request.mockImplementation(
       async (method: string, _params?: unknown, options?: { signal?: AbortSignal }) => {
-        if (method === "sessions.usage") {
-          costCall += 1;
-          if (costCall === 1) {
-            firstCostSignal = options?.signal;
-            return oldCost.promise;
-          }
-          return originalRequest(method);
-        }
         if (method === "usage.status") {
           usageCall += 1;
           if (usageCall === 1) {
@@ -250,38 +238,29 @@ describe("ModelProvidersPage usage convergence", () => {
     );
     const page = appendPage(harness.context);
     await vi.waitFor(() => expect(requestCount(harness.request, "usage.status")).toBe(1));
-    await vi.waitFor(() => expect(requestCount(harness.request, "sessions.usage")).toBe(1));
 
     const releaseCoreRefresh = harness.deferNextAuthStatus();
     page.view.props.onRefresh();
     expect(firstUsageSignal?.aborted).toBe(true);
-    expect(firstCostSignal?.aborted).toBe(true);
 
     oldUsage.resolve({
       updatedAt: 1,
       providers: [{ ...replacementUsage, windows: [{ label: "stale", usedPercent: 1 }] }],
     });
-    oldCost.resolve({
-      aggregates: { byProvider: [{ provider: "stale", totals: { totalCost: 1 } }] },
-    });
     await Promise.resolve();
-    expect(page.view.props.cards.every((card) => !card.usage && !card.localCost)).toBe(true);
+    expect(page.view.props.cards.every((card) => !card.usage)).toBe(true);
 
     releaseCoreRefresh();
     await drainPageUpdates(page);
 
-    await vi.waitFor(() => expect(requestCount(harness.request, "usage.status")).toBe(2));
-    await vi.waitFor(() => expect(requestCount(harness.request, "sessions.usage")).toBe(2));
     await vi.waitFor(() =>
       expect(page.view.props.cards.find((card) => card.id === "openai")?.usage).toEqual(
         replacementUsage,
       ),
     );
-    await waitForSolid(() => expect(page.view.props.supplementalLoading).toBe(false));
-    expect(page.view.props.cards.every((card) => !card.localCost)).toBe(true);
-
+    await drainPageUpdates(page);
     expect(requestCount(harness.request, "usage.status")).toBe(2);
-    expect(requestCount(harness.request, "sessions.usage")).toBe(2);
+    expect(requestCount(harness.request, "sessions.usage")).toBe(0);
     expect(page.view.props.cards.find((card) => card.id === "openai")?.usage).toEqual(
       replacementUsage,
     );

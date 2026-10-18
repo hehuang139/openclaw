@@ -135,7 +135,7 @@ describe("UsagePage cache convergence", () => {
       expect(Boolean(page.querySelector(".usage-overview-card"))).toBe(committed);
       // Badges keep their slots; uncomputed totals show placeholders, never values.
       expect(
-        [...page.querySelectorAll(".usage-header-metrics .usage-metric-badge strong")].every(
+        [...page.querySelectorAll(".usage-summary-strip .usage-metric-badge strong")].every(
           (node) => node.textContent === "—",
         ),
       ).toBe(!committed);

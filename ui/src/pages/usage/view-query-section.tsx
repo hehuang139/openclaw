@@ -73,10 +73,10 @@ export function UsageQuerySection(props: {
             ? undefined
             : props.hasQuery
               ? t("usage.query.matching", {
-                  shown: String(props.matchingSessions),
-                  total: String(props.totalSessions),
+                  shown: props.matchingSessions.toLocaleString(),
+                  total: props.totalSessions.toLocaleString(),
                 })
-              : t("usage.query.inRange", { total: String(props.totalSessions) })}
+              : t("usage.query.inRange", { total: props.totalSessions.toLocaleString() })}
         </span>
       </div>
       {props.queryTerms.length > 0 ? (

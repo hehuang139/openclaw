@@ -74,7 +74,7 @@ export function createUsagePage(context: ApplicationContext) {
   const [presentation, setPresentation] = createStore<UsagePresentation>({
     display: {
       chartMode: "tokens",
-      dailyChartMode: "by-type",
+      dailyChartMode: "by-provider",
       contextExpanded: false,
       headerPinned: false,
     },
