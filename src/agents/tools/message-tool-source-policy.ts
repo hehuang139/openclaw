@@ -34,13 +34,15 @@ function sourceReplyPolicyError(message: string): MessageActionDeniedError {
     "message-source-reply:current-conversation",
   );
 }
-// Arguments a source-bound completion reply may carry; anything else could retarget it.
+// Content uses normal outbound validation; routing stays bound to the source.
 const SOURCE_REPLY_ONLY_ARG_NAMES = new Set([
   "action",
   "channel",
   "target",
   "accountId",
   "message",
+  "media",
+  "attachments",
   "replyTo",
   "threadId",
   "to",
@@ -59,12 +61,9 @@ export function addSourceReplyFinalControl(schema: TObject): TObject {
 }
 
 export function enforceSourceReplyOnlyTextDirectives(args: Record<string, unknown>): void {
-  if (typeof args.message !== "string" || !args.message.trim()) {
-    throw sourceReplyPolicyError("Completion source replies require non-empty visible text.");
-  }
-  // Use the outbound owner's parser: sanitization can assemble directives that
-  // change routes, attach local files, or deliver audio.
-  const message = normalizeEscapedLineBreaksForVisibleText(args.message);
+  // Reject reply/audio directives even when outbound sanitization assembles them.
+  const text = readToolStringParam(args, "message") ?? "";
+  const message = normalizeEscapedLineBreaksForVisibleText(text);
   const withoutCitationMarkers = stripUnsupportedCitationControlMarkers(message);
   for (const normalized of new Set([
     message,
@@ -72,8 +71,8 @@ export function enforceSourceReplyOnlyTextDirectives(args: Record<string, unknow
     stripPlainTextToolCallBlocks(withoutCitationMarkers),
   ])) {
     const directives = parseReplyDirectives(normalized, { extractMarkdownImages: true });
-    if (directives.replyToTag || directives.audioAsVoice || directives.mediaUrls?.length) {
-      throw sourceReplyPolicyError("Completion source replies cannot contain non-text directives.");
+    if (directives.replyToTag || directives.audioAsVoice) {
+      throw sourceReplyPolicyError("Completion source replies cannot use reply/audio directives.");
     }
   }
 }
