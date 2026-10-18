@@ -1,7 +1,8 @@
-import { createEffect, createSignal, onCleanup, Show, untrack } from "solid-js";
+import { createMemo, onCleanup, Show } from "solid-js";
 import { SessionProgressCard } from "../../../components/session-progress-card-solid.tsx";
 import { PRESENTATION_CHANGED_EVENT } from "../../../lib/presentation.ts";
 import { listen } from "../../../lib/reactive/listener.ts";
+import { projectSource } from "../../../lib/reactive/projection.ts";
 import { renderChatQueueSolid as ChatQueue } from "./chat-composer-queue.tsx";
 import { isChatRunWorking } from "./chat-composer-state.ts";
 import type { ChatComposerProps, ChatComposerState } from "./chat-composer-types.ts";
@@ -30,26 +31,20 @@ export function ComposerInputScope(props: {
   state: ChatComposerState;
   children: import("@solidjs/web").JSX.Element;
 }) {
-  const state = untrack(() => props.state);
-  onCleanup(() => {
-    state.composerInputRef?.();
-  });
-  return untrack(() => props.children);
+  onCleanup(() => props.state.composerInputRef?.());
+  return <>{props.children}</>;
 }
 
 export function ComposerProgress(view: { composer: ChatComposerProps; shown: boolean }) {
-  const [revision, setRevision] = createSignal(0);
-  createEffect(
-    () => view.composer.progressCardVisibility,
-    (binding) =>
-      binding
-        ? listen(binding.owner, PRESENTATION_CHANGED_EVENT, () => setRevision((value) => value + 1))
-        : undefined,
+  const visibility = createMemo(() =>
+    projectSource(view.composer.progressCardVisibility, {
+      read: (binding) => binding?.isPresented() ?? true,
+      subscribe: (binding, notify) =>
+        binding ? listen(binding.owner, PRESENTATION_CHANGED_EVENT, notify) : () => {},
+      equality: Object.is,
+    }),
   );
-  const presented = () => {
-    revision();
-    return view.composer.progressCardVisibility?.isPresented() ?? true;
-  };
+  const presented = () => visibility().read();
   return (
     <Show
       when={presented() && Boolean(view.composer.progressCard)}

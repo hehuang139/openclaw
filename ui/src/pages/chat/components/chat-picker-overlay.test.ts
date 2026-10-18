@@ -13,6 +13,7 @@ import "../../../components/modal-dialog.ts";
 import {
   createChatPickerOverlay,
   installChatComposerPickerDismissal,
+  registerChatComposerInvocationMenu,
 } from "./chat-picker-overlay.ts";
 
 function bindPicker(details: HTMLDetailsElement): void {
@@ -20,8 +21,26 @@ function bindPicker(details: HTMLDetailsElement): void {
     onTestFinished(dispose);
     return createChatPickerOverlay();
   });
-  bind(details);
+  bind.details(details);
+  bind.trigger(details.querySelector("summary")!);
+  bind.surface(details.querySelector<HTMLElement>("[data-anchored-overlay]")!);
+  details.addEventListener("click", bind.onClick);
+  details.addEventListener("toggle", bind.onToggle);
+  onTestFinished(() => {
+    details.removeEventListener("click", bind.onClick);
+    details.removeEventListener("toggle", bind.onToggle);
+  });
   flush();
+}
+
+function registerInvocations(...composers: HTMLElement[]) {
+  for (const composer of composers) {
+    for (const menu of composer.querySelectorAll<HTMLElement>(".slash-menu, .skill-menu")) {
+      onTestFinished(
+        registerChatComposerInvocationMenu(menu, () => composer.querySelector("textarea")),
+      );
+    }
+  }
 }
 
 describe("chat picker overlay", () => {
@@ -48,6 +67,7 @@ describe("chat picker overlay", () => {
     invocationMenu.className = "slash-menu";
     composer.append(picker, invocationMenu);
     document.body.append(composer);
+    registerInvocations(composer);
     bindPicker(picker);
     await tooltip.updateComplete;
     const dismissInvocations = vi.fn();
@@ -124,6 +144,7 @@ describe("chat picker overlay", () => {
       nativeComposer.className = "agent-chat__input";
       nativeComposer.innerHTML = markup;
       document.body.append(invocationComposer, nativeComposer);
+      registerInvocations(invocationComposer, nativeComposer);
       const dismissInvocations = vi.fn();
       invocationComposer.addEventListener(
         "openclaw-composer-dismiss-invocations",
@@ -170,6 +191,7 @@ describe("chat picker overlay", () => {
       '<summary>Model</summary><div data-anchored-overlay popover="manual"><input data-chat-model-search></div>';
     composer.append(picker);
     document.body.append(composer);
+    registerInvocations(composer);
     onTestFinished(installChatComposerPickerDismissal(document));
     bindPicker(picker);
     const trigger = picker.querySelector("summary")!;
@@ -207,6 +229,7 @@ describe("chat picker overlay", () => {
     composer.innerHTML =
       '<div class="agent-chat__composer-combobox"><textarea></textarea></div><div class="slash-menu"></div>';
     document.body.append(composer);
+    registerInvocations(composer);
     const textarea = composer.querySelector("textarea")!;
     textarea.focus();
     const dismissInvocations = vi.fn();
@@ -253,6 +276,7 @@ describe("chat picker overlay", () => {
     composer.innerHTML =
       '<div class="agent-chat__composer-combobox"><textarea></textarea></div><div class="slash-menu"></div>';
     document.body.append(composer);
+    registerInvocations(composer);
     const dismissInvocations = vi.fn();
     composer.addEventListener("openclaw-composer-dismiss-invocations", dismissInvocations);
     const pointerOutside = () =>
@@ -312,6 +336,7 @@ describe("chat picker overlay", () => {
     picker.append(trigger, surface);
     composer.append(picker);
     document.body.append(composer);
+    registerInvocations(composer);
     picker.open = true;
     onTestFinished(installChatComposerPickerDismissal(document));
     bindPicker(picker);
@@ -361,6 +386,7 @@ describe("chat picker overlay", () => {
     settings.append(modelPicker, effortPicker);
     composer.append(settings);
     document.body.append(composer);
+    registerInvocations(composer);
 
     effortPicker.open = true;
     bindPicker(effortPicker);
