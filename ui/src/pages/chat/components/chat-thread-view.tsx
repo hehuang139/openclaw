@@ -19,6 +19,7 @@ import {
   anchorFromNavigationEvent,
   shouldHandleNavigationClick,
 } from "../../../lib/navigation-click.ts";
+import { elementRef } from "../../../lib/reactive/element-ref.ts";
 import { t } from "../../../lib/reactive/i18n.ts";
 import { listen } from "../../../lib/reactive/listener.ts";
 import { createParkedProjection } from "../../../lib/reactive/parked-projection.ts";
@@ -61,7 +62,9 @@ export function ChatThread(input: { props: ChatThreadProps; transcript: ChatTran
   const historyIntent = (event: Event) => input.props.onHistoryIntent?.(event);
   let stopHistory: (() => void)[] = [];
   // Retained transcript roots can settle before refs; bind native input at the ref.
-  onCleanup(() => stopHistory.forEach((stop) => stop()));
+  onCleanup(() => {
+    stopHistory.forEach((stop) => stop());
+  });
   const paneId = createMemo(() => input.props.paneId);
   const search = createMemo(() =>
     projectOwner(getTranscriptState(paneId()).search, (owner) => owner.snapshot, Object.is),
@@ -141,7 +144,9 @@ export function ChatThread(input: { props: ChatThreadProps; transcript: ChatTran
           height: CHAT_HISTORY_BOUNDARY_HEIGHT_PX,
         }
       : null;
-  const historySentinel = <div class="chat-history-sentinel" />;
+  const historySentinel = (
+    <div class="chat-history-sentinel" ref={[elementRef(input.props.onHistorySentinelRef)]} />
+  );
   const sentinel = () => (input.props.historyPagination ? historySentinel : undefined);
   const contents = createMemo(() => {
     if (routeLoading()) {
@@ -243,6 +248,7 @@ export function ChatThread(input: { props: ChatThreadProps; transcript: ChatTran
         onPointerUp={(event) => handleTranscriptPointerUp(event, input.props)}
       >
         <span
+          ref={[elementRef(input.props.onTranscriptAnnouncementRef)]}
           class="chat-transcript-announcement sr-only"
           role="status"
           aria-live={input.props.announceTranscript !== false ? "polite" : "off"}

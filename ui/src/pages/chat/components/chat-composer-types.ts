@@ -73,6 +73,7 @@ export type ChatComposerDisabledBanner = {
 
 export type ChatComposerProps = ChatAttachmentControlsProps & {
   paneId: string;
+  onComposerShellRef?: (element: HTMLElement) => void | (() => void);
   sessionKey: string;
   currentAgentId: string;
   /** Provisional/deleted previews must not mount session-scoped extension controllers. */
