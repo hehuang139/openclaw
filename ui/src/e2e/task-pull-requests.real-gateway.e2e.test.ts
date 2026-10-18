@@ -427,8 +427,12 @@ suite.define(() => {
       },
       close: () =>
         runQaGatewayFixture(
-          () => proxy?.close(),
-          () => gateway?.close({ reason: "task PR proof cleanup" }),
+          async () => {
+            await proxy?.close();
+          },
+          async () => {
+            await gateway?.close({ reason: "task PR proof cleanup" });
+          },
           () => restoreFetch?.(),
         ),
       release: async () => state?.cleanup(),

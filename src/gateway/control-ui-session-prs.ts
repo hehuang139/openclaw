@@ -477,6 +477,9 @@ export async function loadControlUiSessionPullRequests(
         rateLimited: false,
         status: "unavailable" as const,
       }));
+  if (!deps.read.target.taskReceiptsOnly) {
+    deps.read.onBranchRead?.(branch);
+  }
   const task = await readTaskPullRequestReceipts(
     {
       ...deps.read.target.taskReceipts,

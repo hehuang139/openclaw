@@ -6,6 +6,7 @@ import { roleScopesAllow } from "../shared/operator-scope-compat.js";
 import type { TaskPublicationRead } from "../state/github-publication-task-reads.worker.js";
 import { readUserProfileAliasRevision } from "../state/user-profile-events.js";
 import { readResidentUserProfileId } from "../state/user-profile-list.js";
+import type { ControlUiSessionPullRequests } from "./control-ui-contract.js";
 import { selectTaskPublicationSessions } from "./control-ui-session-task-prs.js";
 import { parseGitHubRemoteUrl } from "./github-remote.js";
 import { hasCurrentGatewayOperatorAccess } from "./operator-access-policy.js";
@@ -54,6 +55,7 @@ export type ControlUiSessionPrReadContext = {
   sourceIdentity: string;
   // Internal consumers can inspect all fetched PRs without expanding the UI.
   projection?: "publication";
+  onBranchRead?: (snapshot: ControlUiSessionPullRequests) => void;
   assertCurrent: () => void;
 };
 

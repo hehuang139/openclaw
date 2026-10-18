@@ -1,4 +1,3 @@
-import { sql } from "kysely";
 import { executeSqliteQuerySync, getNodeSqliteKysely } from "../infra/kysely-sync.js";
 import type { EngineConnection } from "../infra/sql-connection.js";
 import { tableExists } from "./openclaw-state-db-schema-helpers.js";
@@ -20,18 +19,18 @@ export type TaskPublicationRead = {
 export function readTaskPublicationReceipts(db: EngineConnection, input: TaskPublicationRead) {
   const query = getNodeSqliteKysely<DB>(db);
   let receipts = query
-    .selectNoFrom([
-      sql<string>`''`.as("session_key"),
-      sql<string>`''`.as("agent_id"),
-      sql<string>`''`.as("session_id"),
-      sql<string | null>`null`.as("pull_request_url"),
-      sql<string>`''`.as("branch"),
-      sql<string | null>`null`.as("title"),
-      sql<number>`0`.as("updated_at_ms"),
-      sql<string>`''`.as("request_id"),
-      sql<string | null>`null`.as("lifecycle_revision"),
+    .selectNoFrom((eb) => [
+      eb.val("").as("session_key"),
+      eb.val("").as("agent_id"),
+      eb.val("").as("session_id"),
+      eb.val<string | null>(null).as("pull_request_url"),
+      eb.val("").as("branch"),
+      eb.val<string | null>(null).as("title"),
+      eb.val(0).as("updated_at_ms"),
+      eb.val("").as("request_id"),
+      eb.val<string | null>(null).as("lifecycle_revision"),
     ])
-    .where(sql<boolean>`false`);
+    .where((eb) => eb.val(1), "=", 0);
   const sessionIds = input.sessions.map((session) => session.sessionId);
   if (sessionIds.length === 0) {
     return { receipts: [], count: 0, branchMatchCount: 0 };
@@ -64,17 +63,23 @@ export function readTaskPublicationReceipts(db: EngineConnection, input: TaskPub
       .where("pull_request_url", "is not", null)
       .where("session_id", "in", sessionIds);
     if (table === "github_personal_publication_requests") {
-      selection = selection.where(sql.ref("owner_profile_id"), "=", input.ownerProfileId!);
+      selection = selection.where("owner_profile_id", "=", input.ownerProfileId!);
     }
     receipts = receipts.unionAll(
-      selection.select(
+      selection.select((eb) =>
         lifecycle
-          ? sql<
-              string | null
-            >`(SELECT lifecycle_revision FROM github_publication_session_lifecycles l WHERE l.request_id = ${sql.ref(table + ".request_id")} AND l.publication_kind = ${table === "github_publication_requests" ? "shared" : "personal"})`.as(
-              "lifecycle_revision",
-            )
-          : sql<string | null>`null`.as("lifecycle_revision"),
+          ? eb
+              .selectFrom("github_publication_session_lifecycles as l")
+              .select("l.lifecycle_revision")
+              .whereRef("l.request_id", "=", `${table}.request_id`)
+              .where(
+                "l.publication_kind",
+                "=",
+                table === "github_publication_requests" ? "shared" : "personal",
+              )
+              .$asScalar()
+              .as("lifecycle_revision")
+          : eb.val<string | null>(null).as("lifecycle_revision"),
       ),
     );
   }
@@ -110,6 +115,7 @@ export function readTaskPublicationReceipts(db: EngineConnection, input: TaskPub
     .with("receipts", () => receipts)
     .selectFrom("receipts")
     .selectAll()
+    .select((eb) => eb.fn<string>("lower", ["pull_request_url"]).as("canonical_url"))
     .where((eb) =>
       eb.or(
         input.sessions.map((session) =>
@@ -132,10 +138,16 @@ export function readTaskPublicationReceipts(db: EngineConnection, input: TaskPub
     .with("selected", () => selected)
     .selectFrom("selected")
     .selectAll()
-    .select(
-      sql<number>`row_number() over (partition by lower(pull_request_url) order by updated_at_ms desc, request_id desc)`.as(
-        "rank",
-      ),
+    .select((eb) =>
+      eb.fn
+        .agg<number>("row_number", [])
+        .over((window) =>
+          window
+            .partitionBy("canonical_url")
+            .orderBy("updated_at_ms", "desc")
+            .orderBy("request_id", "desc"),
+        )
+        .as("rank"),
     );
   const rows = executeSqliteQuerySync(
     db,
@@ -143,13 +155,25 @@ export function readTaskPublicationReceipts(db: EngineConnection, input: TaskPub
       .with("ranked", () => ranked)
       .selectFrom("ranked")
       .select(["session_key", "agent_id", "pull_request_url", "branch", "title"])
-      .select(sql<number>`count(*) over ()`.as("total"))
-      .select(
+      .select((eb) => eb.fn.countAll<number>().over().as("total"))
+      .select((eb) =>
         input.branchUrls?.length
-          ? sql<number>`sum(case when lower(pull_request_url) in (${sql.join(input.branchUrls.map((url) => url.toLowerCase()))}) then 1 else 0 end) over ()`.as(
-              "branch_matches",
-            )
-          : sql<number>`0`.as("branch_matches"),
+          ? eb.fn
+              .sum<number>(
+                eb
+                  .case()
+                  .when(
+                    eb.fn<string>("lower", ["pull_request_url"]),
+                    "in",
+                    input.branchUrls.map((url) => url.toLowerCase()),
+                  )
+                  .then(1)
+                  .else(0)
+                  .end(),
+              )
+              .over()
+              .as("branch_matches")
+          : eb.val(0).as("branch_matches"),
       )
       .where("rank", "=", 1)
       .orderBy("updated_at_ms", "desc")
