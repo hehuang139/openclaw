@@ -94,6 +94,8 @@ it.each(["none", "middleware", "handler"] as const)(
     );
 
     const requests: Array<{ method: string; payload: Record<string, unknown> }> = [];
+    const callbackRequests = () =>
+      requests.filter(({ method }) => method === "answerCallbackQuery");
     const runtimeErrors: unknown[] = [];
     let menu: Message.TextMessage | undefined;
     let heldMenuResponse: ServerResponse | undefined;
@@ -102,6 +104,16 @@ it.each(["none", "middleware", "handler"] as const)(
     const sendResult = (response: ServerResponse, result: unknown) => {
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify({ ok: true, result }));
+    };
+    const failAnswer = (response: ServerResponse) => {
+      response.writeHead(503, { "content-type": "application/json" });
+      response.end(JSON.stringify({ ok: false, error_code: 503, description: "ACK unavailable" }));
+    };
+    const releaseHeldAnswers = () => {
+      releaseAnswers = true;
+      for (const response of heldAnswerResponses.splice(0)) {
+        sendResult(response, true);
+      }
     };
     const server = createServer((request, response) => {
       void (async () => {
@@ -116,12 +128,9 @@ it.each(["none", "middleware", "handler"] as const)(
         const method = request.url?.split("/").at(-1) ?? "";
         requests.push({ method, payload });
         if (method === "answerCallbackQuery" && !releaseAnswers) {
-          const answerCount = requests.filter((entry) => entry.method === method).length;
+          const answerCount = callbackRequests().length;
           if (recovery === "middleware" && answerCount === 1) {
-            response.writeHead(503, { "content-type": "application/json" });
-            response.end(
-              JSON.stringify({ ok: false, error_code: 503, description: "ACK unavailable" }),
-            );
+            failAnswer(response);
           } else {
             heldAnswerResponses.push(response);
           }
@@ -179,6 +188,14 @@ it.each(["none", "middleware", "handler"] as const)(
         },
       });
       const answerRequests = vi.spyOn(bot.api, "answerCallbackQuery");
+      const expectAdmissionConsumed = () => {
+        expect(
+          callbackQueryAnswerState.takeTelegramCallbackQueryAdmissionAnswer(
+            bot,
+            "native-menu-callback",
+          ),
+        ).toBeUndefined();
+      };
       monitor = createTelegramTransportIngressMonitor({
         stateDir,
         bot,
@@ -222,11 +239,10 @@ it.each(["none", "middleware", "handler"] as const)(
         },
       };
       await monitor.admit(callbackUpdate);
-      await vi.waitFor(
-        () =>
-          expect(requests.filter(({ method }) => method === "answerCallbackQuery")).toHaveLength(1),
-        { timeout: 1_000, interval: 10 },
-      );
+      await vi.waitFor(() => expect(callbackRequests()).toHaveLength(1), {
+        timeout: 1_000,
+        interval: 10,
+      });
       expect(await queue.listClaims()).toHaveLength(1);
       expect(await queue.listPending({ limit: "all" })).toHaveLength(1);
       expect(downstream).not.toHaveBeenCalled();
@@ -244,28 +260,16 @@ it.each(["none", "middleware", "handler"] as const)(
         if (recovery === "handler") {
           const firstResponse = heldAnswerResponses.shift();
           expect(firstResponse).toBeDefined();
-          firstResponse!.writeHead(503, { "content-type": "application/json" });
-          firstResponse!.end(
-            JSON.stringify({ ok: false, error_code: 503, description: "ACK unavailable" }),
-          );
+          failAnswer(firstResponse!);
         }
         await vi.waitFor(() => expect(answerRequests).toHaveBeenCalledTimes(2), { interval: 10 });
         await vi.waitFor(() => expect(heldAnswerResponses).toHaveLength(1), { interval: 10 });
         await monitor.admit(callbackUpdate);
         await monitor.admit(callbackUpdate);
-        releaseAnswers = true;
-        for (const response of heldAnswerResponses.splice(0)) {
-          sendResult(response, true);
-        }
+        releaseHeldAnswers();
         await Promise.allSettled(answerRequests.mock.results.map((result) => result.value));
-        const callbackRequests = requests.filter(({ method }) => method === "answerCallbackQuery");
-        expect(callbackRequests).toHaveLength(2);
-        expect(
-          callbackQueryAnswerState.takeTelegramCallbackQueryAdmissionAnswer(
-            bot,
-            "native-menu-callback",
-          ),
-        ).toBeUndefined();
+        expect(callbackRequests()).toHaveLength(2);
+        expectAdmissionConsumed();
       }
       if (heldMenuResponse) {
         sendResult(heldMenuResponse, menu);
@@ -274,30 +278,18 @@ it.each(["none", "middleware", "handler"] as const)(
       await monitor.waitForIdle();
       expect(downstream).toHaveBeenCalledOnce();
 
-      const completedAnswerCount = requests.filter(
-        ({ method }) => method === "answerCallbackQuery",
-      ).length;
+      const completedAnswerCount = callbackRequests().length;
       releaseAnswers = false;
       await monitor.admit(callbackUpdate);
       await vi.waitFor(() => expect(heldAnswerResponses).toHaveLength(1), { interval: 10 });
       await monitor.admit(callbackUpdate);
       await monitor.admit(callbackUpdate);
-      releaseAnswers = true;
-      for (const response of heldAnswerResponses.splice(0)) {
-        sendResult(response, true);
-      }
+      releaseHeldAnswers();
       await Promise.allSettled(answerRequests.mock.results.map((result) => result.value));
       await monitor.waitForIdle();
-      expect(requests.filter(({ method }) => method === "answerCallbackQuery")).toHaveLength(
-        completedAnswerCount + 1,
-      );
+      expect(callbackRequests()).toHaveLength(completedAnswerCount + 1);
       expect(downstream).toHaveBeenCalledOnce();
-      expect(
-        callbackQueryAnswerState.takeTelegramCallbackQueryAdmissionAnswer(
-          bot,
-          "native-menu-callback",
-        ),
-      ).toBeUndefined();
+      expectAdmissionConsumed();
     } finally {
       releaseAnswers = true;
       for (const response of heldAnswerResponses) {

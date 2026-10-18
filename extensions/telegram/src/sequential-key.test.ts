@@ -1,4 +1,3 @@
-// Telegram tests cover sequential key plugin behavior.
 import type { Chat, Message } from "grammy/types";
 import { describe, expect, it } from "vitest";
 import { buildTelegramApprovalCallbackData } from "./approval-callback-data.js";
@@ -14,6 +13,18 @@ const mockMessage = (message: Pick<Message, "chat"> & Partial<Message>): Message
     date: 0,
     ...message,
   }) as Message;
+const forumMessage = (text: string) =>
+  mockMessage({
+    chat: mockChat({ id: -100, type: "supergroup", is_forum: true }),
+    is_topic_message: true,
+    message_thread_id: 5907,
+    text,
+  });
+const groupMessage = (id: number, extra: Partial<Message> = {}) =>
+  mockMessage({ chat: mockChat({ id, type: "supergroup" }), ...extra });
+const callback = (id: number, data: string) => ({
+  update: { callback_query: { message: mockMessage({ chat: mockChat({ id }) }), data } },
+});
 
 describe("getTelegramSequentialKey", () => {
   it.each([
@@ -30,24 +41,14 @@ describe("getTelegramSequentialKey", () => {
     [
       {
         me: { username: "openclaw_bot" } as never,
-        message: mockMessage({
-          chat: mockChat({ id: -100, type: "supergroup", is_forum: true }),
-          is_topic_message: true,
-          message_thread_id: 5907,
-          text: "/stop@some_other_bot",
-        }),
+        message: forumMessage("/stop@some_other_bot"),
       },
       "telegram:-100:topic:5907",
     ],
     [
       {
         me: { username: "openclaw_bot" } as never,
-        message: mockMessage({
-          chat: mockChat({ id: -100, type: "supergroup", is_forum: true }),
-          is_topic_message: true,
-          message_thread_id: 5907,
-          text: "/stop@openclaw_bot!",
-        }),
+        message: forumMessage("/stop@openclaw_bot!"),
       },
       "telegram:-100:control",
     ],
@@ -62,48 +63,24 @@ describe("getTelegramSequentialKey", () => {
       },
       "telegram:123:control",
     ],
-    [
-      {
-        message: mockMessage({
-          chat: mockChat({ id: -100, type: "supergroup", is_forum: true }),
-          is_topic_message: true,
-          message_thread_id: 202,
-          text: "/new sync tars",
-        }),
-      },
-      "telegram:-100:topic:202",
-    ],
+    [{ message: forumMessage("/new sync tars") }, "telegram:-100:topic:5907"],
     [
       { message: mockMessage({ chat: mockChat({ id: 123 }), text: "/btw what is the time?" }) },
       "telegram:123:btw:1",
     ],
     [
-      {
-        update: {
-          callback_query: {
-            message: mockMessage({ chat: mockChat({ id: 654 }) }),
-            data: buildTelegramApprovalCallbackData({
-              type: "approval",
-              approvalKind: "plugin",
-              approvalId: "signed-approval",
-              decision: "allow-once",
-            }),
-          },
-        },
-      },
+      callback(
+        654,
+        buildTelegramApprovalCallbackData({
+          type: "approval",
+          approvalKind: "plugin",
+          approvalId: "signed-approval",
+          decision: "allow-once",
+        }),
+      ),
       "telegram:654:approval",
     ],
-    [
-      {
-        update: {
-          callback_query: {
-            message: mockMessage({ chat: mockChat({ id: 321 }) }),
-            data: "tgq1:ask_0123456789abcdef0123456789abcdef:2",
-          },
-        },
-      },
-      "telegram:321:question",
-    ],
+    [callback(321, "tgq1:ask_0123456789abcdef0123456789abcdef:2"), "telegram:321:question"],
   ])("resolves key %#", (input, expected) => {
     expect(getTelegramSequentialKey(input)).toEqual(expected);
   });
@@ -114,8 +91,6 @@ describe("getTelegramSequentialKey", () => {
 
   describe("forum flag cache fallback", () => {
     it("uses cached forum flag to assign topic:1 lane when payload lacks is_forum and is_topic_message", async () => {
-      // Prime the cache the way bot-message-context does: resolveTelegramForumFlag
-      // calls cacheTelegramForumFlag internally when the hint is available.
       await resolveTelegramForumFlag({
         chatId: -9001,
         chatType: "supergroup",
@@ -123,24 +98,13 @@ describe("getTelegramSequentialKey", () => {
         isForum: true,
       });
 
-      // General topic message: no is_forum, no is_topic_message, no message_thread_id.
-      // Without the cache, getTelegramSequentialKey returns the base lane.
-      // With the cache primed, it must return topic:1.
-      const generalTopicCtx = {
-        message: mockMessage({
-          chat: mockChat({ id: -9001, type: "supergroup" }),
-        }),
-      };
-      expect(getTelegramSequentialKey(generalTopicCtx)).toBe("telegram:-9001:topic:1");
+      expect(getTelegramSequentialKey({ message: groupMessage(-9001) })).toBe(
+        "telegram:-9001:topic:1",
+      );
     });
 
     it("falls back to base lane when cache is empty and payload lacks is_forum hint", () => {
-      const ctx = {
-        message: mockMessage({
-          chat: mockChat({ id: -9002, type: "supergroup" }),
-        }),
-      };
-      expect(getTelegramSequentialKey(ctx)).toBe("telegram:-9002");
+      expect(getTelegramSequentialKey({ message: groupMessage(-9002) })).toBe("telegram:-9002");
     });
 
     it("honors an explicit forum hint when the cached flag is stale", async () => {
@@ -151,13 +115,11 @@ describe("getTelegramSequentialKey", () => {
         isForum: false,
       });
 
-      const ctx = {
-        message: mockMessage({
-          chat: mockChat({ id: -9004, type: "supergroup" }),
-          is_topic_message: true,
+      expect(
+        getTelegramSequentialKey({
+          message: groupMessage(-9004, { is_topic_message: true }),
         }),
-      };
-      expect(getTelegramSequentialKey(ctx)).toBe("telegram:-9004:topic:1");
+      ).toBe("telegram:-9004:topic:1");
     });
   });
 });
@@ -176,30 +138,21 @@ describe("getTelegramSequentialConstraints", () => {
       is_topic_message: true,
     });
     const expected = "telegram:-1002:message:77";
-    const reaction = {
+    const reaction = (message_id: number) => ({
       update: {
         message_reaction: {
           chat: { id: -1002, type: "supergroup", is_direct_messages: true },
-          message_id: 77,
+          message_id,
         },
       },
-    };
+    });
 
     expect(getTelegramSequentialConstraints({ message })).toEqual([
       "telegram:-1002:topic:9",
       expected,
     ]);
-    expect(getTelegramSequentialConstraints(reaction)).toBe(expected);
-    expect(
-      getTelegramSequentialConstraints({
-        update: {
-          message_reaction: {
-            chat: { id: -1002, type: "supergroup", is_direct_messages: true },
-            message_id: 78,
-          },
-        },
-      }),
-    ).toBe("telegram:-1002:message:78");
+    expect(getTelegramSequentialConstraints(reaction(77))).toBe(expected);
+    expect(getTelegramSequentialConstraints(reaction(78))).toBe("telegram:-1002:message:78");
   });
 
   it("does not add a bridge lane outside forum chats", () => {
