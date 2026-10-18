@@ -24,7 +24,6 @@ import { createParkedProjection } from "../../lib/reactive/parked-projection.ts"
 import { projectOwner, projectSource } from "../../lib/reactive/projection.ts";
 import { projectTheme } from "../../lib/reactive/theme.ts";
 import { useVisiblePoll } from "../../lib/reactive/visible-poll.ts";
-import { sessionProgressCardsForGateway } from "../../lib/session-progress-cards.ts";
 import { parseAgentSessionKey } from "../../lib/sessions/session-key.ts";
 import { ChatComposerCapabilityDialogs } from "./chat-composer-capability-host.tsx";
 import { projectChatFields } from "./chat-field-projection.ts";
@@ -126,7 +125,8 @@ export function createChatPaneView(runtime: ChatPaneRuntime) {
     void waitForCommit();
     focusPending ||= runtime.focusComposer !== previousFocusComposer;
     previousFocusComposer = runtime.focusComposer;
-    runtime.chatState.prepareRender();
+    // Other source frames may show a buffered stream before its normal RAF publishes it.
+    runtime.chatState.captureRenderChanges();
     // Target/activation checks make reconciliation idempotent; apply layout before sampling it.
     runtime.synchronizeInputs({});
   }
@@ -198,24 +198,22 @@ export function createChatPaneView(runtime: ChatPaneRuntime) {
     });
     runtime.mountPanelActions();
     runtime.mountToolIcons(() => gateway.read().snapshot);
-    const progressScope = createMemo(
-      () => {
+    // Seed the owner from its synchronous scope; equal first reads must not replace its source.
+    const initialProgressScope = runtime.readProgressCardScope();
+    const progressScope = createMemo<ReturnType<ChatPaneRuntime["readProgressCardScope"]>>(
+      (previous = initialProgressScope) => {
         gateway.read();
-        return runtime.readProgressCardScope();
-      },
-      {
-        equals: (a, b) =>
-          a.store === b.store &&
-          a.client === b.client &&
-          a.hello === b.hello &&
-          a.target?.sessionKey === b.target?.sessionKey &&
-          a.target?.agentId === b.target?.agentId,
+        const next = runtime.readProgressCardScope();
+        return previous.store === next.store &&
+          previous.client === next.client &&
+          previous.hello === next.hello &&
+          previous.target?.sessionKey === next.target?.sessionKey &&
+          previous.target?.agentId === next.target?.agentId
+          ? previous
+          : next;
       },
     );
-    const progress = projectProgressCard({
-      store: sessionProgressCardsForGateway(context.gateway),
-      target: undefined,
-    });
+    const progress = projectProgressCard(initialProgressScope);
     const cacheProgress = () => {
       const { target, store, options } = runtime.readProgressCardScope();
       if (target && options.admitAutomaticRead()) {
