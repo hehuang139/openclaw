@@ -322,7 +322,12 @@ export async function persistSessionSystemPrompt(
     return;
   }
   const previous = state.systemPrompt;
-  const toolSurface = state.pendingToolSurface ?? state.toolSurface;
+  // A pin belongs to one route and history; compaction or a route change retires it.
+  const candidate = state.pendingToolSurface ?? state.toolSurface;
+  const toolSurface =
+    candidate?.routeKey === snapshot.routeKey && candidate.historyId === snapshot.historyId
+      ? candidate
+      : undefined;
   if (
     state.pendingToolSurface ||
     snapshot.restart ||

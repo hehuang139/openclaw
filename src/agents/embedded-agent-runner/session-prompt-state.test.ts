@@ -568,6 +568,55 @@ describe("session tool surface", () => {
     ]);
   });
 
+  it("retires the pin at compaction instead of carrying it into the new history", async () => {
+    const entries: SessionEntry[] = [];
+    surface([tool("read"), tool("gateway")]);
+    await persist(entries);
+    entries.push({
+      type: "compaction",
+      id: "compaction-1",
+      parentId: null,
+      timestamp: "2026-10-01T00:00:01Z",
+    } as SessionEntry);
+    await persist(entries);
+    expect(entries.at(-1)).toMatchObject({ data: { historyId: "compaction-1" } });
+    expect(entries.at(-1)).not.toHaveProperty("data.tools");
+    clearEmbeddedSessionPromptStates(["tool-surface"]);
+    lease[Symbol.dispose]();
+    lease = retainEmbeddedSessionPromptState("tool-surface");
+    expect(surface([tool("read")], entries).map((entry) => entry.name)).toEqual(["read"]);
+  });
+
+  it("loads a checkpoint written before the pin and starts a pin from it", async () => {
+    const entries: SessionEntry[] = [];
+    prepareSessionSystemPrompt({
+      state: lease.state,
+      routeKey,
+      systemPrompt: "Base.",
+      entries,
+    }).commit();
+    await persistSessionSystemPrompt(lease.state, (customType, data) => {
+      entries.push({
+        type: "custom",
+        customType,
+        data: structuredClone(data),
+        id: "legacy",
+        parentId: null,
+        timestamp: "2026-10-01T00:00:00Z",
+      });
+    });
+    expect(entries[0]).not.toHaveProperty("data.tools");
+    clearEmbeddedSessionPromptStates(["tool-surface"]);
+    lease[Symbol.dispose]();
+    lease = retainEmbeddedSessionPromptState("tool-surface");
+    expect(
+      prepareSessionSystemPrompt({ state: lease.state, routeKey, systemPrompt: "Base.", entries })
+        .restart,
+    ).toBe(false);
+    expect(surface([tool("read")], entries).map((entry) => entry.name)).toEqual(["read"]);
+    expect(lease.state.pendingToolSurface?.tools.map((entry) => entry.name)).toEqual(["read"]);
+  });
+
   it("drops pinned tools when the tool policy changes", () => {
     surface([tool("read"), tool("exec")]);
     expect(surface([tool("read")], [], routeKey, "policy-b").map((entry) => entry.name)).toEqual([

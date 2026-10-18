@@ -122,6 +122,16 @@ export function registerPluginOnlyCallerIdentityCase({
       });
       await requireTool(tools, "file_fetch").execute?.("tool-call-1", {});
       expect(observedAllow).toEqual(["file_fetch", "web_search"]);
+      // A producer whose policy denies web_search passes no hosted search to its events.
+      const denied = createOpenClawCodingTools({
+        config: { ...testConfig, tools: { ...testConfig.tools, deny: ["web_search"] } },
+        agentId: "main",
+        sessionKey: "agent:main:main",
+        includeCoreTools: false,
+        toolConstructionPlan: pluginOnlyConstructionPlan,
+      });
+      await requireTool(denied, "file_fetch").execute?.("tool-call-2", {});
+      expect(observedAllow).toEqual(["file_fetch"]);
     } finally {
       resolvePluginToolsSpy.mockRestore();
     }
