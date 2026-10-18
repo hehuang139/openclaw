@@ -424,6 +424,7 @@ describe("late exact requester recovery", () => {
     };
     const unregister = registerGatewayRecoveryRuntime({
       prepareRestartRecovery: unused,
+      resumeChatInput: unused,
       dispatchSessionMethod: unused,
       dispatchAgent: unused,
       waitForAgent: unused,

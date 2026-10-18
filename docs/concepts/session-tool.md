@@ -281,9 +281,9 @@ sessions, denied communication, and unavailable admission without feeding those
 diagnostics back to the model. Task continuations and steering retain their
 separate lifecycle owners.
 
-- **Fire-and-forget:** set `timeoutSeconds: 0` to enqueue and return immediately.
+- **Fire-and-forget:** set `timeoutSeconds: 0` to return after input admission without waiting for a reply.
 - **Wait for reply:** set a timeout and get the response inline.
-- **Guide your running child:** with no `mode` and `timeoutSeconds: 0`, a send to your own spawned child steers into its active run and acknowledges queue admission, like `mode: "steer"`, not persistence or model consumption. This admission is not restart-durable. Use `mode: "followup"` for a separate child turn with its own completion. An idle child or one whose run rejects the steer starts a new turn. Explicit modes keep their existing behavior.
+- **Guide your running child:** with no `mode` and `timeoutSeconds: 0`, a send to your own spawned child steers into its active run, like `mode: "steer"`. The tool acknowledges only after the input is saved in the target transcript. If the running backend cannot confirm durable steering, the input is queued as a separate durable turn. Use `mode: "followup"` to request that separate turn directly. An idle child or one whose run rejects the steer starts a new turn.
 - **Continue a paused child task:** send the continuation without `mode`. When the caller controls a native child paused by `sessions_yield` with task-owned completion, the runtime resumes that task automatically, preserving its identity and original completion recipient. Use `mode: "resume"` to require this behavior explicitly. An explicit `mode: "followup"` starts a separate turn and leaves the paused task intact.
 
 A separate follow-up to your native child starts only after Gateway admission
@@ -340,10 +340,16 @@ Neither field is a target-completion receipt.
 New turns sent to a busy chat session wait for its active reply and delivery to
 finish. They keep their order behind other agent commands; cancellation or the
 receiver's execution deadline can withdraw a waiting turn before it runs.
-Default zero-wait sends to your own running child acknowledge queue admission,
-like `mode: "steer"`; they do not confirm transcript persistence or model consumption
-and are not restart-durable. They produce no separate completion turn. Use
-`mode: "followup"` when you need that separate child turn and completion.
+Default zero-wait sends to your own running child and `mode: "steer"` wait for
+transcript persistence before acknowledging. The existing two-minute steering
+deadline is independent of `timeoutSeconds`, which controls reply waiting. A
+deadline without confirmed persistence returns an error; it never acknowledges
+volatile input or replays input that might already have been consumed.
+A persisted steer is part of the target's history; acknowledgment does not mean
+that the model has finished processing it. A backend without durable steering
+support uses a queued turn with startup delivery recovery instead, reported as
+`targetDisposition: "queued"`. Successful steering produces no separate
+completion turn; use `mode: "followup"` to request one explicitly.
 
 If a retry with the same request ID finds that the original admission is still pending, the
 tool returns an error with `sentBeforeError: true` and the existing run ID, without

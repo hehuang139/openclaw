@@ -3776,7 +3776,7 @@ export const en: TranslationMap & {
       cancelled:
         "Cancelled before the agent started it. It will not run automatically; copy it and send again.",
       interrupted:
-        "Interrupted before the agent started it. It will not run automatically; copy it and send again.",
+        "Interrupted before the agent started it. If it does not resume, retry it or copy it and send again.",
       earlier: "Show earlier messages",
       latest: "Show latest messages",
     },

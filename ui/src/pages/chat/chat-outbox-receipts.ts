@@ -160,6 +160,7 @@ function reconcilePendingChatOutboxInput(
   item: ChatQueueItem,
   history: ChatHistoryResult,
   pendingBefore: number | undefined,
+  retryInterrupted: boolean,
 ): ChatHistoryResult | "blocked" | "continue" | undefined {
   const historySessionId = history.sessionInfo?.sessionId ?? history.sessionId;
   if (item.sessionId && item.sessionId !== historySessionId) {
@@ -184,6 +185,9 @@ function reconcilePendingChatOutboxInput(
   if (inputReceipt === "pending" || inputReceipt === "cancelled") {
     const pending = history.pendingInputs?.items.find((input) => input.runId === item.sendRunId);
     const cancelled = inputReceipt === "cancelled" || pending?.state === "cancelled";
+    if (retryInterrupted && pending?.state === "interrupted") {
+      return history;
+    }
     const confirmsLocal = Boolean(
       !cancelled && historySessionId && (!item.sessionId || item.sendState === "unconfirmed"),
     );
@@ -231,6 +235,7 @@ export async function readCurrentStoredChatHistory(
   client: NonNullable<ChatHost["client"]>,
   connectionEpoch: number | undefined,
   scheduleRetry: (delayMs: number) => void,
+  retryInterrupted = false,
 ): Promise<ChatHistoryResult | "blocked" | "continue"> {
   const runId = host.chatRunId;
   const runGeneration = host.chatRunLifecycleGeneration;
@@ -496,6 +501,7 @@ export async function readCurrentStoredChatHistory(
       item,
       history,
       pendingBefore,
+      retryInterrupted,
     );
     if (pendingInput !== undefined) {
       return pendingInput;

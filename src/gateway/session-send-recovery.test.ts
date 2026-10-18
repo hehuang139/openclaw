@@ -112,11 +112,15 @@ let targetEntry: {
   lifecycleRevision?: string;
 };
 const dispatch = vi.fn();
+const resumeChat = vi.fn();
 const warn = vi.fn();
 const controller = () => new AbortController();
 const context = createDirectChatContext({
   getRuntimeConfig: () => config,
-  recoveryRuntime: createMockGatewayRecoveryRuntime({ dispatchAgent: dispatch }),
+  recoveryRuntime: createMockGatewayRecoveryRuntime({
+    dispatchAgent: dispatch,
+    resumeChatInput: resumeChat,
+  }),
 });
 context.logGateway.warn = warn;
 const sourceSnapshot = (
@@ -180,6 +184,46 @@ afterEach(() => {
   vi.unstubAllEnvs();
   vi.restoreAllMocks();
   clearRuntimeConfigSnapshot();
+});
+
+it("resumes chat inputs in acceptance order across pages, excluding expired and withdrawn inputs", async () => {
+  const chat = (id: string, ageMs = 0, state: SessionPendingInput["state"] = "interrupted") => ({
+    ...input,
+    id,
+    runId: id,
+    acceptedAt: Date.now() - ageMs,
+    state,
+    message: { ...input.message, __openclaw: { chatInputRecovery: { version: 1 } } },
+  });
+  io.pending
+    .mockResolvedValueOnce({ items: [chat("second")], nextBefore: 1 })
+    .mockResolvedValueOnce({
+      items: [
+        chat("expired", 24 * 60 * 60_000 + 1),
+        chat("cancelled", 0, "cancelled"),
+        chat("live", 0, "queued"),
+        chat("first"),
+      ],
+    });
+  let releaseFirst!: () => void;
+  let enterFirst!: () => void;
+  const firstEntered = new Promise<void>((resolve) => {
+    enterFirst = resolve;
+  });
+  const firstHeld = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  resumeChat.mockImplementationOnce(async () => {
+    enterFirst();
+    await firstHeld;
+  });
+  const recovering = recover();
+  await firstEntered;
+  expect(resumeChat.mock.calls.map(([target]) => target.runId)).toEqual(["first"]);
+  releaseFirst();
+  await recovering;
+  expect(resumeChat.mock.calls.map(([target]) => target.runId)).toEqual(["first", "second"]);
+  expectNoCalls(dispatch, io.report, io.withdraw);
 });
 
 it.each(["replaced", "archived-source", "archived-target"] as const)(

@@ -40,6 +40,7 @@ import {
   isOperatorUiClient,
 } from "../../utils/message-channel.js";
 import type { ChatAttachment } from "../chat-attachments.js";
+import { readChatInputRecoveryAdmission } from "../chat-input-recovery.js";
 import { sanitizeChatSendMessageInput } from "../chat-input-sanitize.js";
 import { hasGatewayAdminScope } from "../operator-scopes.js";
 import { normalizeRpcAttachmentsToChatAttachments } from "./attachment-normalize.js";
@@ -103,7 +104,11 @@ export function normalizeChatSendRequest(params: {
   const chatSendReceivedAtMs = performance.now();
   const reject = (error: string) => ({ ok: false as const, error });
   const client = params.client;
-  const clientInfo = client?.connect?.client;
+  const recoveredInput =
+    typeof params.params.idempotencyKey === "string"
+      ? readChatInputRecoveryAdmission(params.params.idempotencyKey)
+      : undefined;
+  const clientInfo = recoveredInput?.clientInfo ?? client?.connect?.client;
   const supportsTaskSuggestions =
     isOperatorUiClient(clientInfo) &&
     params.client?.connect?.scopes?.includes("operator.admin") === true &&
@@ -205,7 +210,10 @@ export function normalizeChatSendRequest(params: {
 
   const hasGoalOperation = params.goalResume !== undefined || p.intent !== undefined;
   const commandInterpretationSuppressed =
-    suppressCommandInterpretation || hasGoalOperation || providerReview !== undefined;
+    suppressCommandInterpretation ||
+    recoveredInput?.suppressCommandInterpretation === true ||
+    hasGoalOperation ||
+    providerReview !== undefined;
   // This text comes from the current provider review, not a browser-supplied command.
   const inboundMessage = p.intent || providerReview ? p.message : sanitizedMessageResult.message;
   const systemInputProvenance = params.goalResume
@@ -319,6 +327,14 @@ export function normalizeChatSendRequest(params: {
   };
   if (stopCommand) {
     return { ok: true, value };
+  }
+  if (recoveredInput) {
+    // Approved text may differ from the submitted bytes; retries keep their original identity.
+    const requestIdentity = recoveredInput.message["__openclaw"]?.chatRequestIdentity;
+    return {
+      ok: true,
+      value: { ...value, ...(typeof requestIdentity === "string" ? { requestIdentity } : {}) },
+    };
   }
   return loadChatRequestIdentityKeyAsync().then((key) => {
     // A keyed verifier survives redaction without storing an offline prompt digest.

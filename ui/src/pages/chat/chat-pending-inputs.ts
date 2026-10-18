@@ -1,3 +1,4 @@
+import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
 import {
   CHAT_INPUT_RECEIPT_MAX_RUN_IDS,
   CHAT_INPUT_RUN_ID_MAX_CHARS,
@@ -104,6 +105,13 @@ export function buildPendingInputItems(
     ) {
       continue;
     }
+    const browserInput = input.runId
+      ? browserInputs.find((item) => item.sendRunId === input.runId)
+      : undefined;
+    const resubmitting =
+      browserInput?.sendState === "waiting-model" ||
+      browserInput?.sendState === "submitting" ||
+      browserInput?.sendState === "sending";
     let pendingStatus: PendingInputStatus;
     if (input.state === "queued") {
       pendingStatus = "queued";
@@ -112,23 +120,30 @@ export function buildPendingInputItems(
       }
     } else {
       pendingStatus =
-        input.state === "interrupted" &&
-        input.runId &&
-        browserInputs.some(
-          (item) =>
-            item.sendRunId === input.runId &&
-            item.sendState !== "failed" &&
-            item.sendState !== "held",
-        )
+        input.state === "interrupted" && resubmitting
           ? "resuming"
           : input.state === "cancelled"
             ? "cancelled"
             : "interrupted";
     }
+    const message = asOptionalRecord(input.message);
+    const displayMessage =
+      input.state === "interrupted" && browserInput && !resubmitting
+        ? {
+            ...message,
+            __openclaw: {
+              ...asOptionalRecord(message?.["__openclaw"]),
+              kind: "pending-send",
+              id: browserInput.id,
+              state: "unconfirmed",
+              ...(browserInput.sendError ? { error: browserInput.sendError } : {}),
+            },
+          }
+        : input.message;
     // Custody keeps submission correlation outside the message; use it for
     // presentation without inventing transcript or execution identity.
     items.push(
-      ...buildMessageItems([input.message], () =>
+      ...buildMessageItems([displayMessage], () =>
         input.runId ? `send:${input.runId}` : `pending-input:${input.id}`,
       ).flatMap((item) =>
         projectChatSystemNotice({ ...item, startsTurn: true }, undefined, {

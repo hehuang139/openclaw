@@ -2,7 +2,10 @@ import { sha256Hex } from "@openclaw/normalization-core/node-crypto";
 import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
 import { stableStringify } from "@openclaw/normalization-core/stable-stringify";
 import { runAgentHarnessBeforeMessageWriteHook } from "../../agents/harness/hook-helpers.js";
-import { createRestartRecoveryOperatorSource } from "../../agents/operator-run-recovery-source.js";
+import {
+  createOperatorInputRecoverySource,
+  createRestartRecoveryOperatorSource,
+} from "../../agents/operator-run-recovery-source.js";
 import type { InternalGetReplyOptions } from "../../auto-reply/reply/get-reply.types.js";
 import { normalizeMessageClientSources } from "../../chat/message-client-source.js";
 import { bindUserTurnInputActor } from "../../config/sessions/session-input-actor.js";
@@ -23,6 +26,7 @@ import {
 import type { UserTurnOriginalInputCommit } from "../../sessions/user-turn-transcript.types.js";
 import { extractTextFromChatContent } from "../../shared/chat-content.js";
 import { isBrowserOperatorUiClient } from "../../utils/message-channel.js";
+import { createChatInputRecovery, readChatInputRecoveryAdmission } from "../chat-input-recovery.js";
 import type { MentionInbox } from "../mention-inbox.types.js";
 import { hasGatewayAdminScope } from "../operator-scopes.js";
 import { captureWorkerTurnInputSource } from "../worker-environments/worker-turn-transcript-target.js";
@@ -82,9 +86,30 @@ export function createGatewayChatUserTurnController(params: {
       ? undefined
       : gatewayClientSenderFields(params.client).sender;
   const senderProfileId = params.client?.authenticatedUserProfile?.profileId;
-  const selectedMentions = request.mentions;
   const mentionInbox = params.mentionInbox;
   const sourceId = buildRunUserTurnIdempotencyKey(session.clientRunId);
+  const recoveredInput = readChatInputRecoveryAdmission(session.clientRunId);
+  const selectedMentions = recoveredInput?.message["__openclaw"]?.humanMentions ?? request.mentions;
+  const selectedMentionText = recoveredInput
+    ? (extractTextFromChatContent(recoveredInput.message.content, {
+        joinWith: "\n",
+        normalizeText: (value) => value,
+      }) ?? "")
+    : request.rawMessage;
+  const recoveryEntry = admission.admittedSessionEntry ?? admission.initialSessionEntry;
+  const recovery =
+    recoveredInput || admission.restartSafeAdmission || !recoveryEntry
+      ? undefined
+      : createChatInputRecovery({
+          request,
+          source: createOperatorInputRecoverySource({
+            authority: admission.operatorAuthority,
+            entry: recoveryEntry,
+            agentId: session.agentId,
+            sessionKey: session.sessionKey,
+            sourceRunId: session.clientRunId,
+          }),
+        });
   const sourceClients =
     !params.client?.internal?.syntheticClient &&
     (!request.systemInputProvenance || request.systemInputProvenance.kind === "external_user")
@@ -155,26 +180,29 @@ export function createGatewayChatUserTurnController(params: {
     : undefined;
   const recorder: UserTurnTranscriptRecorder = createUserTurnTranscriptRecorder({
     onMessagePersisted: params.onMessagePersisted,
+    ...(recoveredInput ? { message: recoveredInput.message } : {}),
     ...(request.goalOperation
       ? { pendingInputRequestFingerprint: request.goalOperation.requestFingerprint }
       : {}),
-    ...(sender?.id && !request.goalOperation
-      ? {
-          // Attribution and submitted bytes survive reconnect; display names, leaf
-          // cursors and generated media paths are not immutable request identity.
-          pendingInputRequestFingerprint: sha256Hex(
-            stableStringify([
-              {
-                ...request.p,
-                sessionId: getRpcSourceIdentity(admission.sourceRef).sessionId,
-                expectedLeafEntryId: undefined,
-              },
-              sender.identity ?? sender.id,
-              hasGatewayAdminScope(params.client),
-            ]),
-          ),
-        }
-      : {}),
+    ...(recoveredInput
+      ? { pendingInputRequestFingerprint: recoveredInput.requestFingerprint }
+      : sender?.id && !request.goalOperation
+        ? {
+            // Attribution and submitted bytes survive reconnect; display names, leaf
+            // cursors and generated media paths are not immutable request identity.
+            pendingInputRequestFingerprint: sha256Hex(
+              stableStringify([
+                {
+                  ...request.p,
+                  sessionId: getRpcSourceIdentity(admission.sourceRef).sessionId,
+                  expectedLeafEntryId: undefined,
+                },
+                sender.identity ?? sender.id,
+                hasGatewayAdminScope(params.client),
+              ]),
+            ),
+          }
+        : {}),
     ...(request.goalOperation
       ? {
           sessionTurnMutation: {
@@ -233,6 +261,9 @@ export function createGatewayChatUserTurnController(params: {
       admission.operatorAuthority?.assertCurrent,
     ]),
     beforeMessageWrite: (event) => {
+      if (recoveredInput) {
+        return event.message;
+      }
       const originalInput = event.message.idempotencyKey === sourceId;
       const next = runAgentHarnessBeforeMessageWriteHook(event);
       if (originalInput && next?.role === "user") {
@@ -243,6 +274,7 @@ export function createGatewayChatUserTurnController(params: {
           ...(contextFreeCommand ? { excludeFromContext: true } : {}),
           __openclaw: {
             ...metadata,
+            ...(recovery ? { chatInputRecovery: recovery } : {}),
             ...(request.requestIdentity ? { chatRequestIdentity: request.requestIdentity } : {}),
             ...(contextFreeCommand ? { contextFreeCommand: true } : {}),
           },
@@ -270,7 +302,7 @@ export function createGatewayChatUserTurnController(params: {
                     span.start === mention.start &&
                     span.end === mention.end &&
                     text.slice(mention.start, mention.end) ===
-                      request.rawMessage.slice(mention.start, mention.end)
+                      selectedMentionText.slice(mention.start, mention.end)
                   );
                 }),
             );

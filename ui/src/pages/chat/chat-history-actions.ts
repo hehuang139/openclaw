@@ -30,9 +30,18 @@ import type { SessionSnapshotInvalidationReason } from "./session-snapshot-inval
 
 export function cancelPendingQueuedChatInput(state: ChatHistoryHost, id: string): boolean {
   const view = getChatPendingInputs(state);
-  const input = view?.queuedInputs.find(
-    (item) => `pending-input:${item.id}` === id && item.queued && item.state === "queued",
+  const browserInput = state.chatQueue.find(
+    (item) => item.id === id && (!item.sessionId || item.sessionId === view?.sessionId),
   );
+  const input =
+    view?.queuedInputs.find(
+      (item) => `pending-input:${item.id}` === id && item.queued && item.state === "queued",
+    ) ??
+    (browserInput?.sendRunId
+      ? view?.page.items.find(
+          (item) => item.runId === browserInput.sendRunId && item.state === "interrupted",
+        )
+      : undefined);
   const client = state.client;
   if (!view || !input?.runId) {
     return false;

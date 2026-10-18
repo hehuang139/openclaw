@@ -85,6 +85,7 @@ export function useSubagentRestartRecoveryFixture(
       status: "pending",
     })) as GatewayRecoveryRuntime["waitForAgent"],
     sendRecoveryNotice: vi.fn(),
+    resumeChatInput: vi.fn(),
   };
   const activateGatewayRuntime = async () => {
     const gatewayContext = {

@@ -1,6 +1,10 @@
+import { writeFile } from "node:fs/promises";
+import path from "node:path";
 import { expect as expectBrowser, type Locator, type Page } from "playwright/test";
 import { expect, it } from "vitest";
+import { createControlUiE2eArtifactDir } from "../test-helpers/control-ui-e2e-artifacts.ts";
 import type { MockGatewayWindow } from "../test-helpers/control-ui-e2e-contract.ts";
+import { takeControlUiScreenshotFrame } from "../test-helpers/control-ui-e2e-screenshot.ts";
 import {
   controlUiBundledGatewayUrl,
   createControlUiMockSameOriginGatewayScript,
@@ -9,6 +13,7 @@ import {
   controlUiSessionUrl,
   chatMessage,
   createChatFlowE2eSuite,
+  captureUiProofEnabled,
   expectRequestCountStable,
   installMockGateway,
   requireRecord,
@@ -78,6 +83,139 @@ async function seedComposer(
 }
 
 suite.define(() => {
+  it.each(["retry", "discard"] as const)(
+    "keeps interrupted server input reviewable for %s without passively resending the browser copy",
+    (action) =>
+      suite.withPage({ ...pageOptions, viewport }, async ({ page }) => {
+        const sessionKey = "agent:main:main";
+        const sessionId = `session:${sessionKey}`;
+        const runId = "interrupted-review-input";
+        const approvedText = "Please review the approved deployment notes";
+        const originalText = "Please review the private deployment notes";
+        const history = {
+          sessionId,
+          messages: [],
+          pendingInputs: {
+            total: 1,
+            items: [
+              {
+                id: "saved-input",
+                runId,
+                acceptedAt: 1,
+                state: "interrupted",
+                message: chatMessage("user", approvedText),
+              },
+            ],
+          },
+          inputReceipts: [{ runId, state: "pending" }],
+          sessionInfo: { key: sessionKey, sessionId, status: "done", hasActiveRun: false },
+        };
+        await page.addInitScript({ content: createControlUiMockSameOriginGatewayScript() });
+        const gateway = await installMockGateway(page, {
+          sessionKey,
+          methodResponses: { "chat.history": history, "chat.startup": history },
+        });
+        await seedComposer(
+          page,
+          4,
+          {
+            recovery: {},
+            sessions: {
+              [`${sessionKey}\u0000agent:main`]: {
+                updatedAt: 1,
+                queue: [
+                  unconfirmedInput("browser-review-input", sessionKey, runId, {
+                    text: originalText,
+                    sessionId,
+                    agentId: "main",
+                    storageScope: JSON.stringify([
+                      controlUiBundledGatewayUrl(suite.server.baseUrl),
+                      "e2e-recovery-scope",
+                    ]),
+                    sendState: "waiting-reconnect",
+                  }),
+                ],
+              },
+            },
+          },
+          { account: true },
+        );
+        await page.goto(controlUiSessionUrl(suite.server.baseUrl, sessionKey));
+        const bubble = page.locator(".chat-group.user", { hasText: approvedText });
+        const retry = bubble.getByRole("button", { name: "Retry queued message" });
+        await expectBrowser(retry).toBeVisible();
+        await expectBrowser(
+          bubble.getByRole("button", { name: "Discard", exact: true }),
+        ).toBeVisible();
+        await expectBrowser(page.getByText(originalText, { exact: true })).toHaveCount(0);
+        await expectBrowser(page.getByText(/This saved message will resume/)).toHaveCount(0);
+        await expectRequestCountStable(gateway, "chat.send", 0);
+        if (captureUiProofEnabled && action === "retry") {
+          const directory = createControlUiE2eArtifactDir("interrupted-input-review");
+          const notice = page.getByText(
+            "Interrupted before the agent started it. If it does not resume, retry it or copy it and send again.",
+            { exact: true },
+          );
+          const frame = await takeControlUiScreenshotFrame(
+            page,
+            page.locator("section.chat"),
+            [bubble, retry, notice],
+            {
+              animations: "disabled",
+              scrollTo: bubble,
+            },
+          );
+          await writeFile(path.join(directory, "after.png"), frame.png);
+        }
+        if (action === "discard") {
+          await gateway.deferNext("chat.abort");
+          await bubble.getByRole("button", { name: "Discard", exact: true }).click();
+          const request = await gateway.waitForRequest("chat.abort");
+          expect(requireRecord(request.params)).toMatchObject({
+            sessionKey,
+            runId,
+            discardPendingInput: true,
+          });
+          await expectBrowser(bubble).toBeVisible();
+          await gateway.setMethodResponse("chat.history", {
+            ...history,
+            pendingInputs: { total: 0, items: [] },
+            inputReceipts: [{ runId, state: "pending", cancelled: true }],
+          });
+          await gateway.resolveDeferred("chat.abort", { ok: true, aborted: true, runIds: [runId] });
+          await expectBrowser(bubble).toHaveCount(0);
+          await expectRequestCountStable(gateway, "chat.send", 0);
+          return;
+        }
+        await gateway.deferNext("chat.send");
+        await retry.click();
+        const request = await gateway.waitForRequest("chat.send");
+        expect(requireRecord(request.params)).toMatchObject({
+          idempotencyKey: runId,
+          message: originalText,
+        });
+        await gateway.setMethodResponse("chat.history", {
+          ...history,
+          messages: [
+            deliveredMessage(approvedText, runId, { id: "consumed-input", seq: 1, timestamp: 1 }),
+          ],
+          pendingInputs: { total: 0, items: [] },
+          inputReceipts: [{ runId, state: "consumed", consumedByEventId: "consumed-input" }],
+        });
+        await gateway.resolveDeferred("chat.send", { runId, status: "started" });
+        await gateway.emitGatewayEvent("session.message", {
+          sessionKey,
+          sessionId,
+          messageId: "consumed-input",
+          messageSeq: 1,
+          hasActiveRun: false,
+          status: "done",
+        });
+        await expectBrowser(bubble.locator(".chat-send-status")).toHaveCount(0);
+        await expectRequestCountStable(gateway, "chat.send", 1);
+      }),
+  );
+
   it(
     "keeps delivery recovery visible and keyboard-reachable in narrow chat",
     () =>

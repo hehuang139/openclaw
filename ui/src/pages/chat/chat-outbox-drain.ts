@@ -163,15 +163,16 @@ async function reconcileStoredChatOutboxHead(
     return "blocked";
   }
   const { readCurrentStoredChatHistory, isInterruptedChatInput } = recovery;
-  const history = await readCurrentStoredChatHistory(...historyArgs);
-  if (
-    typeof history !== "string" &&
-    isInterruptedChatInput(history, item) &&
-    (item.queueMode === "steer" ||
-      item.queueMode === "interrupt" ||
-      !(visibleSessionMatches(host, outbox.sessionKey, outbox.agentId) && isChatBusy(host)))
-  ) {
-    return "send";
+  const history = await readCurrentStoredChatHistory(...historyArgs, retryUnconfirmed);
+  if (typeof history !== "string" && isInterruptedChatInput(history, item)) {
+    // Startup recovery owns accepted input order. Only an explicit retry may
+    // race that owner, using the same receipt and submission ID.
+    return retryUnconfirmed &&
+      (item.queueMode === "steer" ||
+        item.queueMode === "interrupt" ||
+        !(visibleSessionMatches(host, outbox.sessionKey, outbox.agentId) && isChatBusy(host)))
+      ? "send"
+      : "blocked";
   }
   // Passive unknown sends need positive delivery proof; only an explicit retry
   // may continue through idle reconciliation to the same idempotency key.

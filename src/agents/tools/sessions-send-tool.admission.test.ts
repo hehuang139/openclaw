@@ -20,6 +20,7 @@ import {
   createContext,
   createOperatorClient,
 } from "../../gateway/server-plugin-in-process-dispatch.test-support.js";
+import { readSessionSendDeliveryAdmission } from "../../gateway/session-send-delivery.js";
 import { drainSystemEvents, peekSystemEvents } from "../../infra/system-events.js";
 import { setActivePluginRegistry } from "../../plugins/runtime.js";
 import {
@@ -221,6 +222,7 @@ describe("sessions_send dispatch admission", () => {
     const selected = createEmbeddedRunHandle({
       runId: "selected-steer-run",
       guarded: true,
+      supportsTranscriptCommitWait: true,
       queueMessage: async (_text, options) => {
         options?.onQueueAccepted?.(true);
         accepted.resolve();
@@ -336,6 +338,85 @@ describe("sessions_send dispatch admission", () => {
       mutation.mockRestore();
       observeCapture.mockRestore();
       source.release();
+    }
+  });
+
+  it("queues an unsupported durable steer once without injecting volatile guidance", async () => {
+    const context = createContext([], () => config);
+    const queueMessage = vi.fn(async () => {});
+    const handle = createEmbeddedRunHandle({ guarded: true, queueMessage });
+    const operation = createReplyOperation({
+      sessionKey: targetSessionKey,
+      sessionId: "target-session",
+      agentId: "main",
+      resetTriggered: false,
+      target: captureSessionTarget({
+        storeScope: resolveSessionStorePathCore(undefined, { agentId: "main" }),
+        sessionKey: targetSessionKey,
+        agentId: "main",
+        incarnation: "target-session",
+      }),
+    });
+    attachActiveEmbeddedRun(
+      "target-session",
+      handle,
+      targetSessionKey,
+      undefined,
+      "main",
+      operation,
+    );
+    const callGateway = vi.fn();
+    callGateway.mockImplementation(
+      async (request: Parameters<AgentToolGatewayRequestCaller>[0]) => {
+        if (request.method === "sessions.resolve") {
+          return { key: targetSessionKey, agentId: "main" };
+        }
+        if (request.method !== "agent") {
+          throw new Error(`Unexpected Gateway method: ${request.method}`);
+        }
+        expect(
+          readSessionSendDeliveryAdmission({
+            agentId: "main",
+            sessionKey: targetSessionKey,
+            sessionId: "target-session",
+            runId,
+          })?.delivery,
+        ).toMatchObject({
+          source: { sessionKey: requesterSessionKey, sessionId: "requester-session" },
+          target: { sessionKey: targetSessionKey, sessionId: "target-session" },
+        });
+        return { runId, status: "accepted" };
+      },
+    );
+    try {
+      const result = await withGatewayToolCallerIdentity(
+        {
+          agentId: "main",
+          sessionKey: requesterSessionKey,
+          gatewayContextResolver: () => context,
+          receiptAuthority: () => true,
+        },
+        () =>
+          createSessionsSendTool({
+            agentSessionKey: requesterSessionKey,
+            config,
+            callGateway,
+            idempotencyKey: runId,
+          }).execute("durable-steer-fallback", {
+            sessionKey: targetSessionKey,
+            message: "Save this guidance before acknowledging it",
+            mode: "steer",
+            timeoutSeconds: 0,
+          }),
+      );
+      expect(result.details).toMatchObject({ status: "accepted", targetDisposition: "queued" });
+      expect(queueMessage).not.toHaveBeenCalled();
+      expect(callGateway.mock.calls.filter(([request]) => request.method === "agent")).toHaveLength(
+        1,
+      );
+    } finally {
+      detachActiveEmbeddedRun("target-session", handle, targetSessionKey);
+      operation.complete();
     }
   });
 

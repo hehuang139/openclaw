@@ -23,6 +23,7 @@ import { isSqliteLockError } from "../infra/sqlite-error-diagnostics.js";
 import type { CommunicationEndpoint } from "../sessions/communication-admission.js";
 import { AgentDatabaseAdmissionError } from "../state/agent-database-admission.js";
 import { INTERNAL_MESSAGE_CHANNEL } from "../utils/message-channel.js";
+import { CHAT_INPUT_RECOVERY_MAX_AGE_MS } from "./chat-input-recovery.js";
 import type { GatewayRequestContext } from "./server-methods/types.js";
 import { measureStartup, type GatewayStartupTrace } from "./server-startup-trace.js";
 import {
@@ -64,7 +65,7 @@ function matches(endpoint: CommunicationEndpoint, expected: SessionSendDeliveryE
   );
 }
 
-/** Re-admit accepted peer inputs, not predecessor executions or sender tool calls. */
+/** Re-admit saved inputs, not predecessor executions or sender tool calls. */
 export async function recoverSessionSendDeliveries(
   context: GatewayRequestContext,
   signal: AbortSignal,
@@ -158,7 +159,35 @@ export async function recoverSessionSendDeliveries(
       for (const input of pending) {
         assertCurrent();
         const delivery = readSessionSendDelivery(input.message);
-        if (!delivery || input.state !== "interrupted") {
+        if (input.state !== "interrupted") {
+          continue;
+        }
+        if (!delivery) {
+          if (
+            !input.message["__openclaw"]?.chatInputRecovery ||
+            Date.now() - input.acceptedAt > CHAT_INPUT_RECOVERY_MAX_AGE_MS
+          ) {
+            continue;
+          }
+          try {
+            await retry(
+              () =>
+                runtime.resumeChatInput(
+                  { ...scope, inputId: input.id, runId: input.runId },
+                  { signal, assertCurrent },
+                ),
+              "sidecars.delivery-replay",
+            );
+          } catch (error) {
+            if (signal.aborted) {
+              return;
+            }
+            // The pending input remains interrupted in every client, including
+            // clients without an outbox. Current policy may forbid old work.
+            context.logGateway.warn(
+              `Chat input recovery blocked: ${formatErrorMessageForDisplay(error, formatErrorMessageWithCode(error))} ${JSON.stringify({ sessionKeyHash: sha256HexPrefixCore(sessionKey, 16), inputId: input.id, ageMs: Math.max(0, Date.now() - input.acceptedAt) })}`,
+            );
+          }
           continue;
         }
         let attempts = 0;
