@@ -2,6 +2,10 @@ import fs from "node:fs/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChannelOutboundContext } from "../../channels/plugins/types.adapters.js";
 import type { ChannelPlugin } from "../../channels/plugins/types.public.js";
+import {
+  clearRuntimeConfigSnapshot,
+  setRuntimeConfigSnapshot,
+} from "../../config/runtime-snapshot.js";
 import { runMessageAction } from "../../infra/outbound/message-action-runner.js";
 import {
   directOutbound,
@@ -40,12 +44,15 @@ beforeEach(() => {
   mocks.resolveCommandSecretRefsViaGateway.mockClear();
 });
 afterEach(() => {
+  clearRuntimeConfigSnapshot();
   resetGlobalHookRunner();
   resetPluginRuntimeStateForTest();
 });
 
 describe("completion source-reply authority", () => {
   function createRestrictedTool(overrides: Partial<MessageToolOptions> = {}) {
+    const config = overrides.config ?? {};
+    setRuntimeConfigSnapshot(config);
     registerPlugins({
       ...createChannelTestPluginBase({
         id: "discord",
@@ -59,7 +66,7 @@ describe("completion source-reply authority", () => {
       },
     });
     return createMessageTool({
-      config: {},
+      config,
       ...secretOptions,
       sourceReplyOnly: true,
       sourceReplyDeliveryMode: "message_tool_only",
@@ -126,6 +133,8 @@ describe("completion source-reply authority", () => {
   });
 
   function createCompletionMediaTool() {
+    const config = { ...workspaceConfig, tools: { fs: { workspaceOnly: true } } };
+    setRuntimeConfigSnapshot(config);
     const sendMedia = vi.fn(async (_ctx: ChannelOutboundContext) => ({
       channel: "workspace",
       messageId: "photo-1",
@@ -135,7 +144,7 @@ describe("completion source-reply authority", () => {
       outbound: { ...directOutbound, extractMarkdownImages: true, sendMedia },
     });
     const tool = createMessageTool({
-      config: { ...workspaceConfig, tools: { fs: { workspaceOnly: true } } },
+      config,
       sourceReplyOnly: true,
       sourceReplyDeliveryMode: "message_tool_only",
       currentChannelProvider: "workspace",
