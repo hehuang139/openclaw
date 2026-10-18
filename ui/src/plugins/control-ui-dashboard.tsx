@@ -1,5 +1,5 @@
 import type { BoardGetParams } from "@openclaw/gateway-protocol";
-import { Loading, Show, createEffect, createMemo, createSignal, onCleanup } from "solid-js";
+import { Loading, Show, createMemo, createSignal, onCleanup } from "solid-js";
 import type { GatewayBrowserClient } from "../api/gateway.ts";
 import { Icon } from "../components/solid/icon.tsx";
 import {
@@ -11,6 +11,7 @@ import {
 import { projectBoardProvider } from "../lib/reactive/domain-board.ts";
 import { t } from "../lib/reactive/i18n.ts";
 import { defineSolidBridge, type SolidBridgeElement } from "../lib/solid-bridge.ts";
+import { observeSolidBridgeProperties } from "./control-ui-properties.ts";
 import "./control-ui-dashboard.css";
 
 export type PluginSessionDashboardProps = {
@@ -22,7 +23,10 @@ export type PluginSessionDashboardProps = {
   presented: boolean;
 };
 
-function PluginSessionDashboardContent(props: PluginSessionDashboardProps) {
+function PluginSessionDashboardContent(
+  props: PluginSessionDashboardProps,
+  host: SolidBridgeElement<PluginSessionDashboardProps>,
+) {
   const [viewAttempt, setViewAttempt] = createSignal(0);
   const boardView = createMemo(() => {
     viewAttempt();
@@ -80,21 +84,21 @@ function PluginSessionDashboardContent(props: PluginSessionDashboardProps) {
     return { lease, projection, callbacks };
   });
   // Keep the shared transport and this lease's mutation authority current.
-  createEffect(
-    () => ({
-      resource: resource(),
-      client: props.client,
-      connected: props.connected,
-      canMutate: props.canMutate,
-      canGrant: props.canGrant,
-    }),
-    (current) =>
-      current.resource?.lease.update(current.client!, current.connected, {
-        canPinWidgets: false,
-        canPinMcpApps: false,
-        canMutate: current.canMutate,
-        canGrant: current.canGrant,
-      }),
+  observeSolidBridgeProperties(
+    host,
+    ["session", "client", "connected", "canMutate", "canGrant"],
+    undefined,
+    () => {
+      const current = resource();
+      if (current && host.client) {
+        current.lease.update(host.client, host.connected, {
+          canPinWidgets: false,
+          canPinMcpApps: false,
+          canMutate: host.canMutate,
+          canGrant: host.canGrant,
+        });
+      }
+    },
   );
   // Preserve manual choices within a scope; a replacement initializes only after its first snapshot.
   const [presentation, setPresentation] = createSignal<{

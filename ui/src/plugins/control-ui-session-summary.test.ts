@@ -85,6 +85,13 @@ describe("plugin session summary freshness", () => {
       expect(element.querySelector("openclaw-agent-avatar img")?.getAttribute("src")).toBe(avatar);
     });
 
+    const replacement = createAgentIdentityCapability(element.gateway!);
+    element.agentIdentity = replacement;
+    await vi.waitFor(() => {
+      expect(replacement.get("main")?.avatar).toBe(avatar);
+      expect(element.querySelector("openclaw-agent-avatar img")?.getAttribute("src")).toBe(avatar);
+    });
+
     element.presented = false;
     await element.updateComplete;
     const beforeHiddenInvalidation = identityRequests().length;

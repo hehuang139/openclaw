@@ -246,6 +246,11 @@ describe("Plugin session dashboard", () => {
     expect(board.canGrant).toBe(true);
     expect(allow.disabled).toBe(false);
 
+    const toggle = element.querySelector<HTMLButtonElement>(".plugin-session-dashboard__toggle")!;
+    toggle.click();
+    await element.updateComplete;
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+
     element.canMutate = false;
     element.canGrant = false;
     await element.updateComplete;
@@ -255,6 +260,7 @@ describe("Plugin session dashboard", () => {
     expect(board.canMutate).toBe(false);
     expect(board.canGrant).toBe(false);
     expect(allow.disabled).toBe(true);
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
 
     element.canMutate = true;
     element.canGrant = true;
@@ -265,6 +271,7 @@ describe("Plugin session dashboard", () => {
     expect(board.canMutate).toBe(true);
     expect(board.canGrant).toBe(true);
     expect(allow.disabled).toBe(false);
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
     expect(request).toHaveBeenCalledOnce();
   });
 
