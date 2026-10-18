@@ -144,8 +144,7 @@ suite.define(() => {
         });
       }
       const restore = button(pastedCard, "Show in text field");
-      await restore.focus();
-      await page.keyboard.press("Enter");
+      await restore.press("Enter");
       await expect.poll(() => composer.inputValue()).toBe(`Keep this draft\n\n${pastedText}`);
       expect(
         await page.locator(".chat-attachments-preview openclaw-chat-pasted-text").count(),

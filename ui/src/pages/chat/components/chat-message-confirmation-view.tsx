@@ -1,3 +1,4 @@
+import { registerModalSurface } from "../../../components/overlay-registry.ts";
 import { Icon } from "../../../components/solid/icon.tsx";
 import { registerChatMessageMetadataEnglish } from "../../../i18n/locales/en-chat-message-metadata.ts";
 import { registerEnglishCatalog, t } from "../../../lib/reactive/i18n.ts";
@@ -160,6 +161,7 @@ export function openChatRewindConfirmation(btn: HTMLElement, action: () => void)
   // descendants relative to the row instead of the viewport. Portal the dialog
   // so the viewport-clamped coordinates stay correct in web and native hosts.
   owner.ownerDocument.body.appendChild(popover);
+  const releaseModalSurface = registerModalSurface(popover);
   confirmedActions.set(owner, { popover, dismiss: dismissPopover });
   placeConfirmedActionPopover(btn, popover);
 
@@ -170,6 +172,7 @@ export function openChatRewindConfirmation(btn: HTMLElement, action: () => void)
       return;
     }
     dismissed = true;
+    releaseModalSurface();
     ownerObserver?.disconnect();
     document.removeEventListener("click", closeOnOutside, true);
     document.removeEventListener("contextmenu", closeOnOutside, true);

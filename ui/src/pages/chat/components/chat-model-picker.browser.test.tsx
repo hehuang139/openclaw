@@ -1,6 +1,7 @@
 import { createSignal } from "solid-js";
 import { afterEach, expect, it, vi } from "vitest";
 import { page, userEvent } from "vitest/browser";
+import { registerMenuShortcuts } from "../../../components/menu-shortcuts.ts";
 import { mountSolid } from "../../../test-helpers/mount-solid.ts";
 import { flush } from "../../../test-helpers/solid-settle.ts";
 import "../../../styles/base.css";
@@ -40,6 +41,7 @@ function mountPicker(optionsReady = true) {
     onOpenChange: vi.fn(),
   };
   let update!: () => void;
+  let composer!: HTMLTextAreaElement;
   mountSolid(
     () => {
       const [props, setProps] = createSignal(params);
@@ -52,10 +54,10 @@ function mountPicker(optionsReady = true) {
           class="agent-chat__input"
           onPointerDown={(event) => focusComposerFromChrome(event, true)}
           onClick={(event) => focusComposerFromChrome(event, true)}
-          onKeyDown={(event) => focusChatComposerFromPrintableKeydown(container, event)}
+          onKeyDown={(event) => focusChatComposerFromPrintableKeydown(container, event, composer)}
         >
           <div class="agent-chat__composer-combobox">
-            <textarea />
+            <textarea ref={(element) => (composer = element)} />
           </div>
           <ChatModelPicker {...props()} />
         </div>
@@ -67,7 +69,6 @@ function mountPicker(optionsReady = true) {
   const picker = container.querySelector("details")!;
   const trigger = picker.querySelector("summary")!;
   const search = picker.querySelector<HTMLInputElement>("[data-chat-model-search]")!;
-  const composer = container.querySelector("textarea")!;
   const toggle = async (activate: () => Promise<void>) => {
     const toggled = new Promise<void>((resolve) => {
       picker.addEventListener("toggle", () => resolve(), { once: true });
@@ -160,6 +161,7 @@ it("leaves digit shortcuts to a nested native menu", async () => {
   item.dataset.shortcut = "1";
   item.textContent = "Nested choice";
   menu.append(item);
+  const releaseShortcut = registerMenuShortcuts(menu, () => [{ element: item, key: "1" }]);
   picker.querySelector(".chat-controls__model-menu")!.append(menu);
   menu.showPopover();
   item.focus();
@@ -167,6 +169,7 @@ it("leaves digit shortcuts to a nested native menu", async () => {
   expect(params.onModelSelect).not.toHaveBeenCalled();
   expect(picker.open).toBe(true);
   menu.hidePopover();
+  releaseShortcut();
   menu.remove();
   trigger.focus();
   await userEvent.keyboard("1");
