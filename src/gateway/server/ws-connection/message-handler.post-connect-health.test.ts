@@ -4,10 +4,8 @@ import { beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { ConnectErrorDetailCodes } from "../../../../packages/gateway-protocol/src/connect-error-details.js";
 import {
   ErrorCodes,
-  PROTOCOL_VERSION,
   validateUpdateStatusParams,
 } from "../../../../packages/gateway-protocol/src/index.js";
-import { GATEWAY_OWNER_PROFILE_ID } from "../../../../packages/gateway-protocol/src/schema/users.js";
 import { createDeferred } from "../../../../test/helpers/promise.js";
 import type { OpenClawConfig } from "../../../config/types.openclaw.js";
 import { resetDiagnosticEventsForTest } from "../../../infra/diagnostic-events.js";
@@ -50,7 +48,10 @@ import { createGatewayWsTestLogger as createLogger } from "../ws-connection.test
 import { disconnectDisallowedGatewayPolicyClients } from "../ws-origin-policy.js";
 import { resolveSharedGatewaySessionGeneration } from "../ws-shared-generation.js";
 import type { GatewayWsClient } from "../ws-types.js";
-import { expectAuthenticatedOwnerReconnect } from "./message-handler.owner-reconnect.test-support.js";
+import {
+  expectAuthenticatedOwnerReconnect,
+  expectEphemeralOwnerConnect,
+} from "./message-handler.owner-reconnect.test-support.js";
 import {
   attachGatewayHarness,
   BACKEND_CONNECT_PARAMS,
@@ -429,34 +430,7 @@ describe("attachGatewayWsMessageHandler post-connect health refresh", () => {
       await withOpenClawTestState(
         { label: "gateway-owner-ephemeral", prepareProfileCatalog: true },
         async () => {
-          const harness = attachGatewayHarness({
-            connId: `ephemeral-${mode}`,
-            connectNonce: `nonce-${mode}`,
-            resolvedAuth: { mode: authMethod, token: "owner-fixture", allowTailscale: false },
-          });
-          harness.sendConnect("connect", {
-            minProtocol: PROTOCOL_VERSION,
-            maxProtocol: PROTOCOL_VERSION,
-            client: { id: "gateway-client", version: "dev", platform: "test", mode },
-            role: "operator",
-            ...(authMethod === "token" ? { auth: { token: "owner-fixture" } } : {}),
-            caps: [],
-          });
-          await harness.runWhenIdle();
-          expect(harness.frames).toContainEqual(
-            expect.objectContaining({ id: "connect", ok: true }),
-          );
-          if (authMethod === "token") {
-            expect(harness.client).toMatchObject({
-              authenticatedUserProfile: { profileId: GATEWAY_OWNER_PROFILE_ID },
-              connect: { scopes: [] },
-              internal: { authenticatedOperator: true, operatorRoleActor: { kind: "system" } },
-            });
-            expect(harness.registeredProfileId).toBe(GATEWAY_OWNER_PROFILE_ID);
-          } else {
-            expect(harness.client).not.toHaveProperty("authenticatedUserProfile");
-          }
-          expect(harness.client).not.toHaveProperty("authenticatedUserId");
+          await expectEphemeralOwnerConnect(mode, authMethod);
           expect(upsertPresenceMock).not.toHaveBeenCalled();
           expect(prewarmGatewaySessionHistoryMock).not.toHaveBeenCalled();
         },

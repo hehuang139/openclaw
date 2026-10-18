@@ -1,5 +1,41 @@
 import { expect } from "vitest";
+import { PROTOCOL_VERSION } from "../../../../packages/gateway-protocol/src/index.js";
+import { GATEWAY_OWNER_PROFILE_ID } from "../../../../packages/gateway-protocol/src/schema/users.js";
 import type { GatewayClient } from "../../server-methods/client-types.js";
+import { attachGatewayHarness } from "./message-handler.post-connect-health.test-support.js";
+
+/** Real token admission must retain owner identity without enrolling an ephemeral client in presence. */
+export async function expectEphemeralOwnerConnect(
+  mode: "cli" | "backend" | "probe",
+  authMethod: "token" | "none",
+): Promise<void> {
+  const harness = attachGatewayHarness({
+    connId: `ephemeral-${mode}`,
+    connectNonce: `nonce-${mode}`,
+    resolvedAuth: { mode: authMethod, token: "owner-fixture", allowTailscale: false },
+  });
+  harness.sendConnect("connect", {
+    minProtocol: PROTOCOL_VERSION,
+    maxProtocol: PROTOCOL_VERSION,
+    client: { id: "gateway-client", version: "dev", platform: "test", mode },
+    role: "operator",
+    ...(authMethod === "token" ? { auth: { token: "owner-fixture" } } : {}),
+    caps: [],
+  });
+  await harness.runWhenIdle();
+  expect(harness.frames).toContainEqual(expect.objectContaining({ id: "connect", ok: true }));
+  if (authMethod === "token") {
+    expect(harness.client).toMatchObject({
+      authenticatedUserProfile: { profileId: GATEWAY_OWNER_PROFILE_ID },
+      connect: { scopes: [] },
+      internal: { authenticatedOperator: true, operatorRoleActor: { kind: "system" } },
+    });
+    expect(harness.registeredProfileId).toBe(GATEWAY_OWNER_PROFILE_ID);
+  } else {
+    expect(harness.client).not.toHaveProperty("authenticatedUserProfile");
+  }
+  expect(harness.client).not.toHaveProperty("authenticatedUserId");
+}
 
 /** Shared-owner reconnect identity, authentication, and scope invariants. */
 export function expectAuthenticatedOwnerReconnect(
