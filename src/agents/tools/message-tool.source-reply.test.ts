@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChannelOutboundContext } from "../../channels/plugins/types.adapters.js";
 import type { ChannelPlugin } from "../../channels/plugins/types.public.js";
+import { resolveCommandSecretRefsViaGateway } from "../../cli/command-secret-gateway.js";
 import {
   clearRuntimeConfigSnapshot,
   setRuntimeConfigSnapshot,
@@ -26,9 +27,7 @@ import type { MessageToolOptions } from "./message-tool-execution.types.js";
 
 const mocks = {
   runMessageAction: vi.fn<typeof runMessageAction>(),
-  resolveCommandSecretRefsViaGateway: vi.fn<
-    NonNullable<MessageToolOptions["resolveCommandSecretRefsViaGateway"]>
-  >(async ({ config }) => ({ resolvedConfig: config, diagnostics: [] })),
+  resolveCommandSecretRefsViaGateway: vi.fn(resolveCommandSecretRefsViaGateway),
 };
 const secretOptions = {
   getScopedChannelsCommandSecretTargets: () => ({ targetIds: new Set<string>() }),
@@ -230,9 +229,13 @@ describe("completion source-reply authority", () => {
           { message: `completion\\nMEDIA:${outside}` },
           { message: `completion\nMEciteDIA:${outside}` },
         ]) {
-          await expect(tool.execute("outside-roots", { action: "send", ...args })).rejects.toThrow(
-            /outside.*allowed|not under.*allowed/i,
-          );
+          const result = await tool.execute("outside-roots", { action: "send", ...args });
+          expect(result.details).toMatchObject({
+            deliveryStatus: "failed",
+            error: expect.stringMatching(/not under an allowed directory/),
+            messageDelivery: { status: "failed" },
+          });
+          expect(result.details).not.toHaveProperty("messageDelivery.sourceReplyDelivered");
         }
         await expect(tool.execute("empty", { action: "send", message: " \n\t " })).rejects.toThrow(
           "send requires text or media",
