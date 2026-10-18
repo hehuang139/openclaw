@@ -12,6 +12,8 @@ import {
   workspaceConfig,
   workspaceTestPlugin,
 } from "../../infra/outbound/message-action-runner.test-support.js";
+import { buildOutboundMediaLoadOptions } from "../../media/load-options.js";
+import { loadWebMedia } from "../../media/web-media.js";
 import { resetGlobalHookRunner } from "../../plugins/hook-runner-global.js";
 import { resetPluginRuntimeStateForTest, setActivePluginRegistry } from "../../plugins/runtime.js";
 import {
@@ -96,6 +98,18 @@ describe("completion source-reply authority", () => {
     ["inline buffer", { action: "send", buffer: "c2VjcmV0" }],
     ["unknown plugin argument", { action: "send", pluginFile: "./AGENTS.md" }],
     ["inline reply route", { action: "send", message: "[[reply_to:message-2]] stolen thread" }],
+    [
+      "caption reply route",
+      { action: "send", message: "", caption: "[[reply_to:message-2]] stolen thread" },
+    ],
+    [
+      "caption audio directive",
+      { action: "send", message: " ", caption: "[[audio_as_voice]] completion" },
+    ],
+    [
+      "reply directive after an indented fence",
+      { action: "send", message: "    ```text\n[[reply_to:message-2]] stolen thread\n```" },
+    ],
     ["inline audio directive", { action: "send", message: "[[audio_as_voice]] completion" }],
     [
       "reply directive inside citation marker",
@@ -141,12 +155,23 @@ describe("completion source-reply authority", () => {
     }));
     registerPlugins({
       ...workspaceTestPlugin,
-      outbound: { ...directOutbound, extractMarkdownImages: true, sendMedia },
+      outbound: {
+        ...directOutbound,
+        extractMarkdownImages: true,
+        sendMedia: async (ctx) => {
+          // This provider accepts remote URLs; local uploads use the shared media policy.
+          if (ctx.mediaUrl && !ctx.mediaUrl.startsWith("https://")) {
+            await loadWebMedia(ctx.mediaUrl, buildOutboundMediaLoadOptions(ctx));
+          }
+          return sendMedia(ctx);
+        },
+      },
     });
     const tool = createMessageTool({
       config,
       sourceReplyOnly: true,
       sourceReplyDeliveryMode: "message_tool_only",
+      agentSessionKey: "agent:main:workspace:group:SOURCE",
       currentChannelProvider: "workspace",
       currentChannelId: "SOURCE",
       currentThreadTs: "thread-1",
@@ -163,6 +188,7 @@ describe("completion source-reply authority", () => {
       const url = "https://example.com/photo.png";
       for (const args of [
         { media: url, message: "Replacement photo" },
+        { media: url, caption: "Replacement photo" },
         { attachments: [{ media: url, name: "photo.png" }] },
         { message: `MEDIA:${url}` },
         { message: `![Replacement photo](${url})` },

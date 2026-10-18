@@ -41,6 +41,7 @@ const SOURCE_REPLY_ONLY_ARG_NAMES = new Set([
   "target",
   "accountId",
   "message",
+  "caption",
   "media",
   "attachments",
   "replyTo",
@@ -61,9 +62,10 @@ export function addSourceReplyFinalControl(schema: TObject): TObject {
 }
 
 export function enforceSourceReplyOnlyTextDirectives(args: Record<string, unknown>): void {
-  // Reject reply/audio directives even when outbound sanitization assembles them.
-  const text = readToolStringParam(args, "message") ?? "";
-  const message = normalizeEscapedLineBreaksForVisibleText(text);
+  // Preserve Markdown indentation when checking sanitizer-assembled reply/audio directives.
+  const text = readToolStringParam(args, "message", { trim: false });
+  const caption = readToolStringParam(args, "caption", { trim: false }) ?? "";
+  const message = normalizeEscapedLineBreaksForVisibleText(text?.trim() ? text : caption);
   const withoutCitationMarkers = stripUnsupportedCitationControlMarkers(message);
   for (const normalized of new Set([
     message,

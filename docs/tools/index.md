@@ -158,7 +158,8 @@ still govern execution. Unchanged bindings and capabilities produce stable schem
 bytes regardless of plugin registration order.
 
 Completion and settle turns with a source-bound `message` grant may send text,
-`media`, or `attachments`, including media-only replies. `MEDIA:` and Markdown
+`media`, or `attachments`, including media-only replies and the optional `caption`.
+`MEDIA:` and Markdown
 image directives use the same outbound media policy as normal sends: remote URLs
 are supported, and local files must be within the allowed `mediaAccess.localRoots`.
 The action stays `send`; channel, account, destination, and thread stay locked to
