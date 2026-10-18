@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChannelOutboundContext } from "../../channels/plugins/types.adapters.js";
 import type { ChannelPlugin } from "../../channels/plugins/types.public.js";
@@ -220,14 +221,14 @@ describe("completion source-reply authority", () => {
         const { tool, sendMedia } = createCompletionMediaTool();
         // State files outside managed media/workspace roots must never become attachments.
         const outside = `${stateDir}/private.txt`;
+        const directivePath = pathToFileURL(outside).href;
         await fs.writeFile(outside, "private fixture");
         for (const args of [
           { media: outside },
           { attachments: [{ media: outside }] },
-          { message: `MEDIA:${outside}` },
-          { message: `![Private file](${outside})` },
-          { message: `completion\\nMEDIA:${outside}` },
-          { message: `completion\nMEciteDIA:${outside}` },
+          { message: `MEDIA:${directivePath}` },
+          { message: `completion\\nMEDIA:${directivePath}` },
+          { message: `completion\nMEciteDIA:${directivePath}` },
         ]) {
           const result = await tool.execute("outside-roots", { action: "send", ...args });
           expect(result.details).toMatchObject({
