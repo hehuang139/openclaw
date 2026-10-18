@@ -271,7 +271,7 @@ export class SessionDataOwner implements SessionCatalogDataOwner {
     return [
       this.inputs.navigationVisible,
       this.inputs.navigationView,
-      this.inputs.contextualSidebar,
+      Boolean(this.inputs.contextualSidebar),
       this.inputs.sidebarAgentsMode,
       this.inputs.connected,
       this.filteredSessionScope,
