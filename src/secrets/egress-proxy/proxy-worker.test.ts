@@ -1,9 +1,6 @@
 import { once } from "node:events";
-import fs from "node:fs";
-import { request as httpRequest, type IncomingMessage, type ServerResponse } from "node:http";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import { createServer as createHttpsServer, type Server } from "node:https";
-import type { Socket } from "node:net";
-import path from "node:path";
 import type { Worker } from "node:worker_threads";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
@@ -16,13 +13,14 @@ import {
   startSecretEgressProxyWorker,
   type SecretEgressProxyWorkerHandle,
 } from "./proxy-worker.js";
+import { copyCa, proxyRequest, readResponse, socketTracker } from "./proxy.test-support.js";
 
 const secret = "synthetic-worker-egress-credential";
 const sentinel = sealSecretSentinel(secret, { label: "WORKER_API_KEY" });
 const bindings = [{ name: "WORKER_API_KEY", sentinel, allowedHosts: ["localhost"] }];
 const proxies: SecretEgressProxyWorkerHandle[] = [];
 const grants = new Set<SecretEgressProcessGrant>();
-const sockets = new Set<Socket>();
+const sockets = socketTracker();
 const auditEvents: SecretEgressProxyAuditEvent[] = [];
 const observed: Array<{ authorization: string | undefined; body: string }> = [];
 const failure = vi.fn();
@@ -36,9 +34,7 @@ let nativeWorker: Worker;
 let streamingResponse: ServerResponse | undefined;
 const dirs = useAutoCleanupTempDirTracker((cleanup) =>
   afterAll(async () => {
-    for (const socket of sockets) {
-      socket.destroy();
-    }
+    sockets.destroy();
     await Promise.all(proxies.map((owned) => owned.stop()));
     expect(nativeWorker.threadId).toBe(-1);
     expect(failure).not.toHaveBeenCalled();
@@ -50,17 +46,9 @@ const dirs = useAutoCleanupTempDirTracker((cleanup) =>
   }),
 );
 
-function trackSocket(socket: Socket): void {
-  sockets.add(socket);
-  socket.once("close", () => sockets.delete(socket));
-  socket.on("error", () => {});
-}
-
 async function startWorker(onFailure = failure) {
   const caDir = dirs.make("openclaw-egress-worker-");
-  for (const file of ["root-ca.pem", "root-ca-key.pem", "leaf-key.pem"]) {
-    fs.copyFileSync(path.join(seedDir, file), path.join(caDir, file));
-  }
+  copyCa(seedDir, caDir);
   const created = createDeferredCore<Worker>();
   const onWorker = (worker: Worker) => created.resolve(worker);
   process.once("worker", onWorker);
@@ -91,41 +79,41 @@ function openRequest(
     host?: string;
     body?: string;
     authorization?: string;
-    owner?: SecretEgressProxyWorkerHandle;
   } = {},
 ): Promise<IncomingMessage> {
-  const owner = options.owner ?? proxy;
-  const proxyUrl = new URL(owner.proxyOrigin);
-  const credentials = new URL(grant.env.HTTPS_PROXY!);
   const body = options.body ?? "";
-  return new Promise((resolve, reject) => {
-    const request = httpRequest(
-      {
-        hostname: proxyUrl.hostname,
-        port: proxyUrl.port,
-        agent: false,
-        method: body ? "POST" : "GET",
-        path: `https://${options.host ?? "localhost"}:${originPort}${options.path ?? "/"}`,
-        headers: {
-          "Proxy-Authorization": `Basic ${Buffer.from(`openclaw:${credentials.password}`).toString("base64")}`,
-          Authorization: options.authorization ?? `Bearer ${sentinel}`,
-          "Content-Length": Buffer.byteLength(body),
-        },
+  return proxyRequest(
+    grant.env,
+    {
+      method: body ? "POST" : "GET",
+      path: `https://${options.host ?? "localhost"}:${originPort}${options.path ?? "/"}`,
+      headers: {
+        Authorization: options.authorization ?? `Bearer ${sentinel}`,
+        "Content-Length": Buffer.byteLength(body),
       },
-      resolve,
-    );
-    request.once("socket", trackSocket);
-    request.once("error", reject);
-    request.end(body);
-  });
+      chunks: [body],
+    },
+    sockets.track,
+  );
 }
 
-async function readResponse(response: IncomingMessage) {
-  const chunks: Buffer[] = [];
-  for await (const chunk of response) {
-    chunks.push(Buffer.from(chunk));
-  }
-  return { status: response.statusCode, body: Buffer.concat(chunks).toString() };
+async function request(
+  grant: SecretEgressProcessGrant,
+  options?: Parameters<typeof openRequest>[1],
+) {
+  return readResponse(await openRequest(grant, options));
+}
+
+function readSse(response: IncomingMessage) {
+  const first = createDeferredCore();
+  let received = "";
+  response.on("data", (chunk: Buffer) => {
+    received += chunk.toString();
+    if (received.includes("data: first\n\n")) {
+      first.resolve();
+    }
+  });
+  return { first: first.promise, text: () => received };
 }
 
 beforeAll(async () => {
@@ -135,14 +123,14 @@ beforeAll(async () => {
   const reservation = await reserveTestPortListener({
     offsets: [0],
     createListener: () =>
-      createHttpsServer(leaf, (request, response) => {
-        const record = { authorization: request.headers.authorization, body: "" };
+      createHttpsServer(leaf, (incoming, response) => {
+        const record = { authorization: incoming.headers.authorization, body: "" };
         observed.push(record);
-        request.on("data", (chunk: Buffer) => {
+        incoming.on("data", (chunk: Buffer) => {
           record.body += chunk.toString();
         });
-        request.once("end", () => {
-          if (request.url === "/sse") {
+        incoming.once("end", () => {
+          if (incoming.url === "/sse") {
             streamingResponse = response;
             response.writeHead(200, { "Content-Type": "text/event-stream" });
             response.write("data: first\n\n");
@@ -154,7 +142,7 @@ beforeAll(async () => {
       }),
   });
   origin = reservation.listener;
-  origin.on("connection", trackSocket);
+  origin.on("connection", sockets.track);
   originClaim = reservation.claim;
   originPort = reservation.claim.port;
   closeOrigin = reservation.releaseListener;
@@ -192,7 +180,7 @@ describe("secret egress Worker boundary", () => {
     ]);
     grants.add(grant);
     const authorization = `Basic ${Buffer.from(`${sentinel}:${password}`).toString("base64")}`;
-    expect((await readResponse(await openRequest(grant, { authorization }))).status).toBe(200);
+    expect((await request(grant, { authorization })).status).toBe(200);
     expect(observed).toEqual([
       {
         authorization: `Basic ${Buffer.from(`${secret}:synthetic-worker-password`).toString("base64")}`,
@@ -201,27 +189,25 @@ describe("secret egress Worker boundary", () => {
     ]);
     expect(
       (
-        await readResponse(
-          await openRequest(grant, {
-            authorization: `Basic ${Buffer.from(`user:${unrelated}`).toString("base64")}`,
-          }),
-        )
+        await request(grant, {
+          authorization: `Basic ${Buffer.from(`user:${unrelated}`).toString("base64")}`,
+        })
       ).status,
     ).toBe(502);
     grant.revoke();
-    expect((await readResponse(await openRequest(grant, { authorization }))).status).toBe(407);
+    expect((await request(grant, { authorization })).status).toBe(407);
     expect(observed).toHaveLength(1);
   });
   it("acknowledges usable grants while keeping bindings, host policy, and audit data scoped", async () => {
     const grant = await register();
-    expect(await readResponse(await openRequest(grant, { body: `${sentinel}:body` }))).toEqual({
+    expect(await request(grant, { body: `${sentinel}:body` })).toEqual({
       status: 200,
       body: "ok",
     });
     expect(observed).toEqual([{ authorization: `Bearer ${secret}`, body: `${secret}:body` }]);
     const unbound = await register(proxy, false);
-    expect((await readResponse(await openRequest(unbound))).status).toBe(502);
-    expect((await readResponse(await openRequest(grant, { host: "127.0.0.1" }))).status).toBe(403);
+    expect((await request(unbound)).status).toBe(502);
+    expect((await request(grant, { host: "127.0.0.1" })).status).toBe(403);
     expect(observed).toHaveLength(1);
     expect(await proxy.getCertificateStatus()).toMatchObject({
       state: "ready",
@@ -239,19 +225,12 @@ describe("secret egress Worker boundary", () => {
   it("revokes authority before its cleanup message arrives without revoking a sibling", async () => {
     const [revoked, sibling] = await Promise.all([register(), register()]);
     const response = await openRequest(revoked, { path: "/sse" });
-    const first = createDeferredCore();
+    const sse = readSse(response);
     const closed = new Promise<void>((resolve) => {
       response.once("close", resolve);
     });
-    let received = "";
     response.on("error", () => {});
-    response.on("data", (chunk: Buffer) => {
-      received += chunk.toString();
-      if (received.includes("data: first\n\n")) {
-        first.resolve();
-      }
-    });
-    await first.promise;
+    await sse.first;
     const send = nativeWorker.postMessage.bind(nativeWorker);
     const held = vi.spyOn(nativeWorker, "postMessage").mockImplementation(() => {});
     revoked.revoke();
@@ -260,10 +239,10 @@ describe("secret egress Worker boundary", () => {
     try {
       streamingResponse!.end("data: after revoke\n\n");
       await closed;
-      expect(received).toBe("data: first\n\n");
+      expect(sse.text()).toBe("data: first\n\n");
       expect(response.complete).toBe(false);
-      expect((await readResponse(await openRequest(revoked))).status).toBe(407);
-      expect(await readResponse(await openRequest(sibling))).toEqual({ status: 200, body: "ok" });
+      expect((await request(revoked)).status).toBe(407);
+      expect(await request(sibling)).toEqual({ status: 200, body: "ok" });
       expect(observed).toEqual([
         { authorization: `Bearer ${secret}`, body: "" },
         { authorization: `Bearer ${secret}`, body: "" },
@@ -277,28 +256,20 @@ describe("secret egress Worker boundary", () => {
 
   it("delivers SSE data before the upstream completes its response", async () => {
     const response = await openRequest(await register(), { path: "/sse" });
-    const first = createDeferredCore();
+    const sse = readSse(response);
     const ended = once(response, "end");
-    let received = "";
-    response.on("data", (chunk: Buffer) => {
-      received += chunk.toString();
-      if (received.includes("data: first\n\n")) {
-        first.resolve();
-      }
-    });
-    await first.promise;
+    await sse.first;
     expect(response.readableEnded).toBe(false);
     expect(streamingResponse?.writableEnded).toBe(false);
     streamingResponse!.end("data: final\n\n");
     await ended;
-    expect(received).toBe("data: first\n\ndata: final\n\n");
+    expect(sse.text()).toBe("data: first\n\ndata: final\n\n");
   });
 
   it("fails closed on native Worker exit and settles pending control and network work", async () => {
     const failed = vi.fn();
     const isolated = await startWorker(failed);
     const response = await openRequest(await register(isolated.handle), {
-      owner: isolated.handle,
       path: "/sse",
     });
     const closed = new Promise<void>((resolve) => {

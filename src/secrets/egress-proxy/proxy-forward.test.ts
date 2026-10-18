@@ -6,67 +6,97 @@ import {
   type ClientRequest,
 } from "node:http";
 import { Agent, request as httpsRequest } from "node:https";
-import type { AddressInfo } from "node:net";
 import { Socket } from "node:net";
 import { PassThrough, Writable, type Readable } from "node:stream";
 import { setImmediate } from "node:timers/promises";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createDeferredCore } from "../../shared/deferred.js";
 import { resolveSecretSentinel, sealSecretSentinel } from "../sentinel.js";
 import { createSecretEgressBodyBudget, forwardSecretEgressRequest } from "./proxy-forward.js";
+import { closeServer, listen } from "./proxy.test-support.js";
 
 vi.mock("node:https", { spy: true });
+
+let agent: Agent;
+let resources: Array<Readable | Writable>;
+let clients: Array<IncomingMessage | ServerResponse>;
+beforeEach(() => {
+  agent = new Agent();
+  resources = [];
+  clients = [];
+});
+afterEach(() => {
+  for (const resource of [...resources, ...clients]) {
+    resource.destroy();
+  }
+  agent.destroy();
+});
+
+function fakeRequest(length?: number) {
+  const request = new IncomingMessage(new Socket());
+  request.headers = length === undefined ? {} : { "content-length": String(length) };
+  request.method = "POST";
+  request.on("error", () => {});
+  const response = new ServerResponse(request);
+  clients.push(request, response);
+  return { request, response };
+}
+
+function forward(
+  request: IncomingMessage,
+  response: ServerResponse,
+  overrides: Partial<Parameters<typeof forwardSecretEgressRequest>[0]> = {},
+) {
+  forwardSecretEgressRequest({
+    request,
+    response,
+    host: "localhost",
+    upstreamTlsAgent: agent,
+    prepareRequest: () => ({
+      target: new URL("https://localhost:1/"),
+      headers: {},
+      substituted: false,
+    }),
+    acquireBody: createSecretEgressBodyBudget(),
+    isActive: () => true,
+    ownResource: (resource) => {
+      resources.push(resource);
+      return resource;
+    },
+    releaseResponse() {},
+    resolveSentinel() {
+      return undefined;
+    },
+    audit() {},
+    ...overrides,
+  });
+}
 
 describe("secret egress forwarding resource ownership", () => {
   it.each([undefined, 0])(
     "releases body streams when upstream construction fails (length: %s)",
     async (length) => {
-      const request = new IncomingMessage(new Socket());
-      request.headers = length === undefined ? {} : { "content-length": String(length) };
-      request.method = "POST";
-      request.on("error", () => {});
-      const response = new ServerResponse(request);
-      const agent = new Agent();
-      const resources: Array<Readable | Writable> = [];
-      try {
-        forwardSecretEgressRequest({
-          request,
-          response,
-          host: "localhost",
-          upstreamTlsAgent: agent,
-          // A protected value can contain newlines. Node refuses this header
-          // synchronously, before DNS, TLS or any upstream socket is opened.
-          prepareRequest: () => ({
-            target: new URL("https://localhost:1/"),
-            headers: { "x-synthetic": "invalid\nheader" },
-            substituted: true,
-          }),
-          acquireBody: createSecretEgressBodyBudget(),
-          isActive: () => true,
-          ownResource: (resource) => {
-            resources.push(resource);
-            resource.on("error", () => resource.destroy());
-            return resource;
-          },
-          releaseResponse() {},
-          resolveSentinel() {
-            return undefined;
-          },
-          audit() {},
-        });
-        request.push(null);
-        await setImmediate();
-        response.emit("close");
-        await setImmediate();
-        expect(response.statusCode).toBe(502);
-        expect(resources.every((resource) => resource.destroyed)).toBe(true);
-      } finally {
-        for (const resource of resources) {
-          resource.destroy();
-        }
-        request.destroy();
-        response.destroy();
-        agent.destroy();
-      }
+      const { request, response } = fakeRequest(length);
+      forward(request, response, {
+        // A protected value can contain newlines. Node refuses this header
+        // synchronously, before DNS, TLS or any upstream socket is opened.
+        prepareRequest: () => ({
+          target: new URL("https://localhost:1/"),
+          headers: { "x-synthetic": "invalid\nheader" },
+          substituted: true,
+        }),
+        ownResource: (resource) => {
+          resources.push(resource);
+          resource.on("error", () => resource.destroy());
+          return resource;
+        },
+      });
+      request.push(null);
+      await setImmediate();
+      response.emit("close");
+      await setImmediate();
+      expect(response.statusCode).toBe(502);
+      expect(resources.every((resource) => resource.destroyed)).toBe(true);
     },
   );
 
@@ -81,19 +111,10 @@ describe("secret egress forwarding resource ownership", () => {
       Buffer.alloc(128 * 1024, 120),
       Buffer.from(sealSecretSentinel(secret, { label: "buffered-cancellation" }) + "tail"),
     ]);
-    const request = new IncomingMessage(new Socket());
-    request.headers = { "content-length": String(body.length) };
-    request.method = "POST";
-    request.on("error", () => {});
-    const response = new ServerResponse(request);
-    const agent = new Agent();
-    const resources: Array<Readable | Writable> = [];
+    const { request, response } = fakeRequest(body.length);
     const submitted: Buffer[] = [];
     let completeWrite: (error?: Error | null) => void = () => {};
-    let firstWrite: () => void = () => {};
-    const started = new Promise<void>((resolve) => {
-      firstWrite = resolve;
-    });
+    const started = createDeferredCore();
     // Real Writable backpressure controls transport admission without relying on
     // platform socket buffers or adding a test-only production hook.
     const upstream = new Writable({
@@ -101,62 +122,39 @@ describe("secret egress forwarding resource ownership", () => {
       write(chunk: Buffer, _encoding, callback) {
         submitted.push(Buffer.from(chunk));
         completeWrite = callback;
-        firstWrite();
+        started.resolve();
       },
     });
     vi.mocked(httpsRequest).mockReturnValueOnce(upstream as unknown as ClientRequest);
     const releaseBody = vi.fn();
     const audit = vi.fn();
     let active = true;
-    try {
-      forwardSecretEgressRequest({
-        request,
-        response,
-        host: "localhost",
-        upstreamTlsAgent: agent,
-        prepareRequest: () => ({
-          target: new URL("https://localhost:1/"),
-          headers: {},
-          substituted: false,
-        }),
-        acquireBody: () => releaseBody,
-        isActive: () => active,
-        ownResource: (resource) => {
-          resources.push(resource);
-          return resource;
-        },
-        releaseResponse() {},
-        resolveSentinel: resolveSecretSentinel,
-        audit,
-      });
-      request.push(body);
-      request.push(null);
-      await started;
-      expect(releaseBody).not.toHaveBeenCalled();
-      if (cause === "client disconnect") {
-        response.emit("close");
-      } else {
-        active = false;
-      }
-      completeWrite();
-      await setImmediate();
-      await setImmediate();
-      const sent = Buffer.concat(submitted);
-      expect(sent.length).toBeLessThan(body.length);
-      expect(sent.includes(secret)).toBe(false);
-      expect(sent.includes("tail")).toBe(false);
-      expect(upstream.destroyed).toBe(true);
-      expect(upstream.writableEnded).toBe(false);
-      expect(releaseBody).toHaveBeenCalledOnce();
-      expect(audit).not.toHaveBeenCalled();
-    } finally {
-      for (const resource of resources) {
-        resource.destroy();
-      }
-      request.destroy();
-      response.destroy();
-      agent.destroy();
+    forward(request, response, {
+      acquireBody: () => releaseBody,
+      isActive: () => active,
+      resolveSentinel: resolveSecretSentinel,
+      audit,
+    });
+    request.push(body);
+    request.push(null);
+    await started.promise;
+    expect(releaseBody).not.toHaveBeenCalled();
+    if (cause === "client disconnect") {
+      response.emit("close");
+    } else {
+      active = false;
     }
+    completeWrite();
+    await setImmediate();
+    await setImmediate();
+    const sent = Buffer.concat(submitted);
+    expect(sent.length).toBeLessThan(body.length);
+    expect(sent.includes(secret)).toBe(false);
+    expect(sent.includes("tail")).toBe(false);
+    expect(upstream.destroyed).toBe(true);
+    expect(upstream.writableEnded).toBe(false);
+    expect(releaseBody).toHaveBeenCalledOnce();
+    expect(audit).not.toHaveBeenCalled();
   });
 });
 
@@ -171,8 +169,6 @@ describe("secret egress forwarded response heads", () => {
       uncaught.push(error);
       failClient(error);
     };
-    const resources: Array<Readable | Writable> = [];
-    const agent = new Agent();
     vi.mocked(httpsRequest).mockImplementationOnce(((...args: unknown[]) => {
       const callback = args.find((entry) => typeof entry === "function") as (
         message: IncomingMessage,
@@ -191,35 +187,11 @@ describe("secret egress forwarded response heads", () => {
       return new PassThrough() as unknown as ClientRequest;
     }) as never);
     const server = createServer((request, response) => {
-      forwardSecretEgressRequest({
-        request,
-        response,
-        host: "localhost",
-        upstreamTlsAgent: agent,
-        prepareRequest: () => ({
-          target: new URL("https://localhost:1/"),
-          headers: {},
-          substituted: false,
-        }),
-        acquireBody: createSecretEgressBodyBudget(),
-        isActive: () => true,
-        ownResource: (resource) => {
-          resources.push(resource);
-          return resource;
-        },
-        releaseResponse() {},
-        resolveSentinel() {
-          return undefined;
-        },
-        audit() {},
-      });
+      forward(request, response);
     });
     process.on("uncaughtException", onUncaught);
     try {
-      await new Promise<void>((resolve) => {
-        server.listen(0, "127.0.0.1", resolve);
-      });
-      const { port } = server.address() as AddressInfo;
+      const port = await listen(server);
       const result = await new Promise<{
         status?: number;
         clientError?: NodeJS.ErrnoException;
@@ -237,18 +209,11 @@ describe("secret egress forwarded response heads", () => {
       });
       await setImmediate();
       expect(uncaught).toEqual([]);
-      expect(result.status).toBeUndefined();
-      expect(result.clientError?.code).toBe("ECONNRESET");
+      expect(result).toEqual({ clientError: expect.objectContaining({ code: "ECONNRESET" }) });
     } finally {
       process.off("uncaughtException", onUncaught);
       server.closeAllConnections();
-      await new Promise<void>((resolve) => {
-        server.close(() => resolve());
-      });
-      for (const resource of resources) {
-        resource.destroy();
-      }
-      agent.destroy();
+      await closeServer(server);
     }
   });
 });

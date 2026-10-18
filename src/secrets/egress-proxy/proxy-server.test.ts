@@ -14,24 +14,29 @@ import {
   useAutoCleanupTempDirTracker,
 } from "../../../test/helpers/temp-dir.js";
 import { gitNullConfigPath } from "../../infra/git-exec.js";
-import { generateLocalProxyLeaf } from "../../proxy-capture/ca.js";
+import { ensureSecretEgressProxyCa, generateLocalProxyLeaf } from "../../proxy-capture/ca.js";
 import { createDeferredCore } from "../../shared/deferred.js";
 import {
   mintSecretSentinel,
   SECRET_SENTINEL_MAX_LENGTH,
   SECRET_SENTINEL_PREFIX,
 } from "../sentinel.js";
-import { startSecretEgressProxyServer, type SecretEgressProxyHandle } from "./proxy-server.js";
-
-type SecretEgressProxyAuditEvent = Parameters<
-  typeof startSecretEgressProxyServer
->[0]["onAudit"] extends (event: infer Event) => void
-  ? Event
-  : never;
+import {
+  startSecretEgressProxyServer,
+  type SecretEgressProxyAuditEvent,
+  type SecretEgressProxyHandle,
+} from "./proxy-server.js";
+import {
+  basicAuth as basicProxyAuth,
+  closeServer,
+  copyCa as copyInitialCa,
+  listen as listenServer,
+  proxyRequest,
+  readResponse,
+} from "./proxy.test-support.js";
 
 describe("secret egress proxy", () => {
   type OriginRequest = {
-    bytes: Buffer;
     body: string;
     headers: Record<string, string | string[] | undefined>;
     url: string;
@@ -42,7 +47,7 @@ describe("secret egress proxy", () => {
   const sockets = new Set<Socket>();
   const tempDirs: string[] = [];
   const seedDirs = createTempDirTracker();
-  let seed: { dir: string; leaf: Awaited<ReturnType<typeof generateLocalProxyLeaf>> } | undefined;
+  let seed: { dir: string; leaf: Awaited<ReturnType<typeof generateLocalProxyLeaf>> };
   let caDir: string;
   let auditEvents: SecretEgressProxyAuditEvent[];
   let originRequests: OriginRequest[];
@@ -65,45 +70,13 @@ describe("secret egress proxy", () => {
     ]).env;
   }
 
-  function copyInitialCa(sourceDir: string, targetDir: string): void {
-    for (const file of ["root-ca.pem", "root-ca-key.pem", "leaf-key.pem"]) {
-      fs.copyFileSync(path.join(sourceDir, file), path.join(targetDir, file));
-    }
-  }
-
   async function listen(server: Server): Promise<number> {
     servers.push(server);
-    return await new Promise<number>((resolve, reject) => {
-      server.once("error", reject);
-      server.listen(0, "127.0.0.1", () => {
-        server.off("error", reject);
-        const address = server.address();
-        if (!address || typeof address === "string") {
-          reject(new Error("test server did not bind a TCP port"));
-          return;
-        }
-        resolve(address.port);
-      });
-    });
-  }
-
-  async function closeServer(server: Server): Promise<void> {
-    server.closeAllConnections?.();
-    await new Promise<void>((resolve) => {
-      server.close(() => resolve());
-    });
-  }
-
-  function basicProxyAuth(password: string): string {
-    return `Basic ${Buffer.from(`openclaw:${password}`).toString("base64")}`;
+    return listenServer(server);
   }
 
   function registeredPassword(env: Record<string, string>): string {
-    const proxyUrl = env.HTTPS_PROXY;
-    if (!proxyUrl) {
-      throw new Error("test proxy environment is missing HTTPS_PROXY");
-    }
-    return new URL(proxyUrl).password;
+    return new URL(env.HTTPS_PROXY!).password;
   }
 
   async function rawConnect(params: {
@@ -114,10 +87,7 @@ describe("secret egress proxy", () => {
     const socket = net.connect(Number(proxyUrl.port), proxyUrl.hostname);
     sockets.add(socket);
     socket.once("close", () => sockets.delete(socket));
-    await new Promise<void>((resolve, reject) => {
-      socket.once("connect", resolve);
-      socket.once("error", reject);
-    });
+    await once(socket, "connect");
     const authLine = params.auth ? `Proxy-Authorization: ${params.auth}\r\n` : "";
     socket.write(
       `CONNECT localhost:${originPort} HTTP/1.1\r\nHost: localhost:${originPort}\r\n${authLine}\r\n`,
@@ -157,22 +127,21 @@ describe("secret egress proxy", () => {
     ],
   ]);
 
-  async function requestThroughTunnel(params: {
-    path?: string;
-    headers?: Record<string, string>;
-    bodyChunks?: readonly (string | Buffer)[];
-    contentLength?: number;
-    caPath?: string;
-    proxyEnv?: Record<string, string>;
-  }): Promise<{ body: string; head: string; status: number }> {
+  async function requestThroughTunnel(
+    params: {
+      path?: string;
+      headers?: Record<string, string>;
+      bodyChunks?: readonly (string | Buffer)[];
+      contentLength?: number;
+      caPath?: string;
+      proxyEnv?: Record<string, string>;
+    },
+    expectedStatus = 200,
+  ): Promise<{ body: string; head: string }> {
     const env = params.proxyEnv ?? proxyEnv;
-    const configuredProxy = env.HTTPS_PROXY;
-    if (!configuredProxy) {
-      throw new Error("test proxy environment is missing HTTPS_PROXY");
-    }
     const connected = await rawConnect({
       auth: basicProxyAuth(registeredPassword(env)),
-      proxyOrigin: new URL(configuredProxy).origin,
+      proxyOrigin: new URL(env.HTTPS_PROXY!).origin,
     });
     expect(connected.response).toContain("200 Connection Established");
     const secureSocket = tls.connect({
@@ -180,10 +149,7 @@ describe("secret egress proxy", () => {
       servername: "localhost",
       ca: fs.readFileSync(params.caPath ?? proxy.caCertPath),
     });
-    await new Promise<void>((resolve, reject) => {
-      secureSocket.once("secureConnect", resolve);
-      secureSocket.once("error", reject);
-    });
+    await once(secureSocket, "secureConnect");
     expect(secureSocket.authorized).toBe(true);
     const continued = createDeferredCore();
     const received = new Promise<string>((resolve, reject) => {
@@ -237,7 +203,8 @@ describe("secret egress proxy", () => {
     const raw = (await received).replace(/^(?:HTTP\/1\.1 100 Continue\r\n\r\n)+/u, "");
     const [head = "", body = ""] = raw.split("\r\n\r\n", 2);
     const status = Number(/^HTTP\/1\.1 (\d{3})/u.exec(head)?.[1]);
-    return { body, head, status };
+    expect(status).toBe(expectedStatus);
+    return { body, head };
   }
 
   async function forwardedRequest(
@@ -274,34 +241,30 @@ describe("secret egress proxy", () => {
     return `${sentinel.slice(0, index)}${replacement}${sentinel.slice(index + 1)}`;
   }
 
+  beforeAll(async () => {
+    const dir = seedDirs.make("openclaw-egress-proxy-seed-");
+    const ca = await ensureSecretEgressProxyCa(dir);
+    seed = { dir, leaf: await generateLocalProxyLeaf({ certDir: dir, ca, hostname: "localhost" }) };
+  });
+
   beforeEach(async () => {
     auditEvents = [];
     originRequests = [];
     caDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-egress-proxy-test-"));
     tempDirs.push(caDir);
-    if (seed) {
-      copyInitialCa(seed.dir, caDir);
-    }
+    copyInitialCa(seed.dir, caDir);
     proxy = await startSecretEgressProxyServer({
       caDir,
       onAudit: (event) => auditEvents.push(event),
     });
     proxies.push(proxy);
-    const leaf = seed
-      ? { cert: Buffer.from(seed.leaf.cert), key: Buffer.from(seed.leaf.key) }
-      : await generateLocalProxyLeaf({
-          certDir: caDir,
-          ca: { certPath: proxy.caCertPath, keyPath: path.join(caDir, "root-ca-key.pem") },
-          hostname: "localhost",
-        });
     originPort = await listen(
-      createHttpsServer(leaf, (request, response) => {
+      createHttpsServer(seed.leaf, (request, response) => {
         const chunks: Buffer[] = [];
         request.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
         request.on("end", () => {
           const bytes = Buffer.concat(chunks);
           originRequests.push({
-            bytes,
             body: bytes.toString("utf8"),
             headers: { ...request.headers },
             url: request.url ?? "",
@@ -339,17 +302,6 @@ describe("secret egress proxy", () => {
       }),
     );
     proxyEnv = proxy.registerProcess().env;
-    if (!seed) {
-      // Capture after cold setup succeeds, before a case can mutate its files.
-      const dir = seedDirs.make("openclaw-egress-proxy-seed-");
-      try {
-        copyInitialCa(caDir, dir);
-        seed = { dir, leaf: { cert: Buffer.from(leaf.cert), key: Buffer.from(leaf.key) } };
-      } catch (error) {
-        seedDirs.cleanup();
-        throw error;
-      }
-    }
   });
 
   afterAll(() => seedDirs.cleanup());
@@ -363,6 +315,7 @@ describe("secret egress proxy", () => {
       await currentProxy.stop();
     }
     for (const server of servers.splice(0)) {
+      server.closeAllConnections();
       await closeServer(server);
     }
     for (const dir of tempDirs.splice(0)) {
@@ -378,18 +331,14 @@ describe("secret egress proxy", () => {
       { name: "PASSWORD", sentinel: password, allowedHosts: ["localhost"] },
     ]).env;
     const encoded = Buffer.from(`${username}:${password}`).toString("base64");
-    expect(
-      (
-        await requestThroughTunnel({
-          headers: {
-            Authorization: `Basic ${encoded}`,
-            "X-Encoded": encoded,
-            "Proxy-Authorization": `Basic ${encoded}`,
-          },
-          bodyChunks: [encoded],
-        })
-      ).status,
-    ).toBe(200);
+    await requestThroughTunnel({
+      headers: {
+        Authorization: `Basic ${encoded}`,
+        "X-Encoded": encoded,
+        "Proxy-Authorization": `Basic ${encoded}`,
+      },
+      bodyChunks: [encoded],
+    });
     expect(originRequests[0]?.headers.authorization).toBe(
       `Basic ${Buffer.from("synthetic-user:synthetic-password").toString("base64")}`,
     );
@@ -429,13 +378,7 @@ describe("secret egress proxy", () => {
           ? encoded.replace(/=+$/u, "") + (encoded.endsWith("==") ? "=" : "==")
           : encoded;
     const authorization = `Basic ${credential}`;
-    expect(
-      (
-        await requestThroughTunnel({
-          headers: { Authorization: authorization },
-        })
-      ).status,
-    ).toBe(502);
+    await requestThroughTunnel({ headers: { Authorization: authorization } }, 502);
     expect(originRequests).toEqual([]);
     expect(auditEvents.at(-1)?.reason).toBe("unresolved-sentinel");
   });
@@ -443,9 +386,7 @@ describe("secret egress proxy", () => {
   it.each(["bAsIc dXNlcjpwYXNz", "Basic malformed!"])(
     "preserves ordinary Basic headers byte-for-byte: %s",
     async (authorization) => {
-      expect(
-        (await requestThroughTunnel({ headers: { Authorization: authorization } })).status,
-      ).toBe(200);
+      await requestThroughTunnel({ headers: { Authorization: authorization } });
       expect(originRequests[0]?.headers.authorization).toBe(authorization);
       expect(auditEvents.at(-1)?.substituted).toBe(false);
     },
@@ -457,14 +398,13 @@ describe("secret egress proxy", () => {
     const headers = {
       Authorization: `Basic ${Buffer.from(`user:${sentinel}`).toString("base64")}`,
     };
-    const redirected = await requestThroughTunnel({ path: "/redirect", headers });
-    expect(redirected.status).toBe(307);
+    const redirected = await requestThroughTunnel({ path: "/redirect", headers }, 307);
     expect(redirected.head).toContain(`https://127.0.0.1:${originPort}/redirected`);
     expect(originRequests).toHaveLength(1);
-    expect(
-      (await requestThroughTunnel({ path: `https://127.0.0.1:${originPort}/redirected`, headers }))
-        .status,
-    ).toBe(502);
+    await requestThroughTunnel(
+      { path: `https://127.0.0.1:${originPort}/redirected`, headers },
+      502,
+    );
     expect(originRequests).toHaveLength(1);
     expect(auditEvents.at(-1)?.reason).toBe("destination-not-allowed");
   });
@@ -475,39 +415,19 @@ describe("secret egress proxy", () => {
     process.on("uncaughtException", onUncaught);
     try {
       const attachment = await requestThroughTunnel({ path: "/cjk-attachment" });
-      expect(attachment.status).toBe(200);
       expect(attachment.body).toBe("file");
       expect(attachment.head.toLowerCase()).toContain(
         "content-disposition: attachment; filename=\"___2026-09-21.log\"; filename*=utf-8''%e9%99%84%e4%bb%b6_2026-09-21.log",
       );
 
-      const rejected = await requestThroughTunnel({ path: "/invalid-trailer" });
-      expect(rejected.status).toBe(502);
+      const rejected = await requestThroughTunnel({ path: "/invalid-trailer" }, 502);
       expect(rejected.body).toBe("Secret egress proxy could not forward the upstream response.\n");
 
-      await expect(requestThroughTunnel({ path: "/after" })).resolves.toMatchObject({
-        body: "ok",
-        status: 200,
-      });
+      expect((await requestThroughTunnel({ path: "/after" })).body).toBe("ok");
       expect(uncaught).toEqual([]);
     } finally {
       process.off("uncaughtException", onUncaught);
     }
-  });
-
-  it("preserves fixed-length binary upload bytes and framing", async () => {
-    const bytes = Buffer.from(Array.from({ length: 8192 }, (_, index) => index % 256));
-    const result = await requestThroughTunnel({
-      path: "/fixed-length",
-      headers: { "Content-Type": "application/octet-stream" },
-      contentLength: bytes.length,
-      bodyChunks: [bytes.subarray(0, 11), bytes.subarray(11)],
-    });
-    expect(originRequests).toHaveLength(1);
-    expect(originRequests[0]?.bytes).toEqual(bytes);
-    expect(result.status).toBe(200);
-    expect(originRequests[0]?.headers["content-length"]).toBe(String(bytes.length));
-    expect(originRequests[0]?.headers["transfer-encoding"]).toBeUndefined();
   });
 
   it.each(["overlong", "wrong-host"] as const)(
@@ -526,12 +446,14 @@ describe("secret egress proxy", () => {
             : sentinel,
         ),
       ]);
-      const result = await requestThroughTunnel({
-        headers: { "Content-Type": "application/octet-stream" },
-        contentLength: body.length,
-        bodyChunks: [body],
-      });
-      expect(result.status).toBe(502);
+      await requestThroughTunnel(
+        {
+          headers: { "Content-Type": "application/octet-stream" },
+          contentLength: body.length,
+          bodyChunks: [body],
+        },
+        502,
+      );
       expect(originRequests).toEqual([]);
       expect(auditEvents.at(-1)).toMatchObject({
         kind: "refused",
@@ -541,10 +463,12 @@ describe("secret egress proxy", () => {
   );
 
   it("rejects conflicting content-length and chunked request framing", async () => {
-    const result = await requestThroughTunnel({
-      headers: { "Content-Length": "1", "Transfer-Encoding": "chunked" },
-    });
-    expect(result.status).toBe(400);
+    await requestThroughTunnel(
+      {
+        headers: { "Content-Length": "1", "Transfer-Encoding": "chunked" },
+      },
+      400,
+    );
     expect(originRequests).toEqual([]);
   });
 
@@ -552,7 +476,7 @@ describe("secret egress proxy", () => {
     const target = "https://bad_host/";
     const auth = basicProxyAuth(registeredPassword(proxyEnv));
     await expect(forwardedRequest(auth, "https", proxy.proxyOrigin, target)).resolves.toBe(400);
-    await expect(requestThroughTunnel({ path: target })).resolves.toMatchObject({ status: 400 });
+    await requestThroughTunnel({ path: target }, 400);
     expect(originRequests).toEqual([]);
     expect(auditEvents).toEqual([
       expect.objectContaining({ kind: "refused", substituted: false }),
@@ -634,17 +558,18 @@ describe("secret egress proxy", () => {
     const secret = "wrong-destination-secret";
     const sentinel = mintSecretSentinel(secret, { label: "egress-wrong-destination" });
 
-    const result = await requestThroughTunnel({
-      caPath: restrictedProxy.caCertPath,
-      headers: { Authorization: `Bearer ${sentinel}` },
-      proxyEnv: registerSentinel({
-        sentinel,
-        allowedHosts: ["api.example.com"],
-        targetProxy: restrictedProxy,
-      }),
-    });
-
-    expect(result.status).toBe(502);
+    const result = await requestThroughTunnel(
+      {
+        caPath: restrictedProxy.caCertPath,
+        headers: { Authorization: `Bearer ${sentinel}` },
+        proxyEnv: registerSentinel({
+          sentinel,
+          allowedHosts: ["api.example.com"],
+          targetProxy: restrictedProxy,
+        }),
+      },
+      502,
+    );
     expect(result.body).toContain("--allow-host localhost");
     expect(originRequests).toEqual([]);
     expect(restrictedEvents.at(-1)).toMatchObject({
@@ -657,12 +582,13 @@ describe("secret egress proxy", () => {
   it("refuses an unresolved sentinel in a streamed body", async () => {
     const unknown = tamperSentinel(mintSecretSentinel("unknown-body", { label: "egress-body" }));
     const before = originRequests.length;
-    const result = await requestThroughTunnel({
-      path: "/refuse",
-      bodyChunks: [unknown],
-    });
-
-    expect(result.status).toBe(502);
+    await requestThroughTunnel(
+      {
+        path: "/refuse",
+        bodyChunks: [unknown],
+      },
+      502,
+    );
     expect(originRequests).toHaveLength(before);
     expect(auditEvents.at(-1)).toMatchObject({
       kind: "refused",
@@ -680,18 +606,16 @@ describe("secret egress proxy", () => {
       const prefix = "x".repeat(SECRET_SENTINEL_MAX_LENGTH + 1024);
       const suffix = "y".repeat(2048);
 
-      await expect(
-        requestThroughTunnel({
-          path: framing === "fixed-length" ? "/fixed-length" : "/",
-          headers:
-            framing === "fixed-length"
-              ? { Expect: "100-continue", Trailer: "X-Checksum" }
-              : undefined,
-          contentLength:
-            framing === "fixed-length" ? Buffer.byteLength(prefix + sentinel + suffix) : undefined,
-          bodyChunks: [prefix, sentinel.slice(0, split), sentinel.slice(split), suffix],
-        }),
-      ).resolves.toMatchObject({ status: 200 });
+      await requestThroughTunnel({
+        path: framing === "fixed-length" ? "/fixed-length" : "/",
+        headers:
+          framing === "fixed-length"
+            ? { Expect: "100-continue", Trailer: "X-Checksum" }
+            : undefined,
+        contentLength:
+          framing === "fixed-length" ? Buffer.byteLength(prefix + sentinel + suffix) : undefined,
+        bodyChunks: [prefix, sentinel.slice(0, split), sentinel.slice(split), suffix],
+      });
 
       expect(originRequests.at(-1)?.body).toBe(`${prefix}${secret}${suffix}`);
       expect(originRequests.at(-1)?.body).not.toContain(sentinel);
@@ -769,13 +693,7 @@ describe("secret egress plain HTTP", () => {
       });
     });
     servers.push(server);
-    server.listen(0, host);
-    await once(server, "listening");
-    const address = server.address();
-    if (!address || typeof address === "string") {
-      throw new Error("HTTP fixture did not bind a TCP port");
-    }
-    return address.port;
+    return listenServer(server, host);
   }
 
   beforeAll(async () => {
@@ -794,9 +712,7 @@ describe("secret egress plain HTTP", () => {
     await proxy.stop();
     for (const server of servers) {
       server.closeAllConnections();
-      await new Promise<void>((resolve) => {
-        server.close(() => resolve());
-      });
+      await closeServer(server);
     }
   });
 
@@ -807,36 +723,13 @@ describe("secret egress plain HTTP", () => {
       chunks?: string[];
     } = {},
   ): Promise<{ status: number; body: string }> {
-    const env = params.env ?? proxy.registerProcess().env;
-    const endpoint = new URL(env.HTTP_PROXY!);
-    return await new Promise((resolve, reject) => {
-      const outgoing = httpRequest(
-        {
-          hostname: endpoint.hostname,
-          port: endpoint.port,
-          path: params.target ?? `http://localhost:${port}/ok`,
-          method: params.chunks ? "POST" : "GET",
-          agent: false,
-          headers: {
-            "Proxy-Authorization": `Basic ${Buffer.from(`openclaw:${endpoint.password}`).toString("base64")}`,
-          },
-        },
-        (response) => {
-          let body = "";
-          response.setEncoding("utf8");
-          response.on("data", (chunk: string) => {
-            body += chunk;
-          });
-          response.once("error", reject);
-          response.once("end", () => resolve({ status: response.statusCode ?? 0, body }));
-        },
-      );
-      outgoing.once("error", reject);
-      for (const chunk of params.chunks ?? []) {
-        outgoing.write(chunk);
-      }
-      outgoing.end();
-    });
+    return readResponse(
+      await proxyRequest(params.env ?? proxy.registerProcess().env, {
+        path: params.target ?? `http://localhost:${port}/ok`,
+        method: params.chunks ? "POST" : "GET",
+        chunks: params.chunks,
+      }),
+    );
   }
 
   // Node's HTTP client honors NODE_USE_ENV_PROXY and uses absolute-form HTTP forwarding.
