@@ -98,6 +98,77 @@ describe("session pull request snapshot store", () => {
     store.unwatch(passiveOwner);
   });
 
+  it("retains branch and matching task metadata in receipt-only updates without reviving removed receipts", async () => {
+    vi.useFakeTimers();
+    const { harness, store, owner } = createStoreHarness();
+    const sidebar = {};
+    const key = "agent:main:demo";
+    const branch = { owner: "example", repo: "repository", branch: "feature/parent" };
+    const pullRequest = { ...branch, number: 40, state: "open" };
+    const task = (number: number) => ({
+      ...branch,
+      url: `https://github.com/example/repository/pull/${number}`,
+      number,
+      sourceSessionKey: `agent:main:child-${number}`,
+      sourceAgentId: "main",
+    });
+    const retained = { ...task(1), pullRequest: { ...pullRequest, number: 1 } };
+    store.watch(sidebar, [key], { passive: true });
+    store.watch(owner, [key], { foreground: true });
+    await flushSync();
+    harness.emit({
+      sessions: {
+        [key]: {
+          pullRequests: [pullRequest],
+          branch,
+          repository: branch,
+          taskPullRequests: [retained, task(2)],
+          taskPullRequestCount: 2,
+          rateLimited: false,
+          status: "ready",
+        },
+      },
+    });
+    store.unwatch(owner);
+    await flushSync();
+    harness.emit({
+      sessions: {
+        [key]: {
+          branchRead: false,
+          pullRequests: [],
+          taskPullRequests: [task(1)],
+          taskPullRequestCount: 1,
+          rateLimited: false,
+          status: "ready",
+        },
+      },
+    });
+    expect(store.get(key)).toMatchObject({
+      branchRead: false,
+      branch,
+      pullRequests: [pullRequest],
+      taskPullRequests: [retained],
+      taskPullRequestCount: 1,
+    });
+    const calls = harness.request.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(harness.request).toHaveBeenCalledTimes(calls);
+    harness.emit({
+      sessions: {
+        [key]: {
+          pullRequests: [],
+          taskPullRequests: [],
+          taskPullRequestCount: 0,
+          rateLimited: false,
+          status: "ready",
+        },
+      },
+    });
+    expect(store.get(key)?.pullRequests).toEqual([]);
+    expect(store.get(key)?.taskPullRequests).toEqual([]);
+    store.unwatch(sidebar);
+  });
+
   it("coalesces refresh bursts while a subscription request is unsettled and keeps one trailing refresh", async () => {
     const { harness, store, owner } = createStoreHarness();
     const key = "agent:main:demo";

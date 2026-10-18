@@ -56,6 +56,8 @@ export type ControlUiSessionPrReadContext = {
   // Internal consumers can inspect all fetched PRs without expanding the UI.
   projection?: "publication";
   onBranchRead?: (snapshot: ControlUiSessionPullRequests) => void;
+  /** Same-source branch-only facts retained by the subscription owner, not a fresh read. */
+  branchSnapshot?: ControlUiSessionPullRequests;
   assertCurrent: () => void;
 };
 

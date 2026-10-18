@@ -307,7 +307,9 @@ export function sessionPullRequestsForGateway(
       if (
         current &&
         canRetainCurrent &&
-        (snapshot.status === "rate-limited" || snapshot.status === "unavailable") &&
+        (snapshot.branchRead === false ||
+          snapshot.status === "rate-limited" ||
+          snapshot.status === "unavailable") &&
         snapshot.pullRequests.length === 0
       ) {
         next = {
@@ -315,6 +317,18 @@ export function sessionPullRequestsForGateway(
           pullRequests: current.pullRequests,
           branch: snapshot.branch ?? current.branch,
           repository: snapshot.repository ?? current.repository,
+        };
+      }
+      if (snapshot.branchRead === false && current?.taskPullRequests) {
+        const retained = new Map(
+          current.taskPullRequests.map((task) => [task.url, task.pullRequest]),
+        );
+        next = {
+          ...next,
+          // Membership is authoritative even when passive reads omit GitHub metadata.
+          taskPullRequests: snapshot.taskPullRequests?.map((task) =>
+            Object.assign({}, task, { pullRequest: task.pullRequest ?? retained.get(task.url) }),
+          ),
         };
       }
       snapshots.set(sessionKey, next);

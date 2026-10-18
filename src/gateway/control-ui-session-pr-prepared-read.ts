@@ -49,10 +49,34 @@ export type PreparedSessionPrState = {
   connIds: Set<string>;
   target: ControlUiSessionPrTarget;
   cacheLifetime: AbortController;
+  sourceIdentity?: string;
   snapshot?: ControlUiSessionPullRequestSnapshot;
   branchSnapshot?: ControlUiSessionPullRequestSnapshot;
   prepared?: boolean;
 };
+
+/** Retain only branch facts across audience/mode changes on the same physical source. */
+export function retainControlUiSessionPrBranchSnapshot(
+  state: PreparedSessionPrState,
+  previous: PreparedSessionPrState | undefined,
+) {
+  if (
+    !previous?.target.branchIdentity ||
+    previous.target.branchIdentity !== state.target.branchIdentity ||
+    previous.target.taskReceipts?.ownerProfileId !== state.target.taskReceipts?.ownerProfileId
+  ) {
+    return;
+  }
+  state.sourceIdentity ??= previous.sourceIdentity;
+  if (
+    state.sourceIdentity === previous.sourceIdentity &&
+    previous.branchSnapshot &&
+    state.branchSnapshot !== previous.branchSnapshot
+  ) {
+    state.branchSnapshot = previous.branchSnapshot;
+    state.snapshot = undefined;
+  }
+}
 
 /** Background readers publish into the subscription owner's existing cells and concurrency. */
 export function createControlUiSessionPrPreparedRead<State extends PreparedSessionPrState>(deps: {
@@ -64,7 +88,7 @@ export function createControlUiSessionPrPreparedRead<State extends PreparedSessi
   ) => Promise<T>;
   load: LoadSessionPullRequests;
   keyStates: Map<string, State>;
-  stateForTarget: (sessionKey: string, target: ControlUiSessionPrTarget) => State;
+  stateForTarget: (target: ControlUiSessionPrTarget) => State;
   getSessionRowProjection?: () => SessionRowProjection | undefined;
 }) {
   const { scope, limit, withSource, load, keyStates, stateForTarget } = deps;
@@ -183,7 +207,7 @@ export function createControlUiSessionPrPreparedRead<State extends PreparedSessi
       }
     }
     preparedTargets.set(session, target.identity);
-    const state = stateForTarget(target.params.sessionKey, target);
+    const state = stateForTarget(target);
     const preparedTarget = state.target;
     state.prepared = true;
     // Bootstrap a cold service cell from an active viewer's branch-only publication.

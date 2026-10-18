@@ -17,7 +17,8 @@ import type { SidebarRecentSession } from "./app-sidebar-session-types.ts";
 type IndicatorEntry = {
   summary: SessionCatalogPullRequestSummary | undefined;
   worktreeId: string;
-  count: number;
+  count: number | undefined;
+  branchKnown: boolean;
 };
 
 type SessionPullRequestIndicatorsOptions = {
@@ -162,6 +163,11 @@ export function createSessionPullRequestIndicators(options: SessionPullRequestIn
           }
           continue;
         }
+        const branchKnown =
+          snapshot.branchRead !== false ||
+          snapshot.pullRequestCount !== undefined ||
+          snapshot.pullRequests.length > 0 ||
+          (prior?.worktreeId === (row.worktreeId ?? "") && prior.branchKnown);
         entries.set(row.key, {
           summary: summarizeSessionPullRequests(
             [
@@ -173,12 +179,15 @@ export function createSessionPullRequestIndicators(options: SessionPullRequestIn
             prior?.summary,
           ),
           worktreeId: row.worktreeId ?? "",
+          branchKnown,
           count:
-            snapshot.pullRequestCount ??
-            Math.max(
-              displaySessionPullRequests(snapshot).length,
-              snapshot.taskPullRequestCount ?? 0,
-            ),
+            !branchKnown && snapshot.pullRequests.length === 0 && !snapshot.taskPullRequestCount
+              ? undefined
+              : (snapshot.pullRequestCount ??
+                Math.max(
+                  displaySessionPullRequests(snapshot).length,
+                  snapshot.taskPullRequestCount ?? 0,
+                )),
         });
       }
     }
@@ -199,8 +208,10 @@ export function createSessionPullRequestIndicators(options: SessionPullRequestIn
         return undefined;
       }
       const entry = current.entries.get(sessionKey);
-      // Ready-empty is authoritative; only seed rows before their first snapshot.
-      return entry?.worktreeId === worktreeId ? entry.summary : initial;
+      // Receipt-only hydration says nothing about a catalog branch summary.
+      return entry?.worktreeId === worktreeId
+        ? (entry.summary ?? (!entry.branchKnown ? initial : undefined))
+        : initial;
     },
   };
 }

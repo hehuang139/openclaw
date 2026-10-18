@@ -343,6 +343,39 @@ describe("Passive sidebar PR indicators", () => {
     expect(host.indicators.count(row.key)).toBe(0);
   });
 
+  it("preserves catalog branch facts only while receipt-only hydration leaves the branch unread", async () => {
+    vi.useFakeTimers();
+    const harness = createGatewayHarness();
+    const row = {
+      key: "agent:main:task",
+      isChild: false,
+      worktreeId: "wt",
+    } as SidebarRecentSession;
+    const initial = { numbers: [40], state: "open" as const };
+    const host = mountLifecycleHost(harness.gateway, () => [row]);
+    await host.updateComplete;
+    await vi.advanceTimersByTimeAsync(0);
+    for (const [index, branchRead] of [false, undefined, false].entries()) {
+      harness.emit({
+        sessions: {
+          [row.key]: {
+            ...(branchRead === false ? { branchRead } : {}),
+            pullRequests: [],
+            taskPullRequests: [],
+            taskPullRequestCount: 0,
+            rateLimited: false,
+            status: "ready",
+          },
+        },
+      });
+      await host.updateComplete;
+      expect(host.indicators.summary(row.key, "wt", initial)).toEqual(
+        index === 0 ? initial : undefined,
+      );
+      expect(host.indicators.count(row.key)).toBe(index === 0 ? undefined : 0);
+    }
+  });
+
   it("clears alias indicators when the selected agent changes", async () => {
     vi.useFakeTimers();
     const harness = createGatewayHarness();

@@ -131,10 +131,12 @@ export type ControlUiSessionTaskPullRequest = {
 };
 
 export type ControlUiSessionPullRequests = {
+  /** Branch facts were not refreshed; empty fields do not invalidate retained UI facts. */
+  branchRead?: false;
   taskPullRequests?: ControlUiSessionTaskPullRequest[];
   /** Total distinct publications, independent of the bounded preview. */
   taskPullRequestCount?: number;
-  /** Total distinct task and current-branch PRs, including omitted preview entries. */
+  /** Total distinct task and current-branch PRs; absent when branch membership is unknown. */
   pullRequestCount?: number;
   pullRequests: ControlUiSessionPullRequest[];
   /** GitHub remote identity, independent of whether a PR or branch row exists. */

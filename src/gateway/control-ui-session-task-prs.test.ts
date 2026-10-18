@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import * as gitReads from "../infra/git-read-cache.js";
 import { publicationRowDefaults } from "../state/github-publication-fixtures.test-support.js";
 import type { RepositoryGitHubPublicationRow } from "../state/github-publication-read.types.js";
 import * as stateReads from "../state/openclaw-state-db-readonly.js";
@@ -206,7 +207,12 @@ it("reads own and nested receipts without a checkout, refreshes on commit, and n
   vi.stubGlobal("fetch", fetcher);
   const reads = vi.spyOn(stateReads, "executeExistingOpenClawStateRead");
   await passive();
-  expect(snapshots().at(-1)).toMatchObject({ pullRequests: [], taskPullRequestCount: 2 });
+  expect(snapshots().at(-1)).toMatchObject({
+    branchRead: false,
+    pullRequests: [],
+    taskPullRequestCount: 2,
+  });
+  expect(snapshots().at(-1)?.pullRequestCount).toBeUndefined();
   expect(
     snapshots()
       .at(-1)
@@ -223,6 +229,62 @@ it("reads own and nested receipts without a checkout, refreshes on commit, and n
   receipt(child, 3);
   await vi.waitFor(() => expect(snapshots().at(-1)?.taskPullRequestCount).toBe(3));
   expect(fetcher).not.toHaveBeenCalled();
+});
+
+it("retains an external branch PR when active watching becomes passive without polling", async () => {
+  await fixture.seedRepository();
+  for (let number = 1; number <= 25; number++) {
+    receipt(sessionKey, number);
+  }
+  const fetcher = vi.fn<typeof fetch>(async (input) => {
+    const url = requestUrl(input);
+    const number = Number(new URL(url).pathname.split("/").at(-1)) || 40;
+    const item = pullListItem({
+      number,
+      state: "closed",
+      html_url: "https://github.com/example/repository/pull/" + number,
+      base: { repo: { name: "repository", owner: { login: "example" } } },
+    });
+    return githubJson(url.includes("?head=") ? [item] : item);
+  });
+  vi.stubGlobal("fetch", fetcher);
+  await fixture.subscribe();
+  await fixture.subscriptions.pollNow();
+  const active = snapshots().at(-1);
+  expect(active).toMatchObject({
+    pullRequests: [{ number: 40 }],
+    taskPullRequestCount: 25,
+    pullRequestCount: 26,
+  });
+  const git = vi.spyOn(gitReads, "runGitReadOperation");
+  const networkCalls = fetcher.mock.calls.length;
+  // Another browser may already retain this profile's passive audience cell.
+  await passive(fixture.addReader("passive-peer").client);
+  await passive();
+  expect(snapshots().at(-1)).toMatchObject({
+    branchRead: false,
+    pullRequests: active?.pullRequests,
+    repository: active?.repository,
+    taskPullRequestCount: 25,
+    pullRequestCount: 26,
+  });
+  // This overlap is outside the preview: counting only visible URLs is incorrect.
+  receipt(sessionKey, 40, "passive-overlap", { updated_at_ms: 1 });
+  await vi.waitFor(() =>
+    expect(snapshots().at(-1)).toMatchObject({
+      branchRead: false,
+      taskPullRequestCount: 26,
+      pullRequestCount: 26,
+    }),
+  );
+  expect(
+    snapshots()
+      .at(-1)
+      ?.taskPullRequests?.some((pr) => pr.number === 40),
+  ).toBe(false);
+  await fixture.subscriptions.pollNow();
+  expect(git).not.toHaveBeenCalled();
+  expect(fetcher).toHaveBeenCalledTimes(networkCalls);
 });
 
 it("keeps personal receipts viewer-scoped and withdraws inaccessible descendants", async () => {

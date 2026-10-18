@@ -471,7 +471,7 @@ export async function loadControlUiSessionPullRequests(
     return loadControlUiSessionBranchPullRequests(params, deps);
   }
   const branch: ControlUiSessionPullRequests = deps.read.target.taskReceiptsOnly
-    ? { pullRequests: [], rateLimited: false }
+    ? (deps.read.branchSnapshot ?? { pullRequests: [], rateLimited: false })
     : await loadControlUiSessionBranchPullRequests(params, deps).catch(() => ({
         pullRequests: [],
         rateLimited: false,
@@ -491,7 +491,13 @@ export async function loadControlUiSessionPullRequests(
     deps.cacheSignal,
   );
   if (deps.read.target.taskReceiptsOnly) {
-    return { ...branch, ...task };
+    return {
+      ...branch,
+      taskPullRequests: task.taskPullRequests,
+      taskPullRequestCount: task.taskPullRequestCount,
+      ...(deps.read.branchSnapshot ? { pullRequestCount: task.pullRequestCount } : {}),
+      branchRead: false,
+    };
   }
   const taskPullRequests = [];
   let taskMetadataUnavailable = false;
