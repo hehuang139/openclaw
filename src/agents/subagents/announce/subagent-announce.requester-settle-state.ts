@@ -1,3 +1,4 @@
+import type { DeliveryContext } from "../../../utils/delivery-context.shared.js";
 import type {
   RequesterSettleWakeState,
   SubagentRunRecord,
@@ -50,6 +51,15 @@ export type RequesterSettleWakeBatchCallbacks = {
     delivery?: SubagentAnnounceDeliveryResult,
     onCommitted?: () => void,
   ) => void | Promise<void>;
+};
+
+export type RequesterSettleWakeParams = RequesterSettleWakeBatchCallbacks & {
+  requesterSessionKey: string;
+  requesterOrigin?: DeliveryContext;
+  settledEntry: SubagentRunRecord;
+  signal?: AbortSignal;
+  isSourceCurrent: () => boolean;
+  onDescendantsPending?: (deadline?: number) => void;
 };
 
 export function waitForRequesterDescendants(

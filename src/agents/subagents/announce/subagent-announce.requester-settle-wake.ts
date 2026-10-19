@@ -6,10 +6,7 @@ import {
   type SessionControllerInput,
 } from "../../../sessions/session-controller.mailbox.js";
 import { isCronSessionKey } from "../../../sessions/session-key-utils.js";
-import {
-  type DeliveryContext,
-  normalizeDeliveryContext,
-} from "../../../utils/delivery-context.shared.js";
+import { normalizeDeliveryContext } from "../../../utils/delivery-context.shared.js";
 import { resolveSubagentRequesterAgentId } from "../../subagent-requester-owner.js";
 import {
   getFollowupForCohort,
@@ -73,7 +70,7 @@ import {
   resolveRequesterSettlePolicy,
   waitForRequesterDescendants,
   type RequesterSettleWakeBatchState,
-  type RequesterSettleWakeBatchCallbacks,
+  type RequesterSettleWakeParams,
 } from "./subagent-announce.requester-settle-state.js";
 
 /**
@@ -83,14 +80,7 @@ import {
  * this owner never schedules a timer or replays an uncertain effect.
  */
 export async function maybeWakeRequesterAfterAllChildrenSettled(
-  params: RequesterSettleWakeBatchCallbacks & {
-    requesterSessionKey: string;
-    requesterOrigin?: DeliveryContext;
-    settledEntry: SubagentRunRecord;
-    signal?: AbortSignal;
-    isSourceCurrent: () => boolean;
-    onDescendantsPending?: (deadline?: number) => void;
-  },
+  params: RequesterSettleWakeParams,
 ): Promise<boolean> {
   let input: SessionControllerInput | undefined;
   return withSubagentRequesterSource(
@@ -466,6 +456,10 @@ async function maybeWakeRequesterAfterAllChildrenSettledBound(
     if (recoveryCustody?.status === "pending") {
       return false;
     }
+    const recoveryReceiptOnly =
+      !parentOnly &&
+      recoveryRows.length === completionRows.length &&
+      recoveryCustody?.status === "settled";
     const { batchKey } = identity;
     const directIdempotencyKey = recoveryCustody?.runId ?? identity.runId;
     const sourceReceiptAdmission = createRequesterSettleReceiptAdmission({
@@ -620,8 +614,8 @@ async function maybeWakeRequesterAfterAllChildrenSettledBound(
       state.status === "dispatching" ? state.attemptCount : Math.max(1, state.attemptCount + 1);
     let delivery: Awaited<ReturnType<typeof deliverSubagentAnnouncement>>;
     try {
-      const dispatch = () =>
-        subagentRuns.runWithCompletionBatchAuthority(settledBatch, () =>
+      const dispatch = () => {
+        const deliver = () =>
           deliverSubagentAnnouncement({
             requesterSessionKey,
             requesterAgentId,
@@ -641,6 +635,7 @@ async function maybeWakeRequesterAfterAllChildrenSettledBound(
             resolveGatewayContext,
             isSourceSessionEffectsAllowed,
             sourceReceiptAdmission,
+            ...(recoveryReceiptOnly ? { recoveryReceiptOnly: true as const } : {}),
             controllerInput,
             onAccepted: () => {
               dispatchAccepted = true;
@@ -666,8 +661,11 @@ async function maybeWakeRequesterAfterAllChildrenSettledBound(
               );
               dispatchPrepared = true;
             },
-          }),
-        );
+          });
+        return recoveryReceiptOnly
+          ? deliver()
+          : subagentRuns.runWithCompletionBatchAuthority(settledBatch, deliver);
+      };
       delivery = await withSubagentProgressDraft(settledBatch, directIdempotencyKey, () =>
         followup
           ? withFollowupSuccessor(
@@ -699,6 +697,9 @@ async function maybeWakeRequesterAfterAllChildrenSettledBound(
     }
     if (delivery.disposition !== "session_queued") {
       retireUnadoptedInput();
+    }
+    if (recoveryReceiptOnly && !isSourceSessionEffectsAllowed()) {
+      return false;
     }
     if (delivery.delivered) {
       await completeBatch(settledBatch, state, delivery, requesterEntry.sessionId);
