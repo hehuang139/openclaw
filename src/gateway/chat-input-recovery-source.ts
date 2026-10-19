@@ -22,6 +22,8 @@ type ChatInputRecovery = {
     | "originatingAccountId"
     | "originatingThreadId"
     | "suppressCommandInterpretation"
+    | "systemInputProvenance"
+    | "systemProvenanceReceipt"
   >;
 };
 
@@ -62,6 +64,8 @@ export function createChatInputRecovery(params: {
       originatingAccountId: p.originatingAccountId,
       originatingThreadId: p.originatingThreadId,
       suppressCommandInterpretation: p.suppressCommandInterpretation,
+      systemInputProvenance: request.systemInputProvenance,
+      systemProvenanceReceipt: request.systemProvenanceReceipt,
     },
   };
 }

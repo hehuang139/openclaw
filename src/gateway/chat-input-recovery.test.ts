@@ -34,6 +34,8 @@ import {
 import { createContext } from "./server-plugin-in-process-dispatch.test-support.js";
 
 const dispatch = vi.hoisted(() => vi.fn());
+const externalProvenance = { kind: "external_user" as const, sourceTool: "acp_bridge" };
+const sourceReceipt = "[Synthetic trusted source receipt]";
 vi.mock(import("./server-in-process-dispatch.js"), async (importOriginal) => ({
   ...(await importOriginal()),
   dispatchGatewayRequestInProcess: dispatch,
@@ -48,14 +50,20 @@ async function withInput(
   run: (input: Awaited<ReturnType<typeof prepareInput>>) => Promise<void>,
   consumed = false,
   approvedText = "Approved redacted input",
+  withProvenance = false,
 ) {
   return withOpenClawTestState({ scenario: "minimal" }, async ({ stateDir }) => {
-    const input = await prepareInput(stateDir, consumed, approvedText);
+    const input = await prepareInput(stateDir, consumed, approvedText, withProvenance);
     await run(input);
   });
 }
 
-async function prepareInput(stateDir: string, consumed: boolean, approvedText: string) {
+async function prepareInput(
+  stateDir: string,
+  consumed: boolean,
+  approvedText: string,
+  withProvenance: boolean,
+) {
   await loadOrCreateDeviceIdentityAsync();
   const profile = ensureProfileForEmail("input-recovery@example.test");
   const fixture = await createOperatorRecoveryFixture({
@@ -73,6 +81,9 @@ async function prepareInput(stateDir: string, consumed: boolean, approvedText: s
       fastMode: true,
       timeoutMs: 42_000,
       queueMode: "followup",
+      ...(withProvenance
+        ? { systemInputProvenance: externalProvenance, systemProvenanceReceipt: sourceReceipt }
+        : {}),
     },
   });
   if (!request.ok) {
@@ -195,42 +206,51 @@ describe("interrupted chat input recovery", () => {
       );
     }));
 
-  it("retains approved input, media, request identity and chat options under the original operator", () =>
-    withInput(async ({ fixture, target, message, options }) => {
-      dispatch.mockImplementation(async (method, params, requestOptions) => {
-        expect(method).toBe("chat.send");
-        expect(params).toMatchObject({
-          sessionKey: target.sessionKey,
-          sessionId: target.sessionId,
-          idempotencyKey: target.runId,
-          message: "Approved redacted input",
-          fastMode: true,
-          timeoutMs: 42_000,
-          queueMode: "followup",
+  it("retains approved input, media, identity, provenance and chat options under the original operator", () =>
+    withInput(
+      async ({ fixture, target, message, options }) => {
+        dispatch.mockImplementation(async (method, params, requestOptions) => {
+          expect(method).toBe("chat.send");
+          expect(params).toMatchObject({
+            sessionKey: target.sessionKey,
+            sessionId: target.sessionId,
+            idempotencyKey: target.runId,
+            message: "Approved redacted input",
+            fastMode: true,
+            timeoutMs: 42_000,
+            queueMode: "followup",
+          });
+          expect(JSON.stringify(params)).not.toContain("Original private input");
+          expect(readChatInputRecoveryAdmission(target.runId)).toMatchObject({
+            message,
+            requestFingerprint: "original-request-fingerprint",
+            clientInfo: fixture.client.connect.client,
+          });
+          const normalized = await normalizeChatSendRequest({
+            params,
+            client: requestOptions.client,
+          });
+          expect(normalized).toMatchObject({
+            ok: true,
+            value: {
+              requestIdentity: message["__openclaw"]?.chatRequestIdentity,
+              systemInputProvenance: externalProvenance,
+              systemProvenanceReceipt: sourceReceipt,
+            },
+          });
+          requestOptions.sessionMutationCommitGuard();
+          expect(requestOptions.client.internal.operatorRunAuthority.profileId).toBe(
+            fixture.client.authenticatedUserProfile?.profileId,
+          );
         });
-        expect(JSON.stringify(params)).not.toContain("Original private input");
-        expect(readChatInputRecoveryAdmission(target.runId)).toMatchObject({
-          message,
-          requestFingerprint: "original-request-fingerprint",
-          clientInfo: fixture.client.connect.client,
-        });
-        const normalized = await normalizeChatSendRequest({
-          params,
-          client: requestOptions.client,
-        });
-        expect(normalized).toMatchObject({
-          ok: true,
-          value: { requestIdentity: message["__openclaw"]?.chatRequestIdentity },
-        });
-        requestOptions.sessionMutationCommitGuard();
-        expect(requestOptions.client.internal.operatorRunAuthority.profileId).toBe(
-          fixture.client.authenticatedUserProfile?.profileId,
-        );
-      });
-      await resumeChatInput(fixture.context, target, options);
-      expect(dispatch).toHaveBeenCalledOnce();
-      expect(readChatInputRecoveryAdmission(target.runId)).toBeUndefined();
-    }));
+        await resumeChatInput(fixture.context, target, options);
+        expect(dispatch).toHaveBeenCalledOnce();
+        expect(readChatInputRecoveryAdmission(target.runId)).toBeUndefined();
+      },
+      false,
+      "Approved redacted input",
+      true,
+    ));
 
   it.each(["cancelled", "consumed", "expired", "archived", "replaced", "permission"] as const)(
     "does not dispatch a %s input",
