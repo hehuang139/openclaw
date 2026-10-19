@@ -16,6 +16,13 @@ import {
 } from "./attempt-async-tasks.js";
 
 const sessionKey = "agent:main:cron:daily-media:run:run-123";
+const emptyResult = { waitedRunIds: [], timedOutRunIds: [], terminalTasks: [] };
+function taskMeta(task: ReturnType<typeof startTask>): AsyncStartedToolMeta {
+  return { asyncStarted: true, asyncTaskRunId: task.runId, asyncTaskId: task.taskId };
+}
+function terminalTask(taskId: string) {
+  return { taskId, status: "succeeded", terminalSummary: "Generated media." };
+}
 function startTask(kind = "image", requesterSessionKey = sessionKey) {
   const runId = `tool:${kind}_generate:run-123`;
   const task = createMediaGenerationOperation({
@@ -81,9 +88,7 @@ describe("waitForCompletionRequiredAsyncTasks", () => {
     await expect(wait({ sleep: async () => completeTask(task.taskId, 2) })).resolves.toMatchObject({
       waitedRunIds: [task.runId],
       timedOutRunIds: [],
-      terminalTasks: [
-        { taskId: task.taskId, status: "succeeded", terminalSummary: "Generated media." },
-      ],
+      terminalTasks: [terminalTask(task.taskId)],
     });
   });
 
@@ -99,34 +104,24 @@ describe("waitForCompletionRequiredAsyncTasks", () => {
             updateMediaGenerationOperation(task.taskId, { completionDelivery: "queued" });
           },
         }),
-      ).resolves.toEqual({ waitedRunIds: [task.runId], timedOutRunIds: [], terminalTasks: [] });
+      ).resolves.toEqual({ ...emptyResult, waitedRunIds: [task.runId] });
       expect(findMediaGenerationOperation(task.taskId)?.status).toBe("running");
       expect(requiresCompletionRequiredAsyncTaskWait({ sessionKey, toolMetas })).toBe(false);
       await expect(
         wait({ getToolMetas: () => toolMetas, getDeadlineAtMs: () => 0 }),
-      ).resolves.toEqual({ waitedRunIds: [], timedOutRunIds: [], terminalTasks: [] });
+      ).resolves.toEqual(emptyResult);
     },
   );
 
   it("ignores media operations owned by another requester", async () => {
     startTask("image", "agent:main:parent");
     expect(requiresCompletionRequiredAsyncTaskWait({ sessionKey, toolMetas: [] })).toBe(false);
-    await expect(wait({ getDeadlineAtMs: () => 0 })).resolves.toEqual({
-      waitedRunIds: [],
-      timedOutRunIds: [],
-      terminalTasks: [],
-    });
+    await expect(wait({ getDeadlineAtMs: () => 0 })).resolves.toEqual(emptyResult);
   });
 
   it("waits for async task ids discovered after an earlier async completion", async () => {
     const first = startTask();
-    const metas: AsyncStartedToolMeta[] = [
-      {
-        asyncStarted: true,
-        asyncTaskRunId: first.runId,
-        asyncTaskId: first.taskId,
-      },
-    ];
+    const metas = [taskMeta(first)];
     // Registry admission prunes completed records against the real epoch.
     const startedAt = Date.now();
     let now = startedAt;
@@ -142,12 +137,7 @@ describe("waitForCompletionRequiredAsyncTasks", () => {
           now += ms;
           if (++polls === 1) {
             completeTask(first.taskId, now);
-            const next = startTask("music");
-            metas.push({
-              asyncStarted: true,
-              asyncTaskRunId: next.runId,
-              asyncTaskId: next.taskId,
-            });
+            metas.push(taskMeta(startTask("music")));
           } else {
             completeTask("tool:music_generate:run-123", now);
           }
@@ -157,7 +147,7 @@ describe("waitForCompletionRequiredAsyncTasks", () => {
       waitedRunIds: [first.runId, "tool:music_generate:run-123"],
       timedOutRunIds: [],
       terminalTasks: [
-        { taskId: first.taskId, status: "succeeded", terminalSummary: "Generated media." },
+        terminalTask(first.taskId),
         { taskId: "tool:music_generate:run-123", status: "succeeded" },
       ],
     });

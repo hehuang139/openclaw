@@ -1,9 +1,4 @@
-import {
-  createAssistantMessageEventStream,
-  type AssistantMessage,
-  type Context,
-  type Model,
-} from "openclaw/plugin-sdk/llm";
+import type { Context } from "openclaw/plugin-sdk/llm";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { readNestedToolActivity } from "../../../sessions/nested-tool-activity.js";
 import {
@@ -14,14 +9,17 @@ import {
 import { Agent } from "../../runtime/index.js";
 import { SessionManager } from "../../sessions/session-manager.js";
 import { wrapToolDefinition } from "../../sessions/tools/tool-definition-wrapper.js";
-import { createZeroUsageFixture } from "../../test-helpers/usage-fixtures.js";
+import { makeProviderModelFixture } from "../../test-helpers/provider-model-fixture.js";
 import { isToolResultError } from "../../tool-result-error.js";
 import { jsonResult } from "../../tools/common.js";
+import {
+  createAgentBackedAttemptSession,
+  streamAttemptAssistant,
+} from "./attempt-agent.test-support.js";
 import {
   cleanupTempPaths,
   createContextEngineAttemptRunner,
   createContextEngineBootstrapAndAssemble,
-  createDefaultEmbeddedSession,
   getHoisted,
   preloadRunEmbeddedAttemptForTests,
   resetEmbeddedAttemptHarness,
@@ -29,50 +27,19 @@ import {
 
 const hoisted = getHoisted();
 const tempPaths: string[] = [];
-const model: Model = {
+const model = makeProviderModelFixture({
   id: "test-model",
   name: "Test Model",
   api: "openai-responses",
   provider: "openai",
   baseUrl: "https://example.test",
-  reasoning: false,
-  input: ["text"],
-  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
   contextWindow: 8_192,
   maxTokens: 8_192,
-};
-
-function streamAssistant(content: AssistantMessage["content"]) {
-  const message: AssistantMessage = {
-    role: "assistant",
-    content,
-    api: model.api,
-    provider: model.provider,
-    model: model.id,
-    usage: createZeroUsageFixture(),
-    stopReason: content.some((entry) => entry.type === "toolCall") ? "toolUse" : "stop",
-    timestamp: Date.now(),
-  };
-  const stream = createAssistantMessageEventStream();
-  queueMicrotask(() => {
-    stream.push({
-      type: "done",
-      reason: message.stopReason === "toolUse" ? "toolUse" : "stop",
-      message,
-    });
-    stream.end();
-  });
-  return stream;
-}
+});
 
 describe("runEmbeddedAttempt Code Mode recovery boundary", () => {
-  beforeAll(async () => {
-    await preloadRunEmbeddedAttemptForTests();
-  });
-
-  beforeEach(() => {
-    resetEmbeddedAttemptHarness();
-  });
+  beforeAll(preloadRunEmbeddedAttemptForTests);
+  beforeEach(() => resetEmbeddedAttemptHarness());
 
   afterEach(async () => {
     await resetCodeModeTestState();
@@ -103,7 +70,6 @@ describe("runEmbeddedAttempt Code Mode recovery boundary", () => {
     ];
     const providerContexts: Context[] = [];
     const createSession = () => {
-      const session = createDefaultEmbeddedSession();
       const options = hoisted.createAgentSessionMock.mock.calls.at(-1)?.[0];
       if (!options?.customTools) {
         throw new Error("Expected the embedded attempt to supply custom tools");
@@ -118,7 +84,8 @@ describe("runEmbeddedAttempt Code Mode recovery boundary", () => {
           const turn = providerContexts.length;
           providerContexts.push(context);
           const code = programs[turn];
-          return streamAssistant(
+          return streamAttemptAssistant(
+            model,
             code === undefined
               ? [{ type: "text", text: "all changes verified" }]
               : [
@@ -132,22 +99,7 @@ describe("runEmbeddedAttempt Code Mode recovery boundary", () => {
           );
         },
       });
-      session.agent = agent as typeof session.agent;
-      Object.defineProperty(session, "messages", {
-        get: () => agent.state.messages,
-        set: (messages) => {
-          agent.state.messages = messages;
-        },
-      });
-      session.setActiveToolsByName = (toolNames) => {
-        agent.state.tools = allTools.filter((tool) => toolNames.includes(tool.name));
-      };
-      session.getActiveToolNames = () => agent.state.tools.map((tool) => tool.name);
-      session.prompt = async (prompt, promptOptions) => {
-        promptOptions?.preflightResult?.(true);
-        await agent.prompt(prompt);
-      };
-      return session;
+      return createAgentBackedAttemptSession(agent);
     };
 
     const result = await createContextEngineAttemptRunner({

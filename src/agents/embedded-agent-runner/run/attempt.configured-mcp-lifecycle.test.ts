@@ -1,4 +1,4 @@
-import { createAssistantMessageEventStream, type AssistantMessage } from "openclaw/plugin-sdk/llm";
+import { setImmediate as nextTurn } from "node:timers/promises";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../../../test/helpers/promise.js";
 import {
@@ -9,16 +9,17 @@ import type { SessionMcpRuntime } from "../../agent-bundle-mcp-types.js";
 import { Agent, type AgentMessage } from "../../runtime/index.js";
 import { SessionManager } from "../../sessions/session-manager.js";
 import { wrapToolDefinition } from "../../sessions/tools/tool-definition-wrapper.js";
-import { createZeroUsageFixture } from "../../test-helpers/usage-fixtures.js";
+import {
+  createAgentBackedAttemptSession,
+  streamAttemptAssistant,
+} from "./attempt-agent.test-support.js";
 import {
   cleanupTempPaths,
   createContextEngineAttemptRunner,
   createContextEngineBootstrapAndAssemble,
-  createDefaultEmbeddedSession,
   getHoisted,
   preloadRunEmbeddedAttemptForTests,
   resetEmbeddedAttemptHarness,
-  type EmbeddedAttemptSession,
 } from "./attempt-spawn-workspace.test-support.js";
 
 const hoisted = getHoisted();
@@ -56,6 +57,12 @@ describe("runEmbeddedAttempt configured MCP lifecycle (agents-embedded-agent-run
       const toolName = "silent__delayed_local";
       const runId = `configured-mcp-${cataloged}`;
       const sessionKey = "agent:main:main";
+      const eventIdentity = {
+        runId,
+        sessionId: "embedded-session",
+        sessionKey,
+        toolCallId: cataloged ? "tool_call:delayed-call:silent__delayed_local:1" : "delayed-call",
+      };
       const events: DiagnosticEventPayload[] = [];
       const requests: AgentMessage[][] = [];
       const catalog = {
@@ -107,7 +114,6 @@ describe("runEmbeddedAttempt configured MCP lifecycle (agents-embedded-agent-run
         sessionKey,
         tempPaths,
         createSession: () => {
-          const session: EmbeddedAttemptSession = createDefaultEmbeddedSession();
           const options = hoisted.createAgentSessionMock.mock.calls.at(-1)?.[0];
           if (!options?.model || !options.customTools) {
             throw new Error("The embedded runner did not prepare its session tools");
@@ -125,9 +131,9 @@ describe("runEmbeddedAttempt configured MCP lifecycle (agents-embedded-agent-run
             streamFn: (_model, context) => {
               requests.push(structuredClone(context.messages));
               const first = requests.length === 1;
-              const message: AssistantMessage = {
-                role: "assistant",
-                content: first
+              return streamAttemptAssistant(
+                model,
+                first
                   ? [
                       {
                         type: "toolCall",
@@ -137,37 +143,10 @@ describe("runEmbeddedAttempt configured MCP lifecycle (agents-embedded-agent-run
                       },
                     ]
                   : [{ type: "text", text: marker }],
-                api: model.api,
-                provider: model.provider,
-                model: model.id,
-                usage: createZeroUsageFixture(),
-                stopReason: first ? "toolUse" : "stop",
-                timestamp: Date.now(),
-              };
-              const stream = createAssistantMessageEventStream();
-              queueMicrotask(() => {
-                stream.push({ type: "done", reason: first ? "toolUse" : "stop", message });
-                stream.end();
-              });
-              return stream;
+              );
             },
           });
-          session.agent = agent;
-          Object.defineProperty(session, "messages", {
-            get: () => agent.state.messages,
-            set: (messages) => {
-              agent.state.messages = messages;
-            },
-          });
-          session.setActiveToolsByName = (names) => {
-            agent.state.tools = tools.filter((tool) => names.includes(tool.name));
-          };
-          session.getActiveToolNames = () => agent.state.tools.map((tool) => tool.name);
-          session.prompt = async (prompt, promptOptions) => {
-            promptOptions?.preflightResult?.(true);
-            await agent.prompt(prompt);
-          };
-          return session;
+          return createAgentBackedAttemptSession(agent);
         },
         attemptOverrides: {
           runId,
@@ -190,36 +169,22 @@ describe("runEmbeddedAttempt configured MCP lifecycle (agents-embedded-agent-run
             throw new Error("Tool never started");
           }),
         ]);
-        await new Promise<void>((resolve) => {
-          setImmediate(resolve);
-        });
+        await nextTurn();
         expect(events).toEqual([
           expect.objectContaining({
             type: "tool.execution.started",
-            runId,
-            sessionId: "embedded-session",
-            sessionKey,
-            toolCallId: cataloged
-              ? "tool_call:delayed-call:silent__delayed_local:1"
-              : "delayed-call",
+            ...eventIdentity,
           }),
         ]);
         expect(requests).toHaveLength(1);
         finish.resolve();
         const result = await attempt;
-        await new Promise<void>((resolve) => {
-          setImmediate(resolve);
-        });
+        await nextTurn();
         expect(events.map((event) => event.type)).toEqual([
           "tool.execution.started",
           "tool.execution.completed",
         ]);
-        expect(events[1]).toMatchObject({
-          runId,
-          sessionId: "embedded-session",
-          sessionKey,
-          toolCallId: cataloged ? "tool_call:delayed-call:silent__delayed_local:1" : "delayed-call",
-        });
+        expect(events[1]).toMatchObject(eventIdentity);
         expect(requests).toHaveLength(2);
         expect(requests[1]?.filter((message) => message.role === "toolResult")).toEqual([
           expect.objectContaining({
