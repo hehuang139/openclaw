@@ -1,6 +1,6 @@
 import { setImmediate } from "node:timers/promises";
 import { afterEach, expect, it, vi } from "vitest";
-import { createDeferred } from "../../test/helpers/promise.js";
+import { awaitGateBeforeSettlement, createDeferred } from "../../test/helpers/promise.js";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import { recordPersistedContextEngineQuarantine } from "../context-engine/quarantine-health.js";
 import { requireNodeSqlite } from "../infra/node-sqlite.js";
@@ -116,22 +116,16 @@ it.each([false, true])(
     let closing: Promise<void> | undefined;
     try {
       ({ server } = await startPluginGateway({ sidecarStartup: "defer" }));
-      let startupSettled = false;
+      const startupSettled = vi.fn<() => void>();
       const startup = server.startupSettled
         .catch((error: unknown) => error)
-        .finally(() => {
-          startupSettled = true;
-        });
-      expect(
-        await Promise.race([reached.promise.then(() => "worker"), startup.then(() => "settled")]),
-      ).toBe("worker");
-      let closed = false;
-      closing = server.close({ reason: "close during activation cleanup" }).then(() => {
-        closed = true;
-      });
+        .finally(startupSettled);
+      await awaitGateBeforeSettlement(reached.promise, startup, "startup bypassed cleanup");
+      const closed = vi.fn<() => void>();
+      closing = server.close({ reason: "close during activation cleanup" }).then(closed);
       await setImmediate();
-      expect(startupSettled).toBe(false);
-      expect(closed).toBe(false);
+      expect(startupSettled).not.toHaveBeenCalled();
+      expect(closed).not.toHaveBeenCalled();
       release.resolve();
       const [startupResult] = await Promise.all([startup, closing]);
       expect(startupResult).toBe(publicationThrows ? publicationFailure : undefined);
@@ -185,16 +179,9 @@ it.each([false, true])(
       }
       const reached = createDeferred();
       observer = holdHealthCleanup(engineId, reached, release);
-      let reloadSettled = false;
-      reload = reloadPlugin(socket).then((result) => {
-        reloadSettled = true;
-        return result;
-      });
-      const phase = await Promise.race([
-        reached.promise.then(() => "worker"),
-        reload.then(() => "settled"),
-      ]);
-      expect(phase).toBe("worker");
+      const reloadSettled = vi.fn<() => void>();
+      reload = reloadPlugin(socket).finally(reloadSettled);
+      await awaitGateBeforeSettlement(reached.promise, reload, "reload bypassed cleanup");
       const probe = await rpcReq<InstanceBindingProbeResult>(
         socket,
         INSTANCE_BINDING_PROBE_METHOD,
@@ -202,7 +189,7 @@ it.each([false, true])(
       );
       expect(probe.ok, probe.error?.message).toBe(true);
       expect(probe.payload?.reloadSettled).toBe(false);
-      expect(reloadSettled).toBe(false);
+      expect(reloadSettled).not.toHaveBeenCalled();
       release.resolve();
       const result = await reload;
       expect(result.ok).toBe(!publicationRefuses);

@@ -21,18 +21,14 @@ afterEach(() => {
 
 it.each(["in-process", "bound"] as const)(
   "resolves GitHub accounts through the %s trusted runtime and retains its lifetime",
-  async (mode) => {
-    await withOpenClawTestState(
+  (mode) =>
+    withOpenClawTestState(
       { scenario: "minimal", env: { GH_TOKEN: undefined, GITHUB_TOKEN: undefined } },
       async () => {
         const fixture = await createFixture("operator.read");
-        const cfg = {
-          ...fixture.cfg,
-          gateway: {
-            ...fixture.cfg.gateway,
-            controlUi: { github: { token: "synthetic-github-lookup-token" } },
-          },
-        };
+        const cfg = structuredClone(fixture.cfg);
+        assert(cfg.gateway);
+        cfg.gateway.controlUi = { github: { token: "synthetic-github-lookup-token" } };
         setRuntimeConfigSnapshot(cfg);
         const methods = createRequestGatewayMethodRegistry();
         fixture.context.getGatewayMethodRegistry = () => methods;
@@ -87,6 +83,10 @@ it.each(["in-process", "bound"] as const)(
         const fetcher = vi.fn<typeof fetch>();
         const respond = (body: unknown, init?: ResponseInit) =>
           fetcher.mockClear().mockResolvedValue(Response.json(body, init));
+        const expectLookupError = async (error: Record<string, unknown>) => {
+          await expect(lookup()).resolves.toMatchObject({ error });
+          expect(fetcher).toHaveBeenCalledTimes(1);
+        };
         vi.stubGlobal("fetch", fetcher);
         try {
           await expect(
@@ -106,28 +106,22 @@ it.each(["in-process", "bound"] as const)(
           await expect(lookup("../invalid")).resolves.toMatchObject({ error: { statusCode: 400 } });
           expect(fetcher).not.toHaveBeenCalled();
 
-          const errors: Array<[Response, number]> = [
-            ...[404, 503, 403, 401].map((status): [Response, number] => [
-              Response.json({ message: "private upstream body" }, { status }),
-              status === 503 ? 502 : status,
-            ]),
-            ...[
-              { id: 0, login: "visitor" },
-              { id: Number.MAX_SAFE_INTEGER + 1, login: "visitor" },
-              { id: 42, login: "invalid/login" },
-            ].map((body): [Response, number] => [Response.json(body), 502]),
+          const upstreamError = { message: "private upstream body" };
+          const errors: Array<[unknown, number, number]> = [
+            [upstreamError, 404, 404],
+            [upstreamError, 503, 502],
+            [upstreamError, 403, 403],
+            [upstreamError, 401, 401],
+            [{ id: 0, login: "visitor" }, 200, 502],
+            [{ id: Number.MAX_SAFE_INTEGER + 1, login: "visitor" }, 200, 502],
+            [{ id: 42, login: "invalid/login" }, 200, 502],
           ];
-          for (const [response, statusCode] of errors) {
-            fetcher.mockClear().mockResolvedValue(response);
-            await expect(lookup()).resolves.toMatchObject({
-              error: { statusCode, credentialConfigured: true },
-            });
-            expect(fetcher).toHaveBeenCalledTimes(1);
+          for (const [body, status, statusCode] of errors) {
+            respond(body, { status });
+            await expectLookupError({ statusCode, credentialConfigured: true });
           }
           fetcher.mockClear().mockRejectedValue(new Error("private network detail"));
-          await expect(lookup()).resolves.toMatchObject({
-            error: { statusCode: 502, message: "Could not reach GitHub" },
-          });
+          await expectLookupError({ statusCode: 502, message: "Could not reach GitHub" });
 
           for (const credentialConfigured of [true, false]) {
             setRuntimeConfigSnapshot(credentialConfigured ? cfg : fixture.cfg);
@@ -138,10 +132,11 @@ it.each(["in-process", "bound"] as const)(
                 headers: { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "2000000000" },
               },
             );
-            await expect(lookup()).resolves.toMatchObject({
-              error: { statusCode: 429, retryAtMs: 2_000_000_000_000, credentialConfigured },
+            await expectLookupError({
+              statusCode: 429,
+              retryAtMs: 2_000_000_000_000,
+              credentialConfigured,
             });
-            expect(fetcher).toHaveBeenCalledTimes(1);
           }
           setRuntimeConfigSnapshot(cfg);
           const entered = createDeferredCore<AbortSignal>();
@@ -188,6 +183,5 @@ it.each(["in-process", "bound"] as const)(
           await fixture.removeSessions();
         }
       },
-    );
-  },
+    ),
 );

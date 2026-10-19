@@ -56,6 +56,7 @@ it.each(["module-load", "entry-open"] as const)(
       failureKind === "entry-open" ? healthyRoot : bundledRoot,
       "startup-broken",
     );
+    const brokenEntry = path.join(brokenDir, "index.js");
     await fs.mkdir(brokenDir);
     await writeJson(path.join(brokenDir, "package.json"), {
       name: "startup-broken",
@@ -67,10 +68,7 @@ it.each(["module-load", "entry-open"] as const)(
       activation: { onStartup: true },
       configSchema: { type: "object" },
     });
-    await fs.writeFile(
-      path.join(brokenDir, "index.js"),
-      'throw new Error("startup failure remains diagnostic");',
-    );
+    await fs.writeFile(brokenEntry, 'throw new Error("startup failure remains diagnostic");');
     if (failureKind === "entry-open") {
       const boundary = await import("../infra/boundary-file-read.js");
       const open = boundary.openRootFileSync;
@@ -78,7 +76,7 @@ it.each(["module-load", "entry-open"] as const)(
       const entryOpen = vi.spyOn(boundary, "openRootFileSync").mockImplementation((options) => {
         if (
           !injected &&
-          options.absolutePath === path.join(brokenDir, "index.js") &&
+          options.absolutePath === brokenEntry &&
           options.boundaryLabel === "plugin root"
         ) {
           // Discovery has admitted metadata. Change the real inode only during
@@ -96,8 +94,7 @@ it.each(["module-load", "entry-open"] as const)(
       });
       onTestFinished(() => entryOpen.mockRestore());
     }
-    const configPath = configurePluginGateway(bundledRoot);
-    await writeJson(configPath, {
+    await writeJson(configurePluginGateway(bundledRoot), {
       plugins: {
         allow: ["startup-broken", "instance-binding-probe"],
         load: { paths: [healthyPlugin, ...(failureKind === "entry-open" ? [brokenDir] : [])] },
@@ -119,13 +116,10 @@ it.each(["module-load", "entry-open"] as const)(
         expect(result.ok, result.error?.message).toBe(true);
         return result.payload;
       };
-      const waitForReloadSettlement = async () => {
-        await expect
-          .poll(probe, {
-            timeout: 30_000,
-          })
-          .toMatchObject({ reloadSettled: true });
-      };
+      const expectHandler = (method: string, handler: unknown) =>
+        expect(getActivePluginRegistry()?.gatewayHandlers[method]).toBe(handler);
+      const waitForReloadSettlement = () =>
+        expect.poll(probe, { timeout: 30_000 }).toMatchObject({ reloadSettled: true });
       await waitForReloadSettlement();
       const initial = getActivePluginRegistry();
       assert(initial);
@@ -164,7 +158,6 @@ it.each(["module-load", "entry-open"] as const)(
       const after = await probe();
       expect(after?.registryId).not.toBe(before?.registryId);
 
-      // Successful reloads can leave config reconciliation queued after the RPC.
       await waitForReloadSettlement();
 
       // Break only B's code; recovery must register captured A code under a fresh owner.
@@ -173,10 +166,11 @@ it.each(["module-load", "entry-open"] as const)(
         'throw new Error("new candidate failure");',
       );
       const rejected = await reloadPlugin(socket);
-      expect(rejected).toMatchObject({
+      const activationFailure = {
         ok: false,
         error: { details: { runtime: { committed: false, phase: "activate" } } },
-      });
+      };
+      expect(rejected).toMatchObject(activationFailure);
       expect(rejected.error?.message).toContain("new candidate failure");
       expect(rejected.error?.message).not.toContain("startup-broken");
       const recovered = getActivePluginRegistry();
@@ -188,16 +182,15 @@ it.each(["module-load", "entry-open"] as const)(
         sessionsId: after?.sessionsId,
         placementId: after?.placementId,
       });
-      // A rejected reload leaves config reconciliation queued after its RPC lease releases.
       await waitForReloadSettlement();
 
       const registrationsBeforeRepair = coordinator.runtimes.length;
       if (failureKind === "entry-open") {
         // Repair the entry, then fail B activation. Reexecuting these current files
         // as C would succeed, concealing that no old runnable source was captured.
-        await fs.unlink(path.join(brokenDir, "index.js"));
+        await fs.unlink(brokenEntry);
         await fs.writeFile(
-          path.join(brokenDir, "index.js"),
+          brokenEntry,
           `module.exports = { id: "startup-broken", register(api) {
             const request = {};
             require("node:diagnostics_channel").channel(${JSON.stringify(coordinator.channelName)}).publish(request);
@@ -212,22 +205,17 @@ it.each(["module-load", "entry-open"] as const)(
         );
       }
       const retryBroken = await reloadPlugin(socket, "startup-broken");
-      expect(retryBroken).toMatchObject({
-        ok: false,
-        error: { details: { runtime: { committed: false, phase: "activate" } } },
-      });
-      if (failureKind === "module-load") {
-        expect(retryBroken.error?.message).toContain("startup-broken");
-      }
+      expect(retryBroken).toMatchObject(activationFailure);
+      expect(retryBroken.error?.message).toContain(
+        failureKind === "module-load" ? "startup-broken" : "repaired candidate activation failed",
+      );
       if (failureKind === "entry-open") {
-        expect(retryBroken.error?.message).toContain("repaired candidate activation failed");
         expect(coordinator.runtimes).toHaveLength(registrationsBeforeRepair + 1);
         expect(coordinator.serviceStarts).toBe(1);
-        expect(
-          getActivePluginRegistry()?.gatewayHandlers["startupBroken.repaired"],
-        ).toBeUndefined();
+        expectHandler("startupBroken.repaired", undefined);
       }
-      expect(getActivePluginRegistry()?.gatewayHandlers[INSTANCE_BINDING_PROBE_METHOD]).toBe(
+      expectHandler(
+        INSTANCE_BINDING_PROBE_METHOD,
         recovered?.gatewayHandlers[INSTANCE_BINDING_PROBE_METHOD],
       );
       expectBrokenRetained();
@@ -241,9 +229,7 @@ it.each(["module-load", "entry-open"] as const)(
         ok: true,
         payload: { restartRequired: false },
       });
-      expect(
-        getActivePluginRegistry()?.gatewayHandlers[INSTANCE_BINDING_PROBE_METHOD],
-      ).toBeUndefined();
+      expectHandler(INSTANCE_BINDING_PROBE_METHOD, undefined);
       expectBrokenRetained();
       expect(recovery).not.toHaveBeenCalled();
     } finally {

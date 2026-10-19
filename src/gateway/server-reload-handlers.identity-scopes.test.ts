@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { afterEach, assert, beforeEach, expect, it, vi } from "vitest";
 import { createInfoWarnErrorLogger } from "../../test/helpers/mock-logger.js";
-import { createDeferred } from "../../test/helpers/promise.js";
+import { awaitGateBeforeSettlement, createDeferred } from "../../test/helpers/promise.js";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import { clearFinishedSessionsForScopes } from "../agents/bash-process-registry.js";
 import { runExecProcess, type ExecProcessHandle } from "../agents/bash-tools.exec-runtime.js";
@@ -95,15 +95,11 @@ afterEach(() => {
 });
 
 const revocations = ["scopes", "allowUsers", "origin"];
-it.each(revocations)("preserves proxy runs until %s ends", async (revocation) => {
-  await withOpenClawTestState({ scenario: "minimal" }, async () => {
+it.each(revocations)("preserves proxy runs until %s ends", (revocation) =>
+  withOpenClawTestState({ scenario: "minimal" }, async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     const effectDir = tempDirs.make("openclaw-identity-scope-effects-");
-    const effectScript = path.join(effectDir, "effect.cjs");
-    await fs.writeFile(
-      effectScript,
-      'require("node:fs").writeFileSync(process.argv[2], "accepted effect");',
-    );
+    const effectScript = 'require("node:fs").writeFileSync(process.argv[1], "accepted effect");';
     const processes: ExecProcessHandle[] = [];
     const releaseEffects: Array<() => void> = [];
     const pendingEffects: Promise<unknown>[] = [];
@@ -281,7 +277,7 @@ it.each(revocations)("preserves proxy runs until %s ends", async (revocation) =>
         const resume = createDeferred();
         releaseEffects.push(() => resume.resolve());
         const marker = path.join(effectDir, name);
-        const command = [process.execPath, effectScript, marker]
+        const command = [process.execPath, "-e", effectScript, marker]
           .map((arg) => JSON.stringify(arg))
           .join(" ");
         const outcome = withGatewayToolCallerIdentity(
@@ -293,7 +289,6 @@ it.each(revocations)("preserves proxy runs until %s ends", async (revocation) =>
           async () => {
             const process = await runExecProcess({
               command,
-              execCommand: command,
               workdir: effectDir,
               env: {},
               usePty: false,
@@ -320,12 +315,11 @@ it.each(revocations)("preserves proxy runs until %s ends", async (revocation) =>
         pendingEffects.push(outcome);
         // Only pause the existing asynchronous prelaunch hook. The exec runtime,
         // supervisor, native child launch, and filesystem effect remain real.
-        await Promise.race([
+        await awaitGateBeforeSettlement(
           entered.promise,
-          outcome.then(() => {
-            throw new Error("exec settled before its prelaunch boundary");
-          }),
-        ]);
+          outcome,
+          "exec settled before its prelaunch boundary",
+        );
         await expect(fs.readFile(marker)).rejects.toMatchObject({ code: "ENOENT" });
         return { marker, outcome, release: () => resume.resolve() };
       };
@@ -442,5 +436,5 @@ it.each(revocations)("preserves proxy runs until %s ends", async (revocation) =>
         captured.release();
       }
     }
-  });
-});
+  }),
+);

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { afterEach, expect, it, vi } from "vitest";
+import { createInfoErrorLogger } from "../../test/helpers/mock-logger.js";
 import { createDeferred, withinTest, withTestTimeout } from "../../test/helpers/promise.js";
 import type { ChannelPlugin } from "../channels/plugins/types.plugin.js";
 import { readConfigFileSnapshot } from "../config/config.js";
@@ -26,30 +27,36 @@ import { restartGatewayChannels } from "./server-reload-channel-restart.js";
 
 async function reloadChannels(
   owner: ChannelManager,
-  getPluginRegistry: typeof requireActivePluginChannelRegistry,
   channels: Set<ChannelKind>,
-  logChannels: Parameters<typeof restartGatewayChannels>[0]["params"]["logChannels"],
-  scheduleRecoveryRestart: Parameters<typeof restartGatewayChannels>[0]["scheduleRecoveryRestart"],
-  restartChannelAccounts = new Map<ChannelKind, Set<string>>(),
+  options: {
+    registry?: typeof requireActivePluginChannelRegistry;
+    log?: Parameters<typeof restartGatewayChannels>[0]["params"]["logChannels"];
+    recover?: Parameters<typeof restartGatewayChannels>[0]["scheduleRecoveryRestart"];
+    accounts?: Map<ChannelKind, Set<string>>;
+  } = {},
 ) {
+  const logChannels = options.log ?? createInfoErrorLogger();
+  const recover = vi.fn(options.recover);
   await restartGatewayChannels({
     params: {
       startChannel: owner.startChannel,
       stopChannel: owner.stopChannel,
-      getPluginRegistry,
+      getPluginRegistry: options.registry ?? requireActivePluginChannelRegistry,
       releaseChannelRouteHandoffs: owner.releaseChannelRouteHandoffs,
       logChannels,
     },
     nextConfig: {},
     channelsToRestart: channels,
-    restartChannelAccounts,
+    restartChannelAccounts: options.accounts ?? new Map(),
     activePluginChannelsAfterReload: null,
     shouldSkipChannelRestart: false,
     isLifecycleReloadAborted: () => false,
     getChannelAutostartSuppression: () => null,
     channelReloadTargets: () => channels,
-    scheduleRecoveryRestart,
+    scheduleRecoveryRestart: recover,
   });
+  expect(recover).not.toHaveBeenCalled();
+  expect(logChannels.error).not.toHaveBeenCalled();
 }
 
 function channelManager(
@@ -90,10 +97,10 @@ afterEach(async () => {
   resetGatewayWorkAdmission();
 });
 
-it("the config watcher restarts a channel that can save provider settings after reload closes", async ({
+it("the config watcher restarts a channel that can save provider settings after reload closes", ({
   signal,
-}) => {
-  await withOpenClawTestState({ label: "channel-reload-login" }, async (state) => {
+}) =>
+  withOpenClawTestState({ label: "channel-reload-login" }, async (state) => {
     const initialConfig = {
       gateway: { reload: { mode: "hybrid" as const } },
       commands: { ownerAllowFrom: ["telegram:1"] },
@@ -179,15 +186,12 @@ it("the config watcher restarts a channel that can save provider settings after 
         await withPluginLifecycleLease({}, async (lease) => {
           assertReloadOwned = () => lease.assertOwned();
         });
-        await reloadChannels(
-          owner,
-          requireActivePluginChannelRegistry,
-          plan.restartChannels,
+        await reloadChannels(owner, plan.restartChannels, {
           log,
-          (surface) => {
+          recover: (surface) => {
             throw new Error(`unexpected restart recovery: ${surface}`);
           },
-        );
+        });
         ownership.markRuntimeCommitted(next, plan);
         return "applied";
       },
@@ -228,8 +232,7 @@ it("the config watcher restarts a channel that can save provider settings after 
       await reloader.stop();
       await owner.stopChannel("telegram");
     }
-  });
-});
+  }));
 
 it("retries failed teardown before admitting a replacement", async () => {
   const retryStarted = createDeferred();
@@ -260,16 +263,7 @@ it("retries failed teardown before admitting a replacement", async () => {
     new Map([["running", { status: "retry", reason: "stop-in-flight" }]]),
   );
 
-  const channels = new Set<ChannelKind>(["discord"]);
-  const logChannels = { info: vi.fn(), error: vi.fn() };
-  const scheduleRecoveryRestart = vi.fn();
-  const reload = reloadChannels(
-    manager,
-    requireActivePluginChannelRegistry,
-    channels,
-    logChannels,
-    scheduleRecoveryRestart,
-  );
+  const reload = reloadChannels(manager, new Set(["discord"]));
   try {
     await retryStarted.promise;
     expect(startAccount).toHaveBeenCalledOnce();
@@ -277,8 +271,6 @@ it("retries failed teardown before admitting a replacement", async () => {
     await reload;
     expect(stopAccount).toHaveBeenCalledTimes(2);
     expect(startAccount).toHaveBeenCalledTimes(2);
-    expect(scheduleRecoveryRestart).not.toHaveBeenCalled();
-    expect(logChannels.error).not.toHaveBeenCalled();
   } finally {
     finishTeardown.resolve();
     await reload;
@@ -326,16 +318,7 @@ it.each(
     const accounts = new Map<ChannelKind, Set<string>>(
       scope === "accounts" ? [["discord", new Set(["manual", "running"])]] : [],
     );
-    const logChannels = { info: vi.fn(), error: vi.fn() };
-    const scheduleRecoveryRestart = vi.fn();
-    const reload = reloadChannels(
-      manager,
-      requireActivePluginChannelRegistry,
-      channels,
-      logChannels,
-      scheduleRecoveryRestart,
-      accounts,
-    );
+    const reload = reloadChannels(manager, channels, { accounts });
     if (state === "racing") {
       await configuring.promise;
       await manager.stopChannel("discord", "manual");
@@ -343,8 +326,6 @@ it.each(
       releaseConfiguration.resolve();
     }
     await reload;
-    expect(scheduleRecoveryRestart).not.toHaveBeenCalled();
-    expect(logChannels.error).not.toHaveBeenCalled();
     expect(manager.isManuallyStopped("discord", "manual")).toBe(true);
     expect(manager.getRuntimeSnapshot().channelAccounts.discord?.manual?.running).toBe(false);
     expect(starts).toEqual(state === "stopped" ? ["manual", "running"] : ["running"]);
@@ -417,12 +398,7 @@ it("channel reload uses the attached registry instead of the process lookup", as
     const foreignMonitors = monitors.filter(({ owner }) => owner === "B");
     expect(foreignMonitors).toHaveLength(2);
     const beforeReload = monitors.length;
-    const channels = new Set<ChannelKind>(ownedIds);
-    const logChannels = { info: vi.fn(), error: vi.fn() };
-    const scheduleRecoveryRestart = vi.fn();
-    await reloadChannels(ownerA, () => attached, channels, logChannels, scheduleRecoveryRestart);
-    expect(scheduleRecoveryRestart).not.toHaveBeenCalled();
-    expect(logChannels.error).not.toHaveBeenCalled();
+    await reloadChannels(ownerA, new Set(ownedIds), { registry: () => attached });
     const resumed = monitors
       .slice(beforeReload)
       .map(({ owner, channelId }) => `${owner}:${channelId}`)
