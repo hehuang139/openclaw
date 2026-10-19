@@ -19,7 +19,7 @@ import type { ApplicationContext } from "../../app/context.ts";
 import { UI_COMMAND_EVENT } from "../../components/panel-toggle-contract.ts";
 import { createStorageMock } from "../../test-helpers/storage.ts";
 import { settleChatPage, createChatPageSessions } from "./chat-page.test-support.ts";
-import { ChatPage } from "./chat-page.ts";
+import "./chat-page.ts";
 
 type RenderedPane = HTMLElement & {
   paneId: string;
@@ -29,7 +29,7 @@ type RenderedPane = HTMLElement & {
   resumeStagedAttachments?: () => void;
 };
 
-function configure(page: ChatPage) {
+function configure(page: HTMLElementTagNameMap["openclaw-chat-page"]) {
   const context = {
     chatSubmissions: createChatSubmissions(),
     sessions: { ...createChatPageSessions(), patch: vi.fn() },
@@ -79,7 +79,7 @@ describe("chat page staged attachment rebound", () => {
   });
 
   it("reactivates a closed pane when delayed MCP teardown rebounds to the same owner", async () => {
-    const page = new ChatPage();
+    const page = document.createElement("openclaw-chat-page");
     configure(page);
     document.body.append(page);
     await settleChatPage(page);
