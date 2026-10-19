@@ -72,7 +72,21 @@ describe("Telegram outbound history over HTTP and SQLite", () => {
       ...(thread && chatId < 0 ? { is_forum: true } : {}),
     },
     ...(thread && thread !== 1 ? { message_thread_id: thread } : {}),
-    poll: { id },
+    poll: {
+      id,
+      question: "Ready?",
+      options: [
+        { text: "Yes", voter_count: 0 },
+        { text: "No", voter_count: 0 },
+      ],
+      total_voter_count: 0,
+      is_closed: false,
+      is_anonymous: id === "anonymous",
+      type: "regular",
+      allows_multiple_answers: false,
+      allows_revoting: false,
+      members_only: false,
+    },
   });
   const cursorFor = (transcriptMessageId: string) =>
     createTelegramPromptContextProjectionCursor({ transcriptMessageId });
