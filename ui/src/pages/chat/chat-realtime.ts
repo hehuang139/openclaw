@@ -18,9 +18,12 @@ import {
   type RealtimeTalkCameraDevice,
 } from "./talk/input.ts";
 import { RealtimeTalkLevelSignal } from "./talk/level.ts";
-import { RealtimeTalkSession, type RealtimeTalkStatus } from "./talk/session.ts";
+import type { RealtimeTalkSession, RealtimeTalkStatus } from "./talk/session.ts";
 import type { SplitTalkOptions } from "./talk/split.ts";
 import { RealtimeTalkVoiceSelection } from "./talk/voice-selection.ts";
+
+// Talk starts only on an explicit action, so its session runtime stays out of chat boot.
+const loadRealtimeTalkSession = async () => (await import("./talk/session.ts")).RealtimeTalkSession;
 
 export type ChatRealtimeState = {
   client: GatewayBrowserClient | null;
@@ -238,6 +241,7 @@ export function attachChatRealtimeActions(
         stopChatRealtimeTalk(state);
       }
     };
+    let TalkSession!: typeof RealtimeTalkSession;
     const replacementTransport = voiceChange
       ? state.realtimeTalk.snapshot.realtimeTalkSession?.getTransport()
       : undefined;
@@ -261,7 +265,7 @@ export function attachChatRealtimeActions(
       conversationGeneration += 1;
       try {
         playback.prepare(client, onSuperseded);
-        await closed;
+        [TalkSession] = await Promise.all([loadRealtimeTalkSession(), closed]);
       } catch (error) {
         playback.stop();
         throw error;
@@ -326,10 +330,12 @@ export function attachChatRealtimeActions(
     if (!voiceChange) {
       try {
         playback.prepare(client, onSuperseded);
-        const [result, maxTextLength] = await Promise.all([
+        const [result, maxTextLength, sessionClass] = await Promise.all([
           client.request<TalkConfigResult>("talk.config", {}),
           maxSpeechTextLength?.(),
+          loadRealtimeTalkSession(),
         ]);
+        TalkSession = sessionClass;
         if (
           state.realtimeTalk.snapshot.realtimeTalkVoiceController !== voiceController ||
           state.client !== client ||
@@ -375,7 +381,7 @@ export function attachChatRealtimeActions(
           callback(...args);
         }
       };
-    const session: RealtimeTalkSession = new RealtimeTalkSession(
+    const session: RealtimeTalkSession = new TalkSession(
       client,
       sessionKey,
       {
