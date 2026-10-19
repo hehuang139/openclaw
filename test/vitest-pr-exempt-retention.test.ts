@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { expectDefined } from "@openclaw/normalization-core";
 import { expect, it } from "vitest";
@@ -16,6 +16,7 @@ import {
   DEFAULT_EXTENSION_TEST_SHARD_COUNT,
 } from "../scripts/lib/extension-test-plan.mts";
 import { buildVitestRunPlans } from "../scripts/test-projects.test-support.mts";
+import { createNodeEvalArgs } from "../src/test-utils/node-process.js";
 import { isUiTestTarget } from "./vitest/vitest.ui-paths.mjs";
 
 type PlannedTestOwner = {
@@ -45,22 +46,25 @@ function createPrExemptCensus() {
   const extensionGroups = createExtensionTestShards({
     shardCount: DEFAULT_EXTENSION_TEST_SHARD_COUNT,
   }).flatMap((shard) => shard.planGroups);
+  const configs = [
+    ...new Set([
+      ...extensionGroups.map((group) => group.config),
+      uiConfig,
+      browserConfig,
+      e2eConfig,
+    ]),
+  ];
   // Discover in the same Node context as the prerelease planner, without the
   // parent Vitest invocation's file filter or transformed config module graph.
-  const discovery = spawnSync(
+  const discovery = execFileSync(
     process.execPath,
-    [
-      "--import",
-      "./scripts/tsx.mjs",
-      "--input-type=module",
-      "-e",
+    createNodeEvalArgs(
       `
       import { globSync } from "node:fs";
       import path from "node:path";
       import { pathToFileURL } from "node:url";
-      const files = {};
       const projects = {};
-      for (const config of JSON.parse(process.argv[1])) {
+      for (const config of ${JSON.stringify(configs)}) {
         const module = await import(pathToFileURL(path.resolve(config)).href);
         const root = config === "test/vitest/vitest.ui-e2e.config.ts"
           ? module.createUiE2eVitestConfig({ ...process.env, OPENCLAW_UI_E2E_SKIP_REAL_GATEWAY: "0" }, [])
@@ -77,42 +81,32 @@ function createPrExemptCensus() {
             files: globSync(test.include ?? [], { cwd, exclude }).map(file => path.relative(process.cwd(), path.resolve(cwd, file)).split(path.sep).join("/")),
           };
         });
-        files[config] = [...new Set(projects[config].flatMap(project => project.files))];
       }
-      process.stdout.write(JSON.stringify({ files, projects }));
+      process.stdout.write(JSON.stringify(projects));
     `,
-      JSON.stringify([
-        ...new Set([
-          ...extensionGroups.map((group) => group.config),
-          uiConfig,
-          browserConfig,
-          e2eConfig,
-        ]),
-      ]),
-    ],
+      { imports: ["./scripts/tsx.mjs"] },
+    ),
     {
       encoding: "utf8",
       env: { ...process.env, OPENCLAW_VITEST_INCLUDE_FILE: undefined },
       maxBuffer: 4 * 1024 * 1024,
     },
   );
-  expect(discovery.status, discovery.stderr).toBe(0);
-  const discovered: {
-    files: Record<string, string[]>;
-    projects: Record<string, Array<{ name: string; files: string[] }>>;
-  } = JSON.parse(discovery.stdout);
-  const configFiles = discovered.files;
+  const discovered: Record<string, Array<{ name: string; files: string[] }>> = JSON.parse(
+    discovery,
+  );
+  const projectsFor = (config: string) => expectDefined(discovered[config], config);
+  const filesFor = (config: string) => [
+    ...new Set(projectsFor(config).flatMap((project) => project.files)),
+  ];
   const retainedExtensionGroups = extensionGroups.map((group) => ({
     configs: [group.config],
-    includePatterns: expectDefined(configFiles[group.config], group.config).filter((file) =>
+    includePatterns: filesFor(group.config).filter((file) =>
       group.roots.some((root) => file === root || file.startsWith(`${root}/`)),
     ),
   }));
-  const uiProjects = expectDefined(discovered.projects[uiConfig], "UI package projects");
-  const browserFiles = expectDefined(
-    configFiles[browserConfig],
-    "native Chromium config inventory",
-  );
+  const uiProjects = projectsFor(uiConfig);
+  const browserFiles = filesFor(browserConfig);
   expect(uiProjects.find((project) => project.name === "browser")?.files.toSorted()).toEqual(
     browserFiles.toSorted(),
   );
@@ -122,7 +116,7 @@ function createPrExemptCensus() {
         groups.some((group) => !group.includePatterns || group.includePatterns.includes(file)),
       );
     const projectGroups = (config: string, groups: typeof plan.ui) =>
-      expectDefined(discovered.projects[config], config).map((project) => ({
+      projectsFor(config).map((project) => ({
         configs: [config],
         includePatterns: select(project.files, groups),
       }));
@@ -150,9 +144,7 @@ function createPrExemptCensus() {
 
 let prExemptCensus: ReturnType<typeof createPrExemptCensus> | undefined;
 
-function getPrExemptCensus() {
-  return (prExemptCensus ??= createPrExemptCensus());
-}
+const getPrExemptCensus = () => (prExemptCensus ??= createPrExemptCensus());
 
 it.each(["hourly", "release"] as const)(
   "retains one canonical owner for every PR-exempt file in %s plans",

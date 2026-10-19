@@ -61,20 +61,13 @@ describe("filesystem module cache ownership", () => {
     );
     return result;
   };
-  const run = (
-    root: string,
-    checkout: string,
-    args: string[] = [],
-    env: NodeJS.ProcessEnv = {},
-    expectedStatus = 0,
-  ) =>
-    runNode(
-      root,
-      checkout,
-      [cli, "run", "--config", path.join(checkout, "vitest.config.mjs"), ...args],
-      env,
-      expectedStatus,
-    );
+  const vitestArgs = (checkout: string, args: string[] = []) => [
+    cli,
+    "run",
+    "--config",
+    path.join(checkout, "vitest.config.mjs"),
+    ...args,
+  ];
   const prepareCacheFixture = (name: string) => {
     const root = fs.realpathSync(tempDirs.make(`oc-vitest-cache-${name}-`));
     const files = filesAt(root);
@@ -184,12 +177,12 @@ assert.equal(transforms.length, 2, "both projects must reuse their own persisted
     };
     const first = prepareCheckout("first");
     const second = prepareCheckout("second");
-    run(root, first.checkout);
+    runNode(root, first.checkout, vitestArgs(first.checkout));
     const firstCache = first.cacheConfig.fsModuleCachePath!;
     const sentinel = path.join(firstCache, "first-checkout-sentinel");
     fs.writeFileSync(sentinel, "owned by first checkout");
     fs.writeFileSync(lockfile, "lockfileVersion: 2\n");
-    run(root, second.checkout);
+    runNode(root, second.checkout, vitestArgs(second.checkout));
     expect(fs.readFileSync(sentinel, "utf8")).toBe("owned by first checkout");
   });
 
@@ -283,7 +276,8 @@ export default {
     };
     const reporterGenerations: string[] = [];
     const check = (projects: string[], expected: [number, number, number], args: string[] = []) => {
-      run(root, root, [...projects.flatMap((name) => ["--project", name]), ...args], env);
+      const selectedArgs = projects.flatMap((name) => ["--project", name]);
+      runNode(root, root, vitestArgs(root, [...selectedArgs, ...args]), env);
       reporterGenerations.push(fs.readFileSync(generation, "utf8"));
       expect(read("reporter-events.txt").trimEnd().split("\n")).toEqual(reporterGenerations);
       const counts = ["A/transforms.txt", "B/transforms.txt", "reporter-transforms.txt"].map(
@@ -321,7 +315,8 @@ export default {
     check(["A", "B"], [4, 3, 3]);
 
     append("A/configured-subject.js", '\nthrow new Error("fixture collection import failure");\n');
-    const failedCollection = run(root, root, ["--project", "A", "--testNamePattern=(?!)"], env, 1);
+    const failedArgs = vitestArgs(root, ["--project", "A", "--testNamePattern=(?!)"]);
+    const failedCollection = runNode(root, root, failedArgs, env, 1);
     expect(`${failedCollection.stdout}\n${failedCollection.stderr}`).toContain(
       "fixture collection import failure",
     );

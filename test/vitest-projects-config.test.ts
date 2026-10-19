@@ -71,6 +71,7 @@ const configFor = (
 const includeEnv = (files: readonly string[]) => ({
   OPENCLAW_VITEST_INCLUDE_FILE: patternFiles.writePatternFile("include.json", files),
 });
+const ownersFor = (target: string) => buildVitestRunPlans([target]).map((plan) => plan.config);
 
 const rootVitestProjects = requireTestConfig(baseConfig).projects as string[];
 
@@ -83,10 +84,7 @@ function runConfigScript(source: string) {
     timeout: DEFAULT_VITEST_TEST_TIMEOUT_MS,
   });
   const output = JSON.stringify({ stdout: result.stdout, stderr: result.stderr });
-  expect(result.error, output).toBeUndefined();
-  expect(result.signal, output).toBeNull();
-  expect(result.status, output).toBe(0);
-  return result.stdout;
+  expect([result.error, result.signal, result.status], output).toEqual([undefined, null, 0]);
 }
 
 describe("projects vitest config", () => {
@@ -101,7 +99,7 @@ describe("projects vitest config", () => {
   });
 
   it("keeps the resolved root and generated projects in their explicit environments", () => {
-    const stdout = runConfigScript(
+    runConfigScript(
       `
         import assert from "node:assert/strict";
         import { resolveConfig } from "vitest/node";
@@ -136,12 +134,9 @@ describe("projects vitest config", () => {
           generated.test.resolvedProjects.map(({ projectConfig }) => projectConfig.environment),
           ["node", "jsdom", "happy-dom"],
         );
-        console.log("ROOT_PROJECT_RESOLUTION " + resolved.test.resolvedProjects.length);
+        assert.ok(resolved.test.resolvedProjects.length > 0, "root projects must resolve");
       `,
     );
-    const report = stdout.split("\n").find((line) => line.startsWith("ROOT_PROJECT_RESOLUTION "));
-    expect(report, stdout).toBeDefined();
-    expect(Number(report!.slice("ROOT_PROJECT_RESOLUTION ".length))).toBeGreaterThan(0);
   });
 
   it.each(["all", "worker", "mixed"] as const)(
@@ -468,11 +463,7 @@ describe("projects vitest config", () => {
       const project = "test/vitest/vitest.extension-database-workers.config.ts";
       const testConfig = configFor(createExtensionDatabaseWorkersVitestConfig);
       expect(resolveExtensionTestConfig(`extensions/${pluginId}`)).toBe(project);
-      expect(
-        buildVitestRunPlans([`extensions/${pluginId}/src/store.test.ts`]).map(
-          (plan) => plan.config,
-        ),
-      ).toEqual([project]);
+      expect(ownersFor(`extensions/${pluginId}/src/store.test.ts`)).toEqual([project]);
       expect(rootVitestProjects).toContain(project);
       expect(
         fullSuiteVitestShards.find((shard) => shard.name === "extensions")?.projects,
@@ -511,11 +502,9 @@ describe("projects vitest config", () => {
         const plans = buildVitestRunPlans([target]);
         expect(plans.find((plan) => plan.config === project)?.includePatterns).toContain(file);
       }
-      expect(buildVitestRunPlans([file]).map((plan) => plan.config)).toEqual([project]);
+      expect(ownersFor(file)).toEqual([project]);
       for (const sibling of siblings) {
-        expect(
-          buildVitestRunPlans([`extensions/imessage/src/${sibling}`]).map((plan) => plan.config),
-        ).toEqual([siblingProject]);
+        expect(ownersFor(`extensions/imessage/src/${sibling}`)).toEqual([siblingProject]);
       }
       const workerConfig = configFor(createExtensionDatabaseWorkersVitestConfig);
       expect(workerConfig.include).toContain(`imessage/src/${basename}`);
@@ -529,19 +518,21 @@ describe("projects vitest config", () => {
   );
 
   it.each([
-    ["agents-support cleanup", createAgentsSupportVitestConfig, { pool: "forks" }],
-    ["live Gateway admission", () => liveConfig, { pool: "forks", maxWorkers: 1 }],
+    ["agents-support cleanup", createAgentsSupportVitestConfig, {}],
+    ["live Gateway admission", () => liveConfig, { maxWorkers: 1 }],
     [
       "bundled broker",
       () => bundledConfig,
       {
-        pool: "forks",
         isolate: false,
         runner: "test/non-isolated-runner.ts",
       },
     ],
   ] as const)("keeps %s on its fork policy", (_, create, expected) => {
     const config = configFor(create, process.env);
-    expect({ ...config, runner: normalizeConfigPath(config.runner) }).toMatchObject(expected);
+    expect({ ...config, runner: normalizeConfigPath(config.runner) }).toMatchObject({
+      pool: "forks",
+      ...expected,
+    });
   });
 });
