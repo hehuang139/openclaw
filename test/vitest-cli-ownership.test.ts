@@ -21,8 +21,14 @@ import { createInfraVitestConfig } from "./vitest/vitest.infra.config.ts";
 
 const patternFiles = createPatternFileHelper("gateway-watch-ownership-");
 afterEach(() => patternFiles.cleanup());
+const includeEnv = (files: string[]) => ({
+  OPENCLAW_VITEST_INCLUDE_FILE: patternFiles.writePatternFile("include.json", files),
+});
 
-function discover(config: ReturnType<typeof createInfraVitestConfig>) {
+function discover(config: {
+  root?: string;
+  test?: { dir?: string; include?: string[]; exclude?: string[] };
+}) {
   assert(config.test);
   assert(config.root);
   const dir = config.test.dir ?? config.root;
@@ -90,9 +96,7 @@ it("routes resume local-node handshakes only through the core broker fork", () =
       watchMode: false,
     },
   ]);
-  const env = {
-    OPENCLAW_VITEST_INCLUDE_FILE: patternFiles.writePatternFile("resume-owner.json", [file]),
-  };
+  const env = includeEnv([file]);
   const worker = createInfraVitestConfig(env);
   const previous = createCliVitestConfig(env);
   assert(worker.test);
@@ -105,76 +109,64 @@ it("routes resume local-node handshakes only through the core broker fork", () =
   }
 });
 
-it.each([
-  {
-    target: "src/gateway/config-reload.telegram-policy.test.ts",
-    ownership: { config: "test/vitest/vitest.gateway.config.ts" },
-  },
-  {
-    target: "src/gateway",
-    ownership: {
-      config: "test/vitest/vitest.database-worker-watch.config.ts",
-      databaseWorkerWatchOwner: "test/vitest/vitest.gateway.config.ts",
-      databaseWorkerWatchTests: databaseWorkerCoreTestFiles.filter((file) =>
-        file.startsWith("src/gateway/"),
-      ),
-    },
-  },
-])("preserves mixed Gateway worker watch selection with $target", async ({ target, ownership }) => {
-  const [workerFile] = gatewayDatabaseWorkerTestFiles;
-  assert(workerFile);
-  const filters = [workerFile, target];
-  const forwardedArgs = ["--reporter=dot", "--coverage"];
-  const plans = buildVitestRunPlans(["--watch", ...filters, ...forwardedArgs]);
-  expect(plans).toEqual([
-    {
-      ...ownership,
-      forwardedArgs,
-      includePatterns: [
-        filters[0],
-        target.endsWith(".test.ts") ? target : `${target}/**/*.test.ts`,
-      ],
-      watchMode: true,
-    },
-  ]);
-  const includeFile = patternFiles.writePatternFile("include.json", plans[0]!.includePatterns);
-  const selected = gatewayProjectFiles([], { OPENCLAW_VITEST_INCLUDE_FILE: includeFile });
-  expect(selected).toEqual(selectProjects(canonicalGatewayFiles, filters));
-  expect(selected["gateway-database-workers"]).toEqual(
-    gatewayDatabaseWorkerTestFiles.filter((file) => selectedByFilters(file, filters)),
-  );
-  expect(selected["gateway-core"]).toContain("src/gateway/config-reload.telegram-policy.test.ts");
-  const workerFiles: string[] = [];
-  if (plans[0]?.databaseWorkerWatchTests) {
-    const env = { OPENCLAW_VITEST_INCLUDE_FILE: includeFile };
-    const config = createDatabaseWorkerWatchVitestConfig(
-      createGatewayVitestConfig(env),
-      plans[0].databaseWorkerWatchTests,
-      env,
+it.each(["src/gateway/config-reload.telegram-policy.test.ts", "src/gateway"])(
+  "preserves mixed Gateway worker watch selection with %s",
+  async (target) => {
+    const isFile = target.endsWith(".test.ts");
+    const ownership = isFile
+      ? { config: "test/vitest/vitest.gateway.config.ts" }
+      : {
+          config: "test/vitest/vitest.database-worker-watch.config.ts",
+          databaseWorkerWatchOwner: "test/vitest/vitest.gateway.config.ts",
+          databaseWorkerWatchTests: databaseWorkerCoreTestFiles.filter((file) =>
+            file.startsWith("src/gateway/"),
+          ),
+        };
+    const [workerFile] = gatewayDatabaseWorkerTestFiles;
+    assert(workerFile);
+    const filters = [workerFile, target];
+    const forwardedArgs = ["--reporter=dot", "--coverage"];
+    const plans = buildVitestRunPlans(["--watch", ...filters, ...forwardedArgs]);
+    expect(plans).toEqual([
+      {
+        ...ownership,
+        forwardedArgs,
+        includePatterns: [workerFile, isFile ? target : `${target}/**/*.test.ts`],
+        watchMode: true,
+      },
+    ]);
+    const env = includeEnv(plans[0]!.includePatterns);
+    const selected = gatewayProjectFiles([], env);
+    expect(selected).toEqual(selectProjects(canonicalGatewayFiles, filters));
+    expect(selected["gateway-database-workers"]).toEqual(
+      gatewayDatabaseWorkerTestFiles.filter((file) => selectedByFilters(file, filters)),
     );
-    const resolved = await resolveConfig({ config: false }, config);
-    const worker = resolved.test.resolvedProjects.find(
-      ({ projectConfig }) => projectConfig.name === "infra",
-    )?.projectConfig;
-    assert(worker);
-    expect(worker.pool).toBe(diagnosticForksPool.name);
-    workerFiles.push(
-      ...fs
-        .globSync(worker.include, { cwd: worker.dir, exclude: worker.exclude })
-        .map((file) =>
-          path.relative(worker.root, path.join(worker.dir, file)).replaceAll("\\", "/"),
-        ),
+    expect(selected["gateway-core"]).toContain("src/gateway/config-reload.telegram-policy.test.ts");
+    const workerFiles: string[] = [];
+    if (plans[0]?.databaseWorkerWatchTests) {
+      const config = createDatabaseWorkerWatchVitestConfig(
+        createGatewayVitestConfig(env),
+        plans[0].databaseWorkerWatchTests,
+        env,
+      );
+      const resolved = await resolveConfig({ config: false }, config);
+      const worker = resolved.test.resolvedProjects.find(
+        ({ projectConfig }) => projectConfig.name === "infra",
+      )?.projectConfig;
+      assert(worker);
+      expect(worker.pool).toBe(diagnosticForksPool.name);
+      workerFiles.push(...discover({ root: worker.root, test: worker }));
+    }
+    expect(workerFiles.toSorted()).toEqual(
+      databaseWorkerCoreTestFiles.filter((file) => selectedByFilters(file, filters)).toSorted(),
     );
-  }
-  expect(workerFiles.toSorted()).toEqual(
-    databaseWorkerCoreTestFiles.filter((file) => selectedByFilters(file, filters)).toSorted(),
-  );
-  const files = [...Object.values(selected).flat(), ...workerFiles];
-  expect(new Set(files).size).toBe(files.length);
-  if (target.endsWith(".test.ts")) {
-    expect(files.toSorted()).toEqual(filters.toSorted());
-  }
-});
+    const files = [...Object.values(selected).flat(), ...workerFiles];
+    expect(new Set(files).size).toBe(files.length);
+    if (isFile) {
+      expect(files.toSorted()).toEqual(filters.toSorted());
+    }
+  },
+);
 
 it.each(
   [

@@ -9,7 +9,6 @@ import { buildVitestRunPlans } from "../scripts/test-projects.test-support.mts";
 import { createFixtureLifetime } from "./helpers/fixture-lifetime.js";
 import { useAutoCleanupTempDirTracker } from "./helpers/temp-dir.js";
 import { runVitestShutdownCommand } from "./helpers/vitest-shutdown-command.js";
-import { loadVitestPerformanceConfig } from "./vitest/vitest.performance-config.ts";
 import { sharedVitestConfig } from "./vitest/vitest.shared.config.ts";
 import { DEFAULT_VITEST_TEST_TIMEOUT_MS } from "./vitest/vitest.timeouts.ts";
 import { createUiIsolatedVitestConfig } from "./vitest/vitest.ui-isolated.config.ts";
@@ -17,18 +16,13 @@ import { uiNodeDrivenBrowserTestFiles, uiTimingTestFiles } from "./vitest/vitest
 import { createUiTimingVitestConfig } from "./vitest/vitest.ui-timing.config.ts";
 import { createUiVitestConfig } from "./vitest/vitest.ui.config.ts";
 
-type ExpectedTestConfig = ReturnType<typeof loadVitestPerformanceConfig> & {
+type ExpectedTestConfig = {
   include?: string[];
   exclude?: string[];
   browser?: { enabled?: boolean; provider?: BrowserProviderOption };
-  clearMocks?: boolean;
   isolate?: boolean;
   name?: string;
-  maxWorkers?: number;
-  pool?: string;
   projects?: unknown[];
-  runner?: string;
-  setupFiles?: string[];
   sequence?: { groupOrder?: number };
 };
 type FileOrder = { native: string[]; actual: string[] };
@@ -53,6 +47,11 @@ function requireTestConfig(config: unknown): ExpectedTestConfig {
   }
   return config.test as ExpectedTestConfig;
 }
+const discover = (config: ExpectedTestConfig, packageRelative = false) =>
+  globTestFiles(config.include ?? [], {
+    cwd: packageRelative ? path.join(process.cwd(), "ui") : undefined,
+    exclude: config.exclude,
+  }).map((file) => (packageRelative ? `ui/${file.replaceAll("\\", "/")}` : file));
 
 describe("ui package vitest config", () => {
   const tempDirs = useAutoCleanupTempDirTracker(afterEach);
@@ -193,14 +192,15 @@ describe("ui package vitest config", () => {
       for (const row of report.rows) {
         const nodeFiles = row.original.filter((file) => nodeRequired.has(file));
         const bunFiles = row.original.filter((file) => !nodeRequired.has(file));
-        expect(row.selected["bun-all"]).toEqual([
-          { runtime: "node", files: nodeFiles },
-          { runtime: "bun", files: bunFiles },
-        ]);
-        expect(row.selected["dual-all"]).toEqual([
-          { runtime: "node", files: row.original },
-          { runtime: "bun", files: bunFiles },
-        ]);
+        for (const [policy, files] of [
+          ["bun-all", nodeFiles],
+          ["dual-all", row.original],
+        ] as const) {
+          expect(row.selected[policy]).toEqual([
+            { runtime: "node", files },
+            { runtime: "bun", files: bunFiles },
+          ]);
+        }
       }
     }));
 
@@ -340,21 +340,14 @@ export default {
     for (const project of projects.filter((candidate) => candidate !== timing)) {
       expect(timing?.sequence?.groupOrder).toBeGreaterThan(project.sequence?.groupOrder ?? 0);
     }
-    const selected = projects.flatMap((project) =>
-      globTestFiles(project.include ?? [], {
-        cwd: path.join(process.cwd(), "ui"),
-        exclude: project.exclude,
-      }).map((file) => `ui/${file.replaceAll("\\", "/")}`),
-    );
+    const selected = projects.flatMap((project) => discover(project, true));
     const rootTiming = requireTestConfig(createUiTimingVitestConfig({}));
     const rootShared = requireTestConfig(createUiVitestConfig({}));
-    const rootFiles = globTestFiles(rootShared.include ?? [], { exclude: rootShared.exclude });
+    const rootFiles = discover(rootShared);
     for (const project of [rootShared, requireTestConfig(createUiIsolatedVitestConfig({}))]) {
       expect(rootTiming.sequence?.groupOrder).toBeGreaterThan(project.sequence?.groupOrder ?? 0);
     }
-    expect(globTestFiles(rootTiming.include ?? [], { exclude: rootTiming.exclude })).toEqual(
-      uiTimingTestFiles,
-    );
+    expect(discover(rootTiming)).toEqual(uiTimingTestFiles);
     for (const file of uiTimingTestFiles) {
       expect(selected.filter((candidate) => candidate === file)).toHaveLength(1);
       expect(rootFiles).not.toContain(file);
@@ -386,22 +379,15 @@ export default {
     vi.resetModules();
     const { default: config, createUiBrowserVitestConfig } = await import("../ui/vitest.config.ts");
     expect(resolveChromium).not.toHaveBeenCalled();
-    const uiRoot = path.join(process.cwd(), "ui");
     const projects = (requireTestConfig(config).projects ?? []).map(requireTestConfig);
     const browser = projects.find((project) => project.browser?.enabled);
     const node = projects.find((project) => project.name === "unit-node");
     const root = requireTestConfig(createUiVitestConfig());
-    const nativeFiles = globTestFiles(browser?.include ?? [], {
-      cwd: uiRoot,
-      exclude: browser?.exclude,
-    }).map((file) => `ui/${file}`);
-    const nodeFiles = globTestFiles(node?.include ?? [], {
-      cwd: uiRoot,
-      exclude: node?.exclude,
-    })
-      .filter((file) => /\.browser\.test\.tsx?$/u.test(file))
-      .map((file) => `ui/${file}`);
-    const rootFiles = globTestFiles(root.include ?? [], { exclude: root.exclude });
+    const nativeFiles = discover(browser ?? {}, true);
+    const nodeFiles = discover(node ?? {}, true).filter((file) =>
+      /\.browser\.test\.tsx?$/u.test(file),
+    );
+    const rootFiles = discover(root);
     expect(rootFiles.includes("ui/src/solid-smoke/solid-smoke.test.tsx")).toBe(
       patterns.includes("ui/src/**/*.test.tsx"),
     );
@@ -436,8 +422,10 @@ export default {
           OPENCLAW_VITEST_POST_SHARD_INCLUDE_FILE: runtimeIncludeFile,
         }),
       );
-      expect(partitionedBrowser.include).toEqual(unpartitionedBrowser.include);
-      expect(partitionedBrowser.exclude).toEqual(unpartitionedBrowser.exclude);
+      expect(partitionedBrowser).toMatchObject({
+        include: unpartitionedBrowser.include,
+        exclude: unpartitionedBrowser.exclude,
+      });
       expect(partitionedBrowser.browser).toMatchObject({
         enabled: true,
         provider: {
@@ -456,8 +444,6 @@ export default {
     const scopedRoot = requireTestConfig(
       createUiVitestConfig({ OPENCLAW_VITEST_INCLUDE_FILE: includeFile }),
     );
-    expect(
-      globTestFiles(scopedRoot.include ?? [], { exclude: scopedRoot.exclude }).toSorted(),
-    ).toEqual(nodeFiles.toSorted());
+    expect(discover(scopedRoot).toSorted()).toEqual(nodeFiles.toSorted());
   });
 });
