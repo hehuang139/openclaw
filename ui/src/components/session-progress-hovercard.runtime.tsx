@@ -22,7 +22,7 @@ import type { AppSidebarElement } from "./app-sidebar.tsx";
 import { registryFor } from "./overlay-registry.ts";
 import { personActivityRouting, type PersonActivityRouting } from "./person-activity-link.ts";
 import { createPortaledHovercard, createPortaledHovercardOwner } from "./portaled-hovercard.ts";
-import type { SessionHovercard, SessionHovercardInput } from "./session-hovercard-solid.tsx";
+import { SessionHovercard, type SessionHovercardInput } from "./session-hovercard-solid.tsx";
 import { SessionLinkTitler } from "./session-link-titling.ts";
 import {
   SESSION_MENU_OPEN_EVENT,
@@ -85,7 +85,6 @@ function createSessionProgressHovercard(props: SessionProgressHovercardProps, ho
   let skipDelayTimer: number | null = null;
   let lastProgressCard: ProgressCard | null = null;
   let renderedRevision: string | null = null;
-  let renderHovercard: typeof SessionHovercard | undefined;
   const hovercard = createPortaledHovercardOwner(
     () => close(true),
     CLOSE_DELAY_MS,
@@ -243,17 +242,6 @@ function createSessionProgressHovercard(props: SessionProgressHovercardProps, ho
     ) {
       return;
     }
-    // Title decoration stays eager; the full view is needed only for a held preview.
-    const { SessionHovercard } = await import("./session-hovercard-solid.tsx");
-    if (
-      activeTarget !== target ||
-      activeSession !== session ||
-      !hovercard.held ||
-      sessionHovercardMenuOpen(host)
-    ) {
-      return;
-    }
-    renderHovercard = SessionHovercard;
     open = true;
     delayed = false;
     clearSkipDelayTimer();
@@ -288,12 +276,11 @@ function createSessionProgressHovercard(props: SessionProgressHovercardProps, ho
   }
 
   function showCurrent(): void {
-    const SessionHovercard = renderHovercard;
     const target = activeTarget;
     const session = activeSession;
     const sessionKey = session?.sessionKey;
     const artifactKey = activeArtifactKey();
-    if (!SessionHovercard || !target || !session || !sessionKey || !artifactKey || !open) {
+    if (!target || !session || !sessionKey || !artifactKey || !open) {
       return;
     }
     const sidebarRow = host

@@ -4,7 +4,6 @@ import type { ApplicationGateway } from "../app/gateway.ts";
 import { canCallGatewayMethod } from "../lib/gateway-methods.ts";
 import { createParkedProjection } from "../lib/reactive/parked-projection.ts";
 import { projectSource } from "../lib/reactive/projection.ts";
-import { displaySessionPullRequests } from "../lib/session-pull-request-presentation.ts";
 import {
   summarizeSessionPullRequests,
   SESSION_PULL_REQUESTS_SUBSCRIBE_METHOD,
@@ -185,7 +184,11 @@ export function createSessionPullRequestIndicators(options: SessionPullRequestIn
               ? undefined
               : (snapshot.pullRequestCount ??
                 Math.max(
-                  displaySessionPullRequests(snapshot).length,
+                  new Set(
+                    [...snapshot.pullRequests, ...(snapshot.taskPullRequests ?? [])].map(
+                      (request) => request.url,
+                    ),
+                  ).size,
                   snapshot.taskPullRequestCount ?? 0,
                 )),
         });

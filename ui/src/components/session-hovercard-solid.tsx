@@ -2,14 +2,16 @@ import type { ProgressCard } from "@openclaw/gateway-protocol";
 import { createMemo, For, Show, untrack } from "solid-js";
 import type { SessionParticipant } from "../../../packages/gateway-protocol/src/schema/session-participant.js";
 import { normalizeSessionColorValue } from "../../../packages/gateway-protocol/src/session-agent-status.js";
-import type { ControlUiSessionPullRequestSnapshot } from "../../../src/gateway/control-ui-contract.js";
+import type {
+  ControlUiSessionPullRequest,
+  ControlUiSessionPullRequestSnapshot,
+} from "../../../src/gateway/control-ui-contract.js";
 import { registerGitHubEnglish } from "../i18n/locales/en-github.ts";
 import { i18nRevision, registerEnglishCatalog, t } from "../lib/reactive/i18n.ts";
 import { sessionOwnerInitials } from "../lib/session-owner.ts";
 import {
-  displaySessionPullRequests,
+  orderSessionPullRequests,
   sessionPullRequestStateIcons,
-  type SessionDisplayPullRequest,
 } from "../lib/session-pull-request-presentation.ts";
 import type { SidebarSessionHovercardRow } from "./app-sidebar-session-types.ts";
 import { formatGitHubItemReference } from "./github-link-target.ts";
@@ -31,6 +33,36 @@ import "./session-hovercard.css";
 import "./tooltip.ts";
 
 registerEnglishCatalog(registerGitHubEnglish);
+
+type SessionDisplayPullRequest = Omit<ControlUiSessionPullRequest, "state"> & {
+  state?: ControlUiSessionPullRequest["state"];
+  sourceSessionKey?: string;
+  sourceAgentId?: string;
+};
+
+/** Presentation only: task results never become evidence that the current branch was published. */
+function displaySessionPullRequests(
+  snapshot: ControlUiSessionPullRequestSnapshot | undefined,
+): SessionDisplayPullRequest[] {
+  const requests = new Map<string, SessionDisplayPullRequest>();
+  for (const task of snapshot?.taskPullRequests ?? []) {
+    requests.set(task.url, {
+      owner: task.owner,
+      repo: task.repo,
+      number: task.number,
+      branch: task.branch,
+      url: task.url,
+      title: task.title ?? `${task.owner}/${task.repo}#${task.number}`,
+      ...task.pullRequest,
+      sourceSessionKey: task.sourceSessionKey,
+      sourceAgentId: task.sourceAgentId,
+    });
+  }
+  for (const request of snapshot?.pullRequests ?? []) {
+    requests.set(request.url, { ...requests.get(request.url), ...request });
+  }
+  return orderSessionPullRequests([...requests.values()]);
+}
 
 const MAX_VISIBLE_ATTRIBUTION_PARTICIPANTS = 4;
 type SessionHovercardAvatarAuth = { authTokens: readonly string[]; authReady: boolean };

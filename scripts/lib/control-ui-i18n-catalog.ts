@@ -21,6 +21,7 @@ import { registerDesktopEnglish } from "../../ui/src/i18n/locales/en-desktop.ts"
 import { registerDevicesEnglish } from "../../ui/src/i18n/locales/en-devices.ts";
 import { registerDreamingEnglish } from "../../ui/src/i18n/locales/en-dreaming.ts";
 import { registerFilePreviewEnglish } from "../../ui/src/i18n/locales/en-file-preview.ts";
+import { registerGitHubConnectionsEnglish } from "../../ui/src/i18n/locales/en-github-connections.ts";
 import { registerGitHubEnglish } from "../../ui/src/i18n/locales/en-github.ts";
 import { registerLabsEnglish } from "../../ui/src/i18n/locales/en-labs.ts";
 import { registerLinkReaderEnglish } from "../../ui/src/i18n/locales/en-link-reader.ts";
@@ -91,6 +92,7 @@ const sourceFiles = [
   "en-login.ts",
   "en-link-reader.ts",
   "en-github.ts",
+  "en-github-connections.ts",
   "en-mcp.ts",
   "en-mcp-app.ts",
   "en-meetings.ts",
@@ -170,9 +172,9 @@ export function loadControlUiSourceCatalog(): TranslationMap {
       },
       sessionHovercard: registerGitHubEnglish.catalog.sessionHovercard,
       githubPublication: registerGitHubEnglish.catalog.githubPublication,
-      githubConnections: registerGitHubEnglish.catalog.githubConnections,
+      githubConnections: registerGitHubConnectionsEnglish.catalog.githubConnections,
       agentTools: {
-        ...registerGitHubEnglish.catalog.agentTools,
+        ...registerGitHubConnectionsEnglish.catalog.agentTools,
         ...en.agentTools,
         ...registerToolDiagnosticsEnglish.catalog.agentTools,
       },
