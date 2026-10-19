@@ -12,8 +12,8 @@ export function useScrollState(
   const isPresented = createMemo(presented);
   let element: HTMLElement;
   createEffect(
-    () => ({ active: isPresented(), revision: options?.revision?.() }),
-    ({ active }) => {
+    () => [isPresented(), options?.revision?.()] as const,
+    ([active]) => {
       if (!active) {
         return undefined;
       }

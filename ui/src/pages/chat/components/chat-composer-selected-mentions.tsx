@@ -136,13 +136,11 @@ export function SelectedHumanMentions(props: SelectedHumanMentionsProps) {
         >
           <For keyed={(person) => person.profileId} each={people()}>
             {(person, index) => {
-              let profileId!: string;
-              onCleanup(() => personElements.delete(profileId));
+              onCleanup(() => personElements.delete(person().profileId));
               return (
                 <span
                   ref={(node) => {
-                    profileId = person().profileId;
-                    personElements.set(profileId, node);
+                    personElements.set(person().profileId, node);
                   }}
                   class="composer-context-strip__person"
                   title={person().label}

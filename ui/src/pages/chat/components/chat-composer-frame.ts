@@ -24,7 +24,6 @@ import {
   adjustTextareaHeight,
   disconnectTextareaOverflowObserver,
   observeTextareaOverflow,
-  preserveComposerFocusOnPrimaryAction,
   replaceComposerPopoverAnchor,
   scheduleTextareaHeightAdjustment,
 } from "./chat-composer-dom.ts";
@@ -560,8 +559,11 @@ export function createChatComposerContext(
     readDictation: dictation ? () => dictation : undefined,
     onDictationPointerDown: handleDictationStart,
     onDirectDictationStart: handleDictationStart,
-    onPrimaryActionPointerDown: (event) =>
-      preserveComposerFocusOnPrimaryAction(event, state.composerTextarea),
+    onPrimaryActionPointerDown: (event) => {
+      if (state.composerTextarea?.matches(":focus")) {
+        event.preventDefault();
+      }
+    },
   };
   const clearSlashMenu =
     props.modelSwitching && state.slashMenu.state.slashMenuCommand?.key === "think";

@@ -127,12 +127,7 @@ export function registerChatComposerInvocationMenu(
   const entry = { element, getTextarea };
   menus.add(entry);
   invocationMenus.set(doc, menus);
-  return () => {
-    menus.delete(entry);
-    if (menus.size === 0) {
-      invocationMenus.delete(doc);
-    }
-  };
+  return () => menus.delete(entry);
 }
 
 // Split panes and Home can overlap New Session. Keep one document listener set

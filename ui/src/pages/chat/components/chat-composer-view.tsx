@@ -650,7 +650,7 @@ function renderComposerTextarea(
           context().handleSelect(event);
         }
       }}
-      onCompositionStart={(event: CompositionEvent) => {
+      onCompositionStart={(event) => {
         handleTextareaOverflowInteraction(event);
         if (
           event.target !== context().state.composerTextarea ||

@@ -6,18 +6,15 @@ export function liveValue<T extends HTMLInputElement | HTMLSelectElement | HTMLT
   onValueChange?: (field: T) => void,
 ) {
   let field: T | undefined;
-  createEffect(value, (next) => {
+  const writeValue = (next: string) => {
     if (field && field.value !== next) {
       field.value = next;
       onValueChange?.(field);
     }
-  });
+  };
+  createEffect(value, writeValue);
   return (element: T) => {
     field = element;
-    const next = value();
-    if (element.value !== next) {
-      element.value = next;
-      onValueChange?.(element);
-    }
+    writeValue(value());
   };
 }

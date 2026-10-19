@@ -2,19 +2,8 @@ import { listen } from "../../../lib/reactive/listener.ts";
 import { captureChatSessionScrollPosition } from "../scroll.ts";
 import { publishTranscriptScroll } from "./chat-transcript-scroll-events.ts";
 
-const COMPOSER_CHROME_INTERACTIVE_SELECTOR = [
-  "a[href]",
-  "button",
-  "input",
-  "select",
-  "textarea",
-  "summary",
-  "[contenteditable='true']",
-  "[role='button']",
-  "[role='menu']",
-  "[role='listbox']",
-  "[role='option']",
-].join(",");
+const COMPOSER_CHROME_INTERACTIVE_SELECTOR =
+  "a[href],button,input,select,textarea,summary,[contenteditable='true'],[role='button'],[role='menu'],[role='listbox'],[role='option']";
 
 type ComposerTextareaResizeObserverState = {
   observer: ResizeObserver | null;
@@ -375,11 +364,10 @@ export function observeTextareaOverflow(
 }
 
 // Native caret edits stay unfaded until pointer browsing or blur restores the fades.
-export function handleTextareaOverflowInteraction(event: Event) {
+type TextareaEvent = Event & { currentTarget: HTMLTextAreaElement };
+
+export function handleTextareaOverflowInteraction(event: TextareaEvent) {
   const el = event.currentTarget;
-  if (!(el instanceof HTMLTextAreaElement)) {
-    return;
-  }
   const state = composerTextareaResizeObservers.get(el);
   if (!state) {
     return;
@@ -401,10 +389,8 @@ export function handleTextareaOverflowInteraction(event: Event) {
   updateTextareaOverflow(el);
 }
 
-export function handleTextareaOverflowScroll(event: Event) {
-  if (event.currentTarget instanceof HTMLTextAreaElement) {
-    updateTextareaOverflow(event.currentTarget, false);
-  }
+export function handleTextareaOverflowScroll(event: TextareaEvent) {
+  updateTextareaOverflow(event.currentTarget, false);
 }
 
 export function disconnectTextareaOverflowObserver(el: HTMLTextAreaElement) {
@@ -463,16 +449,6 @@ export function focusComposerFromChrome(
     return;
   }
   textarea?.focus({ preventScroll: true });
-}
-
-export function preserveComposerFocusOnPrimaryAction(
-  event: PointerEvent,
-  textarea: HTMLTextAreaElement | null,
-): void {
-  const composerShell = textarea?.closest<HTMLElement>(".agent-chat__composer-shell");
-  if (document.activeElement === textarea && composerShell) {
-    event.preventDefault();
-  }
 }
 
 export function restoreHistoryCaret(target: HTMLTextAreaElement, direction: "up" | "down") {
