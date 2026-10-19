@@ -89,6 +89,7 @@ vi.mock("../../../infra/agent-run-registry.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../infra/agent-run-registry.js")>()),
   getAgentRunContext,
 }));
+// mock-isolation: Observe session-effect cleanup without touching live session state.
 vi.mock("../../internal-session-effects.js", () => ({ removeInternalSessionEffectsSession }));
 vi.mock("./subagent-control-session.js", { spy: true });
 vi.mock("./subagent-session-reconciliation.js", async (importOriginal) => {

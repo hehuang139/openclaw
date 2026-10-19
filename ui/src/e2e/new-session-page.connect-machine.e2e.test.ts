@@ -19,8 +19,13 @@ const setupCode = (
     versionNote?: string;
   },
 ) => ({
+  setupCode: "SYNTHETIC",
   joinUrl,
   ...commands,
+  gatewayUrl: "wss://gateway.example.com",
+  auth: "token",
+  urlSource: "test",
+  access: "node",
   expiresAtMs: Date.now() + 10 * 60_000,
 });
 

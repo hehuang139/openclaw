@@ -64,7 +64,7 @@ export async function runCommand(params: {
           return reject(new Error(`command timed out: ${command}`));
         }
         if (error && typeof error.code !== "number" && !error.signal) {
-          return reject(error);
+          return reject(new Error(error.message, { cause: error }));
         }
         const code = typeof error?.code === "number" ? error.code : error ? 1 : 0;
         if (code === 0 || params.allowFailure) {

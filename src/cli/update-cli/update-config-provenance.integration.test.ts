@@ -28,6 +28,7 @@ function manifest() {
   };
 }
 
+// mock-isolation: Use a synthetic plugin inventory instead of scanning installed plugins.
 vi.mock("../../plugins/manifest-registry.js", () => ({
   loadPluginManifestRegistryCore: () => manifest(),
 }));
@@ -40,6 +41,7 @@ vi.mock("../../plugins/doctor-contract-registry.js", async (importOriginal) => (
   listPluginDoctorLegacyConfigRules: () => [],
   applyPluginDoctorCompatibilityMigrations: (config: OpenClawConfig) => ({ config, changes: [] }),
 }));
+// mock-isolation: Model cohort config mutations without installing plugin packages.
 vi.mock("../../plugins/update-cohort.js", () => ({
   convergePluginReleaseCohort: async ({ config }: { config: OpenClawConfig }) => {
     vi.stubEnv("UPDATE_PROVENANCE_TOKEN", "synthetic-after");
@@ -56,6 +58,7 @@ vi.mock("../../plugins/update-cohort.js", () => ({
     };
   },
 }));
+// mock-isolation: Keep post-core convergence inside the provenance fixture.
 vi.mock("../../commands/doctor/shared/post-core-plugin-convergence.js", () => ({
   runPostCorePluginConvergence: async ({
     cfg,

@@ -31,6 +31,7 @@ const mocks = vi.hoisted(() => ({
   repair: vi.fn(),
 }));
 vi.mock("../../commands/triage-failure.js", () => ({ triageAfterFailure: mocks.repair }));
+// mock-isolation: Keep interactive failure actions inside the terminal fixture.
 vi.mock("./update-command-report.js", () => ({ runInteractiveUpdateFailureAction: mocks.action }));
 vi.mock("../terminal-interactivity.js", () => ({ isTerminalInteractive: () => true }));
 vi.mock("../../infra/update-triage.js", () => ({

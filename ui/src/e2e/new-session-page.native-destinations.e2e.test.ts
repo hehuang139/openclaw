@@ -26,7 +26,7 @@ import {
 const suite = createNewSessionPageE2eSuite();
 const openPage = createPageOpener(suite);
 type Scenario = NonNullable<Parameters<typeof installMockGateway>[1]>;
-const nativeGateway = <Catalog>(page: Page, catalog: Catalog, options: Scenario = {}) =>
+const nativeGateway = (page: Page, catalog: unknown, options: Scenario = {}) =>
   installMockGateway(page, {
     cliAgentsEnabled: true,
     featureMethods: [...TERMINAL_START_FEATURE_METHODS],

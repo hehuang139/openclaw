@@ -14,7 +14,24 @@ import {
   startupHarnessDatabases,
 } from "./manager-sync-ops.startup-catchup.test-support.js";
 
-const { activity } = await vi.hoisted(() => import("./manager-session-activity.test-support.js"));
+const activity = vi.hoisted(() => ({
+  listener: undefined as ((busy: boolean) => void) | undefined,
+}));
+
+vi.mock("openclaw/plugin-sdk/memory-core-host-engine-foundation", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("openclaw/plugin-sdk/memory-core-host-engine-foundation")>();
+  return {
+    ...actual,
+    observeAgentRunActivity: (_agentId: string, listener: (busy: boolean) => void) => {
+      activity.listener = listener;
+      listener(false);
+      return () => {
+        activity.listener = undefined;
+      };
+    },
+  };
+});
 
 describe("session index scheduling", () => {
   let testState: OpenClawTestState;
@@ -52,63 +69,20 @@ describe("session index scheduling", () => {
     emitSessionTranscriptUpdate({ target });
     return target;
   }
-  const pass = (...sessions: Array<ReturnType<typeof append> | undefined>) => ({
-    reason: "session-delta",
-    sessions,
-    archiveFiles: [],
-  });
-  const catchup = { reason: "session-startup-catchup" };
-  async function expectPendingFor(delay: number) {
-    await vi.advanceTimersByTimeAsync(delay);
-    expect(harness.syncCalls).toEqual([]);
-  }
-  async function expectPassAfter(delay: number, ...sessions: ReturnType<typeof append>[]) {
-    await vi.advanceTimersByTimeAsync(delay);
-    await harness.waitForSessionSync();
-    expect(harness.syncCalls).toEqual([pass(...sessions)]);
-  }
-  async function expectAttemptsAfter(delay: number, index: unknown, count: number) {
-    await vi.advanceTimersByTimeAsync(delay);
-    expect(index).toHaveBeenCalledTimes(count);
-  }
-  function fallbackFixture(sessionId: string, persistentFailure = false) {
-    const target = append(sessionId);
-    const error = createMemoryEmbeddingOperationError({
-      operation: "batch",
-      cause: "embedding backend failed",
-    });
-    const state = { lastAttemptAt: 0, rebuildNext: false };
-    const fail = async () => {
-      state.lastAttemptAt = Date.now();
-      throw error;
-    };
-    const index = vi.fn(async () => {});
-    if (persistentFailure) {
-      index.mockImplementation(fail);
-    } else {
-      index.mockImplementationOnce(fail);
-    }
-    harness["syncArchiveFiles"] = index;
-    harness["activateFallbackProvider"] = vi.fn(async () => true);
-    harness["sync"] = async (params) => {
-      harness.syncCalls.push(params ?? {});
-      if (state.rebuildNext || (!persistentFailure && params?.reason !== "session-delta")) {
-        state.rebuildNext = false;
-        await harness.runSyncForTest(params);
-      } else {
-        await harness["syncTargetedSessions"](new Set([`/tmp/${sessionId}.jsonl`]));
-      }
-    };
-    return { target, index, state };
-  }
 
   it("waits for a fresh quiet period and includes every pending session in one pass", async () => {
     const first = append("first");
     await vi.advanceTimersByTimeAsync(20_000);
     const second = append("second");
     append("first");
-    await expectPendingFor(29_999);
-    await expectPassAfter(1, first, second);
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(harness.syncCalls).toEqual([]);
+
+    await vi.advanceTimersByTimeAsync(1);
+    await harness.waitForSessionSync();
+    expect(harness.syncCalls).toEqual([
+      { reason: "session-delta", sessions: [first, second], archiveFiles: [] },
+    ]);
     await vi.advanceTimersByTimeAsync(300_000);
     expect(harness.syncCalls).toHaveLength(1);
   });
@@ -119,16 +93,28 @@ describe("session index scheduling", () => {
       await vi.advanceTimersByTimeAsync(20_000);
       append("continuous");
     }
-    await expectPendingFor(19_999);
-    await expectPassAfter(1, target);
+    await vi.advanceTimersByTimeAsync(19_999);
+    expect(harness.syncCalls).toEqual([]);
+
+    await vi.advanceTimersByTimeAsync(1);
+    await harness.waitForSessionSync();
+    expect(harness.syncCalls).toEqual([
+      { reason: "session-delta", sessions: [target], archiveFiles: [] },
+    ]);
   });
 
   it("starts overdue work as soon as a long running turn settles", async () => {
     activity.listener?.(true);
     const target = append("busy");
-    await expectPendingFor(360_000);
+    await vi.advanceTimersByTimeAsync(360_000);
+    expect(harness.syncCalls).toEqual([]);
+
     activity.listener?.(false);
-    await expectPassAfter(1, target);
+    await vi.advanceTimersByTimeAsync(1);
+    await harness.waitForSessionSync();
+    expect(harness.syncCalls).toEqual([
+      { reason: "session-delta", sessions: [target], archiveFiles: [] },
+    ]);
   });
 
   it("caps deferral across back-to-back turns and only starts in an idle gap", async () => {
@@ -136,7 +122,8 @@ describe("session index scheduling", () => {
     for (let turn = 0; turn < 15; turn++) {
       activity.listener?.(true);
       append("busy");
-      await expectPendingFor(20_000);
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(harness.syncCalls).toEqual([]);
       activity.listener?.(false);
       await vi.advanceTimersByTimeAsync(1);
       if (turn < 14) {
@@ -144,7 +131,9 @@ describe("session index scheduling", () => {
       }
     }
     await harness.waitForSessionSync();
-    expect(harness.syncCalls).toEqual([pass(target)]);
+    expect(harness.syncCalls).toEqual([
+      { reason: "session-delta", sessions: [target], archiveFiles: [] },
+    ]);
   });
 
   it("keeps pending work when a new turn starts during the quiet period", async () => {
@@ -152,9 +141,15 @@ describe("session index scheduling", () => {
     await vi.advanceTimersByTimeAsync(29_000);
     activity.listener?.(true);
     const second = append("during-turn");
-    await expectPendingFor(60_000);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(harness.syncCalls).toEqual([]);
+
     activity.listener?.(false);
-    await expectPassAfter(30_000, first, second);
+    await vi.advanceTimersByTimeAsync(30_000);
+    await harness.waitForSessionSync();
+    expect(harness.syncCalls).toEqual([
+      { reason: "session-delta", sessions: [first, second], archiveFiles: [] },
+    ]);
   });
 
   it("retries a failed pass with its original targets and updates queued during that pass", async () => {
@@ -173,60 +168,128 @@ describe("session index scheduling", () => {
     });
 
     await vi.advanceTimersByTimeAsync(30_000);
-    expect(harness.syncCalls).toEqual([pass(first, second)]);
+    expect(harness.syncCalls).toEqual([
+      { reason: "session-delta", sessions: [first, second], archiveFiles: [] },
+    ]);
     await vi.advanceTimersByTimeAsync(59_999);
     expect(harness.syncCalls).toHaveLength(1);
 
     await vi.advanceTimersByTimeAsync(1);
     await harness.waitForSessionSync();
-    expect(harness.syncCalls).toEqual([pass(first, second), pass(first, second, third)]);
+    expect(harness.syncCalls).toEqual([
+      { reason: "session-delta", sessions: [first, second], archiveFiles: [] },
+      { reason: "session-delta", sessions: [first, second, third], archiveFiles: [] },
+    ]);
     await vi.advanceTimersByTimeAsync(300_000);
     expect(harness.syncCalls).toHaveLength(2);
     sync.mockRestore();
   });
 
   it("keeps the final automatic retry until a long rebuild cooldown expires", async () => {
-    const { target, index } = fallbackFixture("cooldown");
+    const target = append("cooldown");
+    const index = vi.fn(async () => {});
+    index.mockRejectedValueOnce(
+      createMemoryEmbeddingOperationError({
+        operation: "batch",
+        cause: "embedding backend failed",
+      }),
+    );
+    harness["syncArchiveFiles"] = index;
+    harness["activateFallbackProvider"] = vi.fn(async () => true);
     // Earlier rebuild failures have reached the existing thirty-minute cap.
     for (let attempt = 0; attempt < 7; attempt++) {
       harness["recordFullReindexFailure"](false);
     }
-    await expectAttemptsAfter(30_000, index, 1);
+    harness["sync"] = async (params) => {
+      harness.syncCalls.push(params ?? {});
+      if (params?.reason === "session-delta") {
+        await harness["syncTargetedSessions"](new Set(["/tmp/cooldown.jsonl"]));
+      } else {
+        await harness.runSyncForTest(params);
+      }
+    };
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(index).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(60_000 + 300_000);
-    expect(harness.syncCalls).toEqual([pass(target), catchup, catchup]);
-    await expectAttemptsAfter(1_800_000 - 390_000 - 1, index, 1);
+    expect(harness.syncCalls).toEqual([
+      { reason: "session-delta", sessions: [target], archiveFiles: [] },
+      { reason: "session-startup-catchup" },
+      { reason: "session-startup-catchup" },
+    ]);
+    await vi.advanceTimersByTimeAsync(1_800_000 - 390_000 - 1);
+    expect(index).toHaveBeenCalledTimes(1);
     expect(harness.syncCalls).toHaveLength(3);
 
-    await expectAttemptsAfter(1, index, 2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(index).toHaveBeenCalledTimes(2);
     expect(harness.syncCalls).toHaveLength(4);
-    await expectAttemptsAfter(3_600_000, index, 2);
+    await vi.advanceTimersByTimeAsync(3_600_000);
+    expect(index).toHaveBeenCalledTimes(2);
   });
 
   it("backs off handled fallback failures, yields to turns, and stops retrying until new activity", async () => {
-    const { target, index, state } = fallbackFixture("fallback", true);
-    await expectAttemptsAfter(30_000, index, 1);
+    const target = append("fallback");
+    const sessionFile = "/tmp/fallback.jsonl";
+    const index = vi.fn(async () => {});
+    const error = createMemoryEmbeddingOperationError({
+      operation: "batch",
+      cause: "embedding backend failed",
+    });
+    let lastAttemptAt = 0;
+    index.mockImplementation(async () => {
+      lastAttemptAt = Date.now();
+      throw error;
+    });
+    harness["syncArchiveFiles"] = index;
+    harness["activateFallbackProvider"] = vi.fn(async () => true);
+    let deferForRebuildCooldown = false;
+    harness["sync"] = async (params) => {
+      harness.syncCalls.push(params ?? {});
+      if (deferForRebuildCooldown) {
+        deferForRebuildCooldown = false;
+        await harness.runSyncForTest(params);
+        return;
+      }
+      await harness["syncTargetedSessions"](new Set([sessionFile]));
+    };
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(index).toHaveBeenCalledTimes(1);
     for (const [attempt, delay] of [60_000, 300_000, 900_000].entries()) {
-      await expectAttemptsAfter(state.lastAttemptAt + delay - Date.now() - 1, index, attempt + 1);
+      await vi.advanceTimersByTimeAsync(lastAttemptAt + delay - Date.now() - 1);
+      expect(index).toHaveBeenCalledTimes(attempt + 1);
       if (attempt === 1) {
         activity.listener?.(true);
-        await expectAttemptsAfter(60_000, index, attempt + 1);
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(index).toHaveBeenCalledTimes(attempt + 1);
         activity.listener?.(false);
       }
-      await expectAttemptsAfter(1, index, attempt + 2);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(index).toHaveBeenCalledTimes(attempt + 2);
     }
-    await expectAttemptsAfter(3_600_000, index, 4);
-    expect(harness.syncCalls).toEqual([pass(target), catchup, catchup, catchup]);
+    await vi.advanceTimersByTimeAsync(3_600_000);
+    expect(index).toHaveBeenCalledTimes(4);
+    expect(harness.syncCalls).toEqual([
+      { reason: "session-delta", sessions: [target], archiveFiles: [] },
+      ...Array.from({ length: 3 }, () => ({ reason: "session-startup-catchup" })),
+    ]);
     expect(harness["sessionsFullRetryDirty"]).toBe(true);
 
     index.mockResolvedValue(undefined);
     activity.listener?.(true);
-    await expectAttemptsAfter(30_000, index, 4);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(index).toHaveBeenCalledTimes(4);
     harness["recordFullReindexFailure"](false);
-    state.rebuildNext = true;
+    deferForRebuildCooldown = true;
     activity.listener?.(false);
-    await expectAttemptsAfter(1, index, 4);
-    await expectAttemptsAfter(59_998, index, 4);
-    await expectAttemptsAfter(2, index, 5);
-    await expectAttemptsAfter(3_600_000, index, 5);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(index).toHaveBeenCalledTimes(4);
+    await vi.advanceTimersByTimeAsync(59_998);
+    expect(index).toHaveBeenCalledTimes(4);
+    await vi.advanceTimersByTimeAsync(2);
+    expect(index).toHaveBeenCalledTimes(5);
+    await vi.advanceTimersByTimeAsync(3_600_000);
+    expect(index).toHaveBeenCalledTimes(5);
   });
 });

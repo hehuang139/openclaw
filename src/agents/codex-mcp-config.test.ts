@@ -38,6 +38,7 @@ vi.mock("../infra/exec-approvals-store.js", () => ({
   loadExecApprovalsReadOnlyAsync: mocks.loadExecApprovalsReadOnlyAsync,
 }));
 
+// mock-isolation: Supply bundle MCP configuration without loading plugin runtimes.
 vi.mock("../plugins/bundle-mcp.js", () => ({
   loadEnabledBundleMcpConfig: () => mocks.bundleMcp,
 }));

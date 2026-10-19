@@ -178,7 +178,22 @@ export function useTelegramHttpFixture() {
                     Object.assign({}, message, { message_id: 1001 + index }),
                   )
                 : method === "sendPoll"
-                  ? { ...message, poll: { id: "http-poll" } }
+                  ? {
+                      ...message,
+                      poll: {
+                        id: "http-poll",
+                        question: fields.question,
+                        options: [
+                          { text: "Yes", voter_count: 0 },
+                          { text: "No", voter_count: 0 },
+                        ],
+                        total_voter_count: 0,
+                        is_closed: false,
+                        is_anonymous: fields.is_anonymous ?? true,
+                        type: "regular",
+                        allows_multiple_answers: false,
+                      },
+                    }
                   : message;
         response.end(JSON.stringify({ ok: true, result }));
       };

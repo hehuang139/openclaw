@@ -252,7 +252,7 @@ describe("projects vitest config", () => {
     ["fake-timer unit-fast", createUnitFastFakeTimersVitestConfig, ["src/utils.test.ts"]],
   ] as const)(
     "limits %s include files to the project's owned tests",
-    (_, createConfig, owned, expected) => {
+    (_, createConfig, owned, expected?: readonly string[]) => {
       const unrelated = "src/gateway/worker-environments/workspace-sync-scripts.test.ts";
       const mixed = includeEnv([
         ...owned,

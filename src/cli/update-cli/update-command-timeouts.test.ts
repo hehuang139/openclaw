@@ -97,7 +97,7 @@ it("forwards an inherited activation budget for already-current updates without 
       withExecutor(
         runId,
         (executor) => {
-          const enter = executor.enter;
+          const enter = executor.enter.bind(executor);
           vi.spyOn(executor, "enter").mockImplementation(async (root, opts) => {
             const fence = await enter(root, opts);
             if (opts && "activationTimeoutMs" in opts) {

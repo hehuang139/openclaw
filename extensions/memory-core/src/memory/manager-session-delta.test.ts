@@ -1,11 +1,29 @@
 import type { DatabaseSync } from "node:sqlite";
 import { publishSessionTranscriptUpdateByIdentity } from "openclaw/plugin-sdk/session-transcript-runtime";
-import { beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import {
   createManagerIndexFixture,
   readPublishedSessionIndex,
 } from "./manager-index.test-support.js";
-const { activity } = await vi.hoisted(() => import("./manager-session-activity.test-support.js"));
+
+const activity = vi.hoisted(() => ({
+  listener: undefined as ((busy: boolean) => void) | undefined,
+}));
+
+vi.mock("openclaw/plugin-sdk/memory-core-host-engine-foundation", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("openclaw/plugin-sdk/memory-core-host-engine-foundation")>();
+  return {
+    ...actual,
+    observeAgentRunActivity: (_agentId: string, listener: (busy: boolean) => void) => {
+      activity.listener = listener;
+      listener(false);
+      return () => {
+        activity.listener = undefined;
+      };
+    },
+  };
+});
 
 const { closeAllMemorySearchManagers, getMemorySearchManager } = await import("./index.js");
 
@@ -14,61 +32,55 @@ describe("memory session delta publication", () => {
     getMemorySearchManager,
     closeAllMemorySearchManagers,
   });
-  const { createConfig, getFreshManager, seedSessionTranscript, provider } = fixture;
-  beforeEach(() => {
+  const { createConfig, getFreshManager, seedSessionTranscript } = fixture;
+
+  it("yields an interrupted pass and indexes every pending session after the next quiet period", async () => {
     vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
     onTestFinished(() => {
       vi.useRealTimers();
     });
-  });
-  async function createSessionManager(cacheEnabled?: boolean) {
     const manager = await getFreshManager(
-      createConfig({ sources: ["sessions"], sessionMemory: true, cacheEnabled }),
+      createConfig({ sources: ["sessions"], sessionMemory: true, cacheEnabled: true }),
     );
     onTestFinished(() => manager.close());
-    return manager;
-  }
-  async function settle(manager: Awaited<ReturnType<typeof getFreshManager>>, delay = 30_000) {
-    await vi.advanceTimersByTimeAsync(delay);
-    await (manager as unknown as { awaitManagerIdle(): Promise<void> }).awaitManagerIdle();
-  }
-  function interruptNextBatch() {
-    provider.beforeEmbedBatch = async () => {
-      provider.beforeEmbedBatch = null;
-      activity.listener?.(true);
-    };
-  }
-  const sessionIdentity = (sessionId: string) => ({
-    sessionId,
-    sessionKey: `agent:main:chat:${sessionId}`,
-  });
-  const message = (content: string) => ({ role: "user" as const, timestamp: Date.now(), content });
-  const seed = (target: ReturnType<typeof sessionIdentity>, content: string) =>
-    seedSessionTranscript({ ...target, messages: [message(content)] });
-
-  it("yields an interrupted pass and indexes every pending session after the next quiet period", async () => {
-    const manager = await createSessionManager(true);
     await manager.sync({ reason: "initial", force: true });
     const database = Reflect.get(manager, "db") as DatabaseSync;
-    const sessions = Array.from({ length: 9 }, (_, index) => sessionIdentity(`resume-${index}`));
+    const sessions = Array.from({ length: 9 }, (_, index) => ({
+      sessionId: `resume-${index}`,
+      sessionKey: `agent:main:chat:resume-${index}`,
+    }));
     for (const session of sessions) {
-      await seed(session, `resumeproof alpha ${session.sessionId}`);
+      await seedSessionTranscript({
+        ...session,
+        messages: [
+          {
+            role: "user",
+            timestamp: Date.now(),
+            content: `resumeproof alpha ${session.sessionId}`,
+          },
+        ],
+      });
       await publishSessionTranscriptUpdateByIdentity({ agentId: "main", ...session });
     }
-    interruptNextBatch();
+    fixture.provider.beforeEmbedBatch = async () => {
+      fixture.provider.beforeEmbedBatch = null;
+      activity.listener?.(true);
+    };
     const indexedPaths = () =>
       database
         .prepare("SELECT path FROM memory_index_sources WHERE source = 'sessions' ORDER BY path")
         .all();
 
-    await settle(manager);
-    expect(provider.embedBatchCalls).toBeGreaterThan(0);
+    await vi.advanceTimersByTimeAsync(30_000);
+    await (manager as unknown as { awaitManagerIdle(): Promise<void> }).awaitManagerIdle();
+    expect(fixture.provider.embedBatchCalls).toBeGreaterThan(0);
     expect(indexedPaths()).toEqual([]);
 
     activity.listener?.(false);
     await vi.advanceTimersByTimeAsync(29_999);
     expect(indexedPaths()).toEqual([]);
-    await settle(manager, 1);
+    await vi.advanceTimersByTimeAsync(1);
+    await (manager as unknown as { awaitManagerIdle(): Promise<void> }).awaitManagerIdle();
     expect(indexedPaths()).toEqual(
       sessions.map(({ sessionId }) => ({ path: `sessions/main/${sessionId}.jsonl` })),
     );
@@ -83,69 +95,113 @@ describe("memory session delta publication", () => {
   });
 
   it("keeps the published index when a background rebuild is interrupted", async () => {
-    const target = sessionIdentity("rebuild");
-    await seed(target, "stableproof original");
-    const manager = await createSessionManager();
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    onTestFinished(() => {
+      vi.useRealTimers();
+    });
+    const session = { sessionId: "rebuild", sessionKey: "agent:main:chat:rebuild" };
+    await seedSessionTranscript({
+      ...session,
+      messages: [{ role: "user", timestamp: Date.now(), content: "stableproof original" }],
+    });
+    const manager = await getFreshManager(
+      createConfig({ sources: ["sessions"], sessionMemory: true }),
+    );
+    onTestFinished(() => manager.close());
     await manager.sync({ reason: "initial", force: true });
     const database = Reflect.get(manager, "db") as DatabaseSync;
-    const read = (query: string) =>
-      readPublishedSessionIndex(database, "sessions/main/rebuild.jsonl", query);
-    const before = read("stableproof");
-    await seed(target, "newproof appended");
+    const before = readPublishedSessionIndex(
+      database,
+      "sessions/main/rebuild.jsonl",
+      "stableproof",
+    );
+    await seedSessionTranscript({
+      ...session,
+      messages: [{ role: "user", timestamp: Date.now(), content: "newproof appended" }],
+    });
     Reflect.set(manager, "memoryFullRetryDirty", true);
-    interruptNextBatch();
-    await publishSessionTranscriptUpdateByIdentity({ agentId: "main", ...target });
-    await settle(manager);
-    expect(read("stableproof")).toEqual(before);
+    fixture.provider.beforeEmbedBatch = async () => {
+      fixture.provider.beforeEmbedBatch = null;
+      activity.listener?.(true);
+    };
+    await publishSessionTranscriptUpdateByIdentity({ agentId: "main", ...session });
+    await vi.advanceTimersByTimeAsync(30_000);
+    await (manager as unknown as { awaitManagerIdle(): Promise<void> }).awaitManagerIdle();
+    expect(
+      readPublishedSessionIndex(database, "sessions/main/rebuild.jsonl", "stableproof"),
+    ).toEqual(before);
     expect(manager.status().dirty).toBe(true);
 
     activity.listener?.(false);
-    await settle(manager);
-    expect(read("newproof").search).not.toEqual([]);
+    await vi.advanceTimersByTimeAsync(30_000);
+    await (manager as unknown as { awaitManagerIdle(): Promise<void> }).awaitManagerIdle();
+    expect(
+      readPublishedSessionIndex(database, "sessions/main/rebuild.jsonl", "newproof").search,
+    ).not.toEqual([]);
     expect(manager.status().dirty).toBe(false);
   });
 
   it("settles ten queued turns incrementally with the same search results as a full reindex", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    onTestFinished(() => {
+      vi.useRealTimers();
+    });
     const sessionId = "growing-session";
     const sessionKey = `agent:main:chat:${sessionId}`;
     const sessionPath = `sessions/main/${sessionId}.jsonl`;
     // Each long turn fills its own chunk, so appends leave earlier chunks unchanged.
-    const turn = (index: number) =>
-      message(`turnmarker${index} ` + `topic${index} detail `.repeat(400));
-    const manager = await createSessionManager(false);
+    const turn = (index: number) => ({
+      role: "user" as const,
+      timestamp: Date.now(),
+      content: `turnmarker${index} ` + `topic${index} detail `.repeat(400),
+    });
+    const cfg = createConfig({ sources: ["sessions"], sessionMemory: true, cacheEnabled: false });
+    const manager = await getFreshManager(cfg);
+    onTestFinished(() => manager.close());
     await (manager as unknown as { awaitManagerIdle(): Promise<void> }).awaitManagerIdle();
     await seedSessionTranscript({ sessionId, sessionKey, messages: [1, 2, 3, 4].map(turn) });
     await manager.sync({ reason: "initial", force: true });
     const database = Reflect.get(manager, "db") as DatabaseSync;
-    const read = (query: string) => readPublishedSessionIndex(database, sessionPath, query);
-    const initial = read("turnmarker1");
+    const initial = readPublishedSessionIndex(database, sessionPath, "turnmarker1");
     const before = initial.chunks;
     expect(before.length).toBeGreaterThan(2);
 
-    provider.embeddedBatchTexts = [];
+    fixture.provider.embeddedBatchTexts = [];
     for (let index = 5; index < 15; index += 1) {
       await seedSessionTranscript({ sessionId, sessionKey, messages: [turn(index)] });
       await publishSessionTranscriptUpdateByIdentity({ agentId: "main", sessionId, sessionKey });
       await vi.advanceTimersByTimeAsync(1000);
     }
-    expect(read("turnmarker14").search).toEqual([]);
-    expect(provider.embeddedBatchTexts).toEqual([]);
-    await settle(manager);
+    expect(readPublishedSessionIndex(database, sessionPath, "turnmarker14").search).toEqual([]);
+    expect(fixture.provider.embeddedBatchTexts).toEqual([]);
+    await vi.advanceTimersByTimeAsync(30_000);
+    await (manager as unknown as { awaitManagerIdle(): Promise<void> }).awaitManagerIdle();
 
-    const after = read("turnmarker14");
+    const after = readPublishedSessionIndex(database, sessionPath, "turnmarker14");
     expect(after.search).not.toEqual([]);
     const kept = before.filter((row) => after.chunks.some((next) => next.id === row.id));
     // Only the trailing chunk may change; every earlier row stays untouched.
     expect(kept.length).toBeGreaterThanOrEqual(before.length - 1);
     expect(after.chunks).toEqual(expect.arrayContaining(kept));
-    expect(read("turnmarker1").search).toEqual(initial.search);
-    const texts = provider.embeddedBatchTexts;
-    expect(texts.some((text) => /\bturnmarker1\b/.test(text))).toBe(false);
-    expect(texts.some((text) => text.includes("turnmarker14"))).toBe(true);
+    expect(readPublishedSessionIndex(database, sessionPath, "turnmarker1").search).toEqual(
+      initial.search,
+    );
+    expect(fixture.provider.embeddedBatchTexts.some((text) => /\bturnmarker1\b/.test(text))).toBe(
+      false,
+    );
+    expect(fixture.provider.embeddedBatchTexts.some((text) => text.includes("turnmarker14"))).toBe(
+      true,
+    );
     expect(manager.status().dirty).toBe(false);
     const search = async () =>
       (await manager.search("turnmarker14", { lexicalOnly: true, sources: ["sessions"] })).map(
-        (hit) => [hit.path, hit.startLine, hit.endLine, hit.snippet, hit.source],
+        ({ path, startLine, endLine, snippet, source }) => ({
+          path,
+          startLine,
+          endLine,
+          snippet,
+          source,
+        }),
       );
     const incrementalResults = await search();
     expect(incrementalResults.length).toBeGreaterThan(0);
