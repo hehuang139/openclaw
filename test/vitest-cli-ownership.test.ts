@@ -22,6 +22,24 @@ import { createInfraVitestConfig } from "./vitest/vitest.infra.config.ts";
 const patternFiles = createPatternFileHelper("gateway-watch-ownership-");
 afterEach(() => patternFiles.cleanup());
 
+function discover(config: ReturnType<typeof createInfraVitestConfig>) {
+  assert(config.test);
+  assert(config.root);
+  const dir = config.test.dir ?? config.root;
+  return fs
+    .globSync(config.test.include ?? [], { cwd: dir, exclude: config.test.exclude })
+    .map((file) => path.relative(config.root!, path.join(dir, file)).replaceAll("\\", "/"));
+}
+
+function selectProjects(projects: Record<string, string[]>, filters: string[]) {
+  return Object.fromEntries(
+    Object.entries(projects).map(([name, files]) => [
+      name,
+      files.filter((file) => selectedByFilters(file, filters)),
+    ]),
+  );
+}
+
 function gatewayProjectFiles(filters: string[], env: Record<string, string | undefined> = {}) {
   const originalArgv = process.argv;
   process.argv = ["node", "vitest", "run", ...filters];
@@ -39,10 +57,7 @@ function gatewayProjectFiles(filters: string[], env: Record<string, string | und
         const config = createConfig(env);
         const test = config.test!;
         assert(typeof test.name === "string");
-        const dir = test.dir ?? config.root!;
-        const files = fs
-          .globSync(test.include ?? [], { cwd: dir, exclude: test.exclude })
-          .map((file) => path.relative(config.root!, path.join(dir, file)).replaceAll("\\", "/"))
+        const files = discover(config)
           .filter((file) => selectedByFilters(file, filters))
           .toSorted();
         return [test.name, files];
@@ -86,17 +101,7 @@ it("routes resume local-node handshakes only through the core broker fork", () =
     [worker, [file]],
     [previous, []],
   ] as const) {
-    assert(config.test);
-    assert(config.root);
-    const root = config.root;
-    const dir = config.test.dir ?? root;
-    const selected = fs
-      .globSync(config.test.include ?? [], {
-        cwd: dir,
-        exclude: config.test.exclude,
-      })
-      .map((entry) => path.relative(root, path.join(dir, entry)).replaceAll("\\", "/"));
-    expect(selected).toEqual(expected);
+    expect(discover(config)).toEqual(expected);
   }
 });
 
@@ -133,15 +138,8 @@ it.each([
     },
   ]);
   const includeFile = patternFiles.writePatternFile("include.json", plans[0]!.includePatterns);
-  const canonical = canonicalGatewayFiles;
-  const expected = Object.fromEntries(
-    Object.entries(canonical).map(([name, files]) => [
-      name,
-      files.filter((file) => selectedByFilters(file, filters)),
-    ]),
-  );
   const selected = gatewayProjectFiles([], { OPENCLAW_VITEST_INCLUDE_FILE: includeFile });
-  expect(selected).toEqual(expected);
+  expect(selected).toEqual(selectProjects(canonicalGatewayFiles, filters));
   expect(selected["gateway-database-workers"]).toEqual(
     gatewayDatabaseWorkerTestFiles.filter((file) => selectedByFilters(file, filters)),
   );
@@ -191,12 +189,7 @@ it.each(
 )("preserves canonical project ownership for $filters", ({ filters }) => {
   const canonical = canonicalGatewayFiles;
   expect(canonical["gateway-database-workers"]).toEqual(gatewayDatabaseWorkerTestFiles);
-  const expected = Object.fromEntries(
-    Object.entries(canonical).map(([name, files]) => [
-      name,
-      files.filter((file) => selectedByFilters(file, filters)),
-    ]),
-  );
+  const expected = selectProjects(canonical, filters);
 
   expect(gatewayProjectFiles(filters)).toEqual(expected);
   const selected = Object.values(expected).flat();

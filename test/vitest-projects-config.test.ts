@@ -1,4 +1,3 @@
-// Vitest project config tests validate aggregate Vitest project wiring.
 import { globSync } from "node:fs";
 import path from "node:path";
 import { afterEach, assert, describe, expect, it } from "vitest";
@@ -53,37 +52,35 @@ import { createUnitFastVitestConfig } from "./vitest/vitest.unit-fast.config.ts"
 
 const defaultPool = process.platform === "win32" ? "forks" : "threads";
 const patternFiles = createPatternFileHelper("openclaw-vitest-projects-config-");
-const scopedGatewayMethodsIsolatedTestFiles = [
-  "server-methods/chat-metadata-runtime.cache.test.ts",
-  "server-methods/agent.test.ts",
-  "server-methods/agent.followup-owner.test.ts",
-  "server-methods/agent.visitor-access.test.ts",
-  "server-methods/board.runtime-boundaries.test.ts",
-  "server-methods/chat.reset-visible-yield.test.ts",
-  "server-methods/environments.pairing-snapshot.test.ts",
-  "server-methods/health.owner-routing.test.ts",
-  "server-methods/sessions.send-yield-resume.test.ts",
-  "server-methods/system-agent-nested-inference.integration.test.ts",
-  "server-methods/system-agent-setup-control-ui.test.ts",
-  "server-methods/transcripts.test.ts",
-  "server-methods/users-preferences.test.ts",
-  "server-methods/users-role.worker.test.ts",
-  "server-methods/usage.test.ts",
-  "server-methods/usage.sessions-usage.test.ts",
-];
+const scopedGatewayMethodsIsolatedTestFiles = `chat-metadata-runtime.cache agent
+  agent.followup-owner agent.visitor-access board.runtime-boundaries chat.reset-visible-yield
+  environments.pairing-snapshot health.owner-routing sessions.send-yield-resume
+  system-agent-nested-inference.integration system-agent-setup-control-ui transcripts
+  users-preferences users-role.worker usage usage.sessions-usage`
+  .split(/\s+/u)
+  .map((name) => `server-methods/${name}.test.ts`);
 
 function requireTestConfig<T extends { test?: unknown }>(config: T): NonNullable<T["test"]> {
-  if (!config.test) {
-    throw new Error("expected vitest test config");
-  }
-  return config.test as NonNullable<T["test"]>;
+  assert(config.test, "expected vitest test config");
+  return config.test;
 }
 
 const rootVitestProjects = requireTestConfig(baseConfig).projects as string[];
 
-afterEach(() => {
-  patternFiles.cleanup();
-});
+afterEach(() => patternFiles.cleanup());
+
+function runConfigScript(source: string) {
+  const result = spawnNodeEvalSync(source, {
+    imports: ["tsx"],
+    env: { ...process.env, GITHUB_ACTIONS: "true", OPENCLAW_VITEST_INCLUDE_FILE: undefined },
+    timeout: DEFAULT_VITEST_TEST_TIMEOUT_MS,
+  });
+  const output = JSON.stringify({ stdout: result.stdout, stderr: result.stderr });
+  expect(result.error, output).toBeUndefined();
+  expect(result.signal, output).toBeNull();
+  expect(result.status, output).toBe(0);
+  return result.stdout;
+}
 
 describe("projects vitest config", () => {
   it("pins an explicit full-suite project worker limit", () => {
@@ -98,7 +95,7 @@ describe("projects vitest config", () => {
   });
 
   it("keeps the resolved root and generated projects in their explicit environments", () => {
-    const result = spawnNodeEvalSync(
+    const stdout = runConfigScript(
       `
         import assert from "node:assert/strict";
         import { resolveConfig } from "vitest/node";
@@ -135,20 +132,9 @@ describe("projects vitest config", () => {
         );
         console.log("ROOT_PROJECT_RESOLUTION " + resolved.test.resolvedProjects.length);
       `,
-      {
-        imports: ["tsx"],
-        env: { ...process.env, GITHUB_ACTIONS: "true", OPENCLAW_VITEST_INCLUDE_FILE: undefined },
-        timeout: DEFAULT_VITEST_TEST_TIMEOUT_MS,
-      },
     );
-    const output = JSON.stringify({ stdout: result.stdout, stderr: result.stderr });
-    expect(result.error, output).toBeUndefined();
-    expect(result.signal, output).toBeNull();
-    expect(result.status, output).toBe(0);
-    const report = result.stdout
-      .split("\n")
-      .find((line) => line.startsWith("ROOT_PROJECT_RESOLUTION "));
-    expect(report, result.stdout).toBeDefined();
+    const report = stdout.split("\n").find((line) => line.startsWith("ROOT_PROJECT_RESOLUTION "));
+    expect(report, stdout).toBeDefined();
     expect(Number(report!.slice("ROOT_PROJECT_RESOLUTION ".length))).toBeGreaterThan(0);
   });
 
@@ -215,24 +201,19 @@ describe("projects vitest config", () => {
     );
     const gatewayFallback = requireTestConfig(createGatewayVitestConfig());
 
-    expect(rootVitestProjects).toContain(methodsIsolatedProject);
-    expect(rootVitestProjects).toContain(serverIsolatedProject);
-    expect(agenticShard?.projects).toContain(methodsIsolatedProject);
-    expect(agenticShard?.projects).toContain(serverIsolatedProject);
-    expect(methodsIsolatedConfig.isolate).toBe(true);
-    expect(methodsIsolatedConfig.pool).toBe("forks");
+    for (const project of [methodsIsolatedProject, serverIsolatedProject]) {
+      expect(rootVitestProjects).toContain(project);
+      expect(agenticShard?.projects).toContain(project);
+    }
+    expect(methodsIsolatedConfig).toMatchObject({ isolate: true, pool: "forks" });
     expect(normalizeConfigPath(methodsIsolatedConfig.runner)).toBe("test/non-isolated-runner.ts");
     expect(methodsIsolatedConfig.include).toEqual(scopedGatewayMethodsIsolatedTestFiles);
-    expect(serverConfig.pool).toBe("forks");
-    expect(serverConfig.isolate).toBe(false);
-    expect(serverConfig.fileParallelism).toBe(true);
+    expect(serverConfig).toMatchObject({ pool: "forks", isolate: false, fileParallelism: true });
     expect(
       requireTestConfig(createGatewayServerVitestConfig({ OPENCLAW_VITEST_MAX_WORKERS: "1" }))
         .fileParallelism,
     ).toBe(false);
-    expect(serverIsolatedConfig.isolate).toBe(true);
-    expect(serverIsolatedConfig.pool).toBe("forks");
-    expect(serverIsolatedConfig.runner).toBeUndefined();
+    expect(serverIsolatedConfig).toMatchObject({ isolate: true, pool: "forks", runner: undefined });
     expect(serverIsolatedConfig.include).toEqual(gatewayServerIsolatedTestFiles);
     const overrideFixture = "src/gateway/server-plugin-subagent-runtime.overrides.test.ts";
     expect(serverIsolatedConfig.include).toContain(overrideFixture);
@@ -409,7 +390,7 @@ describe("projects vitest config", () => {
         : undefined,
     }));
     // Keep real CLI/config resolution, but pay for its isolated process only once.
-    const result = spawnNodeEvalSync(
+    runConfigScript(
       `
         import assert from "node:assert/strict";
         import { globSync, readFileSync, rmSync } from "node:fs";
@@ -468,19 +449,7 @@ describe("projects vitest config", () => {
           assert.equal(new Set(matches).size, matches.length);
         }
       `,
-      {
-        imports: ["tsx"],
-        env: {
-          ...process.env,
-          GITHUB_ACTIONS: "true",
-          OPENCLAW_VITEST_INCLUDE_FILE: undefined,
-        },
-        timeout: DEFAULT_VITEST_TEST_TIMEOUT_MS,
-      },
     );
-    expect(result.error, result.stderr).toBeUndefined();
-    expect(result.signal, result.stderr).toBeNull();
-    expect(result.status, result.stderr).toBe(0);
   });
 
   it("keeps shared and isolated UI owners together in root and full runtime runs", () => {
@@ -499,8 +468,7 @@ describe("projects vitest config", () => {
     const config = createUiVitestConfig();
     const testConfig = requireTestConfig(config);
     expect(testConfig.exclude).toEqual(expect.arrayContaining(uiIsolatedTestFiles));
-    expect(testConfig.environment).toBe("jsdom");
-    expect(testConfig.isolate).toBe(false);
+    expect(testConfig).toMatchObject({ environment: "jsdom", isolate: false });
     expect(normalizeConfigPath(testConfig.runner)).toBe("test/non-isolated-runner.ts");
     const setupFiles = normalizeConfigPaths(testConfig.setupFiles);
     expect(setupFiles).not.toContain("test/setup-openclaw-runtime.ts");
@@ -517,8 +485,7 @@ describe("projects vitest config", () => {
 
   it("runs live Gateway hosts in process forks for shared-state admission", () => {
     const testConfig = requireTestConfig(liveConfig);
-    expect(testConfig.pool).toBe("forks");
-    expect(testConfig.maxWorkers).toBe(1);
+    expect(testConfig).toMatchObject({ pool: "forks", maxWorkers: 1 });
   });
 
   it.each(["logbook", "memory-core", "team-reports", "workboard"])(
@@ -593,8 +560,7 @@ describe("projects vitest config", () => {
 
   it("keeps the bundled lane in broker-capable forks with the non-isolated runner", () => {
     const testConfig = requireTestConfig(bundledConfig);
-    expect(testConfig.pool).toBe("forks");
-    expect(testConfig.isolate).toBe(false);
+    expect(testConfig).toMatchObject({ pool: "forks", isolate: false });
     expect(normalizeConfigPath(testConfig.runner)).toBe("test/non-isolated-runner.ts");
   });
 });

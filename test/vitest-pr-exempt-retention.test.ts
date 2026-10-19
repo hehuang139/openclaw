@@ -23,6 +23,15 @@ type PlannedTestOwner = {
   configs: readonly string[];
   includePatterns?: readonly string[];
 };
+type UiOwners = Record<"ui" | "e2e", Array<{ includePatterns: string[] }>>;
+
+function expectUiOwnerCount(owners: UiOwners, file: string, count: number) {
+  const kind = isUiTestTarget(file) ? "ui" : "e2e";
+  expect(
+    owners[kind].filter((group) => group.includePatterns.includes(file)),
+    file,
+  ).toHaveLength(count);
+}
 
 // Whole-inventory proof runs periodically; the policy watch owns PR opt-in.
 function fallbackGroups(shards: ReturnType<typeof createNodeTestShardBundles>) {
@@ -209,20 +218,12 @@ it.each(["hourly", "release"] as const)(
     for (const file of prExemptFiles) {
       expect(owners.get(file) ?? [], file).toHaveLength(1);
       if (file.startsWith("ui/")) {
-        const kind = isUiTestTarget(file) ? "ui" : "e2e";
-        expect(
-          uiOwners[kind].filter((group) => group.includePatterns.includes(file)),
-          file,
-        ).toHaveLength(1);
+        expectUiOwnerCount(uiOwners, file, 1);
       }
     }
     for (const file of RELEASE_ONLY_UI_TEST_FILES) {
       expect(prExemptFiles, file).not.toContain(file);
-      const kind = isUiTestTarget(file) ? "ui" : "e2e";
-      expect(
-        uiOwners[kind].filter((group) => group.includePatterns.includes(file)),
-        file,
-      ).toHaveLength(mode === "release" ? 1 : 0);
+      expectUiOwnerCount(uiOwners, file, mode === "release" ? 1 : 0);
     }
   },
 );
@@ -238,10 +239,6 @@ it("keeps release-only UI files out of ordinary owner-selected plans", () => {
     }),
   );
   for (const file of RELEASE_ONLY_UI_TEST_FILES) {
-    const kind = isUiTestTarget(file) ? "ui" : "e2e";
-    expect(
-      owners[kind].filter((group) => group.includePatterns.includes(file)),
-      file,
-    ).toHaveLength(0);
+    expectUiOwnerCount(owners, file, 0);
   }
 });

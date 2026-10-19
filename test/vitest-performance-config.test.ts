@@ -11,6 +11,9 @@ import { loadVitestPerformanceConfig } from "./vitest/vitest.performance-config.
 
 describe("filesystem module cache ownership", () => {
   const tempDirs = useAutoCleanupTempDirTracker(afterEach);
+  const write = (root: string, file: string, contents: string) =>
+    fs.writeFileSync(path.join(root, file), contents);
+  const read = (root: string, file: string) => fs.readFileSync(path.join(root, file), "utf8");
   const cli = path.join(
     path.dirname(createRequire(import.meta.url).resolve("vitest/package.json")),
     "vitest.mjs",
@@ -56,14 +59,15 @@ describe("filesystem module cache ownership", () => {
   const prepareCacheFixture = (name: string) => {
     const root = fs.realpathSync(tempDirs.make(`oc-vitest-cache-${name}-`));
     fs.mkdirSync(path.join(root, "node_modules"));
-    fs.writeFileSync(
-      path.join(root, "package.json"),
+    write(
+      root,
+      "package.json",
       JSON.stringify({ name: `cache-${name}`, type: "module", workspaces: [] }),
     );
     const generation = path.join(root, "dependency-generation.txt");
     const transitionLock = (version: string) => {
       // bun.lock is only a recognized hash input; no package manager is invoked.
-      fs.writeFileSync(path.join(root, "bun.lock"), JSON.stringify({ version }));
+      write(root, "bun.lock", JSON.stringify({ version }));
       fs.writeFileSync(generation, version);
     };
     transitionLock("1.0.0");
@@ -142,13 +146,11 @@ assert.equal(transforms.length, 2, "both projects must reuse their own persisted
       fs.mkdirSync(checkout);
       // Stop Vite's workspace search before it reaches this repository. The
       // symlink points only at this fixture's dependencies and writable cache.
-      fs.writeFileSync(
-        path.join(checkout, "package.json"),
-        JSON.stringify({ name, type: "module", workspaces: [] }),
-      );
+      write(checkout, "package.json", JSON.stringify({ name, type: "module", workspaces: [] }));
       fs.symlinkSync(sharedModules, path.join(checkout, "node_modules"), "junction");
-      fs.writeFileSync(
-        path.join(checkout, "fixture.test.js"),
+      write(
+        checkout,
+        "fixture.test.js",
         'test("runs the fixture", () => expect(2 + 2).toBe(4));\n',
       );
       const cacheConfig = loadVitestPerformanceConfig({}, "linux", checkout);
@@ -161,10 +163,7 @@ assert.equal(transforms.length, 2, "both projects must reuse their own persisted
           ...cacheConfig,
         },
       };
-      fs.writeFileSync(
-        path.join(checkout, "vitest.config.mjs"),
-        `export default ${JSON.stringify(config)};\n`,
-      );
+      write(checkout, "vitest.config.mjs", `export default ${JSON.stringify(config)};\n`);
       return { checkout, cacheConfig };
     };
     const first = prepareCheckout("first");
@@ -183,12 +182,11 @@ assert.equal(transforms.length, 2, "both projects must reuse their own persisted
     // Reporter imports precede test execution and must observe the same dependency
     // generation as the selected projects after a lock transition.
     const reporterEvents = path.join(root, "reporter-events.txt");
-    fs.writeFileSync(
-      path.join(root, "reporter-subject.js"),
-      'export const version = "__DEPENDENCY_VERSION__";\n',
-    );
-    fs.writeFileSync(
-      path.join(root, "reporter.js"),
+    const versionSource = 'export const version = "__DEPENDENCY_VERSION__";\n';
+    write(root, "reporter-subject.js", versionSource);
+    write(
+      root,
+      "reporter.js",
       `import { appendFileSync } from "node:fs";
 import { version } from "./reporter-subject.js";
 export default class {
@@ -201,18 +199,13 @@ export default class {
     for (const name of ["A", "B"]) {
       const project = path.join(root, name);
       fs.mkdirSync(project);
-      fs.writeFileSync(path.join(project, "transforms.txt"), "");
-      fs.writeFileSync(
-        path.join(project, "subject.js"),
-        'export const version = "__DEPENDENCY_VERSION__";\n',
-      );
-      fs.copyFileSync(
-        path.join(project, "subject.js"),
-        path.join(project, "configured-subject.js"),
-      );
-      fs.copyFileSync(path.join(project, "subject.js"), path.join(project, "body-subject.js"));
-      fs.writeFileSync(
-        path.join(project, "fixture.test.js"),
+      write(project, "transforms.txt", "");
+      for (const file of ["subject.js", "configured-subject.js", "body-subject.js"]) {
+        write(project, file, versionSource);
+      }
+      write(
+        project,
+        "fixture.test.js",
         `import { appendFileSync, readFileSync } from "node:fs";
 import { version } from "fixture-subject";
 const events = ${JSON.stringify(path.join(project, "events.txt"))};
@@ -293,29 +286,23 @@ export default {
     const check = (projects: string[], expected: [number, number, number], args: string[] = []) => {
       run(root, root, [...projects.flatMap((name) => ["--project", name]), ...args], env);
       reporterGenerations.push(fs.readFileSync(generation, "utf8"));
-      expect(fs.readFileSync(reporterEvents, "utf8").trimEnd().split("\n")).toEqual(
-        reporterGenerations,
-      );
-      const counts = ["A", "B"].map(
-        (name) =>
-          fs.readFileSync(path.join(root, name, "transforms.txt"), "utf8").split("\n").length - 1,
-      );
-      counts.push(
-        fs.readFileSync(path.join(root, "reporter-transforms.txt"), "utf8").split("\n").length - 1,
+      expect(read(root, "reporter-events.txt").trimEnd().split("\n")).toEqual(reporterGenerations);
+      const counts = ["A/transforms.txt", "B/transforms.txt", "reporter-transforms.txt"].map(
+        (file) => read(root, file).split("\n").length - 1,
       );
       expect(counts, `subject transforms after selecting ${projects.join("+")}`).toEqual(expected);
     };
     check(["A", "B"], [1, 1, 1], ["--testNamePattern=(?!)"]);
     for (const name of ["A", "B"]) {
-      expect(fs.readFileSync(path.join(root, name, "events.txt"), "utf8")).toBe("collect:1.0.0\n");
+      expect(read(root, `${name}/events.txt`)).toBe("collect:1.0.0\n");
       expect(fs.existsSync(path.join(root, name, "body-transforms.txt"))).toBe(false);
     }
     check(["A", "B"], [1, 1, 1]);
     for (const name of ["A", "B"]) {
-      expect(fs.readFileSync(path.join(root, name, "events.txt"), "utf8")).toBe(
+      expect(read(root, `${name}/events.txt`)).toBe(
         "collect:1.0.0\ncollect:1.0.0\nbeforeAll\nbody\n",
       );
-      expect(fs.readFileSync(path.join(root, name, "body-transforms.txt"), "utf8")).toBe("1.0.0\n");
+      expect(read(root, `${name}/body-transforms.txt`)).toBe("1.0.0\n");
     }
     transitionLock("2.0.0");
     check(["A"], [2, 1, 2]);
@@ -328,12 +315,10 @@ export default {
     check(["A", "B"], [3, 2, 2]);
     fs.writeFileSync(
       configFile,
-      fs
-        .readFileSync(configFile, "utf8")
-        .replace(
-          'const subjectFile = "subject.js";',
-          'const subjectFile = "configured-subject.js";',
-        ),
+      read(root, "vitest.config.mjs").replace(
+        'const subjectFile = "subject.js";',
+        'const subjectFile = "configured-subject.js";',
+      ),
     );
     check(["A", "B"], [4, 3, 3]);
     check(["A", "B"], [4, 3, 3]);

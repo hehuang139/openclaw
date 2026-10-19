@@ -1,4 +1,3 @@
-// Vitest UI package config tests validate UI package test project settings.
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -32,6 +31,8 @@ type ExpectedTestConfig = ReturnType<typeof loadVitestPerformanceConfig> & {
   setupFiles?: string[];
   sequence?: { groupOrder?: number };
 };
+type FileOrder = { native: string[]; actual: string[] };
+const writeJson = (file: string, value: unknown) => writeFileSync(file, JSON.stringify(value));
 
 function globTestFiles(
   patterns: string | string[],
@@ -62,6 +63,16 @@ describe("ui package vitest config", () => {
     vi.doUnmock("../ui/src/test-helpers/playwright-chromium.ts");
     vi.resetModules();
   });
+  async function run(args: string[], signal: AbortSignal, env: NodeJS.ProcessEnv = {}) {
+    const result = await runVitestShutdownCommand({
+      args,
+      signal,
+      timeoutMs: DEFAULT_VITEST_TEST_TIMEOUT_MS,
+      env: { PATH: process.env.PATH, CI: "1", ...env },
+    });
+    expect(result.code, result.stdout + result.stderr).toBe(0);
+    return result;
+  }
 
   it("partitions runtimes after native UI sharding without changing ownership or dropping files", ({
     signal,
@@ -77,23 +88,19 @@ describe("ui package vitest config", () => {
           resolveCiTestRuntimeSelections({ configs: ["ui/vitest.config.ts"] }, policy),
         ]),
       );
-      writeFileSync(selectionsPath, JSON.stringify(selections));
-      const result = await runVitestShutdownCommand({
-        args: [
+      writeJson(selectionsPath, selections);
+      const result = await run(
+        [
           fileURLToPath(new URL("./fixtures/vitest-ui-runtime-partition.mjs", import.meta.url)),
           output,
           selectionsPath,
           path.join(root, "include.json"),
         ],
         signal,
-        timeoutMs: DEFAULT_VITEST_TEST_TIMEOUT_MS,
-        env: {
-          PATH: process.env.PATH,
-          CI: "1",
+        {
           OPENCLAW_VITEST_FS_MODULE_CACHE_PATH: path.join(root, "transforms"),
         },
-      });
-      expect(result.code, result.stdout + result.stderr).toBe(0);
+      );
       expect(result.stdout).toContain("[ui-runtime] file shuffle seed: 37");
       const report = JSON.parse(readFileSync(output, "utf8")) as {
         discovered: string[];
@@ -108,17 +115,17 @@ describe("ui package vitest config", () => {
         scheduling: {
           native: string[];
           cold: string[];
-          bounded: { native: string[]; actual: string[] };
-          cached: Array<{ native: string[]; actual: string[] }>;
-          preserved: Array<{ native: string[]; actual: string[] }>;
-          shuffled: Array<{ native: string[]; actual: string[] }>;
-          partitionedShuffled: Array<{
-            native: string[];
-            actual: string[];
-            shardNative: string[];
-            shardActual: string[];
-          }>;
-          projectOrder: { native: string[]; actual: string[] };
+          bounded: FileOrder;
+          cached: FileOrder[];
+          preserved: FileOrder[];
+          shuffled: FileOrder[];
+          partitionedShuffled: Array<
+            FileOrder & {
+              shardNative: string[];
+              shardActual: string[];
+            }
+          >;
+          projectOrder: FileOrder;
         };
       };
       expect(report.discovered.length).toBeGreaterThan(1000);
@@ -132,26 +139,12 @@ describe("ui package vitest config", () => {
       expect(report.rows).toHaveLength(4);
       expect(report.empty).toEqual({ modules: 0, errors: 0 });
       expect(report.emptyDiscoveryAllowed).toBe(false);
-      expect(report.scheduling.native).toEqual([
-        "default-a",
-        "node-a",
-        "url-a",
-        "default-b",
-        "node-b",
-        "url-b",
-        "default-false",
-        "other-url",
-      ]);
-      expect(report.scheduling.cold).toEqual([
-        "default-a",
-        "default-b",
-        "default-false",
-        "node-a",
-        "node-b",
-        "url-a",
-        "url-b",
-        "other-url",
-      ]);
+      expect(report.scheduling.native).toEqual(
+        "default-a node-a url-a default-b node-b url-b default-false other-url".split(" "),
+      );
+      expect(report.scheduling.cold).toEqual(
+        "default-a default-b default-false node-a node-b url-a url-b other-url".split(" "),
+      );
       const { bounded } = report.scheduling;
       expect(bounded.actual).toHaveLength(405);
       expect(bounded.actual.toSorted()).toEqual(bounded.native.toSorted());
@@ -273,8 +266,8 @@ export default {
 };
 `,
       );
-      const result = await runVitestShutdownCommand({
-        args: [
+      const result = await run(
+        [
           path.join(process.cwd(), "node_modules/vitest/vitest.mjs"),
           "run",
           "--config",
@@ -283,10 +276,7 @@ export default {
           "runner",
         ],
         signal,
-        timeoutMs: DEFAULT_VITEST_TEST_TIMEOUT_MS,
-        env: { PATH: process.env.PATH, CI: "1" },
-      });
-      expect(result.code, result.stdout + result.stderr).toBe(0);
+      );
       expect(result.stdout).toContain("3 passed");
     }));
 
@@ -304,25 +294,17 @@ export default {
       const fixturePath = fileURLToPath(
         new URL("./fixtures/vitest-browser-project-root.mjs", import.meta.url),
       );
-      const result = await runVitestShutdownCommand({
-        args: [fixturePath, reportPath, topLevelRoot, testRoot],
-        signal,
-        timeoutMs: DEFAULT_VITEST_TEST_TIMEOUT_MS,
-        env: {
-          PATH: process.env.PATH,
-          HOME: home,
-          USERPROFILE: home,
-          TMPDIR: tmp,
-          TMP: tmp,
-          TEMP: tmp,
-          XDG_CONFIG_HOME: path.join(home, ".config"),
-          XDG_DATA_HOME: path.join(home, ".local", "share"),
-          XDG_CACHE_HOME: path.join(home, ".cache"),
-          CI: "1",
-          OPENCLAW_VITEST_FS_MODULE_CACHE_PATH: path.join(root, "transforms"),
-        },
+      await run([fixturePath, reportPath, topLevelRoot, testRoot], signal, {
+        HOME: home,
+        USERPROFILE: home,
+        TMPDIR: tmp,
+        TMP: tmp,
+        TEMP: tmp,
+        XDG_CONFIG_HOME: path.join(home, ".config"),
+        XDG_DATA_HOME: path.join(home, ".local", "share"),
+        XDG_CACHE_HOME: path.join(home, ".cache"),
+        OPENCLAW_VITEST_FS_MODULE_CACHE_PATH: path.join(root, "transforms"),
       });
-      expect(result.code, result.stderr).toBe(0);
       const reports = JSON.parse(readFileSync(reportPath, "utf8")) as Array<{
         projects: Array<{ name: string; root: string; viteRoot: string; setupFiles: string[] }>;
         files: string[];
@@ -330,34 +312,21 @@ export default {
       expect(reports).toHaveLength(4);
       const [standalone, embedded, topLevel, testOption] = reports;
       const uiRoot = path.join(process.cwd(), "ui");
-      expect(standalone?.projects).toEqual([
+      const chromium = (projectRoot: string) => [
         {
           name: "chromium",
-          root: uiRoot,
-          viteRoot: uiRoot,
-          setupFiles: [path.join(uiRoot, "src/test-helpers/dom.setup.ts")],
+          root: projectRoot,
+          viteRoot: projectRoot,
+          setupFiles: [path.join(projectRoot, "src/test-helpers/dom.setup.ts")],
         },
-      ]);
+      ];
+      expect(standalone?.projects).toEqual(chromium(uiRoot));
       expect(standalone?.files).toContain(
         path.join(uiRoot, "src/components/markdown-mermaid.runtime.browser.test.ts"),
       );
       expect(embedded).toEqual(standalone);
-      expect(topLevel?.projects).toEqual([
-        {
-          name: "chromium",
-          root: topLevelRoot,
-          viteRoot: topLevelRoot,
-          setupFiles: [path.join(topLevelRoot, "src/test-helpers/dom.setup.ts")],
-        },
-      ]);
-      expect(testOption?.projects).toEqual([
-        {
-          name: "chromium",
-          root: testRoot,
-          viteRoot: testRoot,
-          setupFiles: [path.join(testRoot, "src/test-helpers/dom.setup.ts")],
-        },
-      ]);
+      expect(topLevel?.projects).toEqual(chromium(topLevelRoot));
+      expect(testOption?.projects).toEqual(chromium(testRoot));
     }));
 
   it("runs full-render timing budgets after ordinary UI work with one owner per entry point", async () => {
@@ -403,12 +372,9 @@ export default {
     { patterns: ["ui/src/**/*.test.ts", "ui/src/**/*.test.tsx"] },
   ])("keeps native Chromium files out of root jsdom for $patterns", async ({ patterns }) => {
     const includeFile = path.join(tempDirs.make("ui-node-selection-"), "include.json");
-    writeFileSync(includeFile, JSON.stringify(patterns));
+    writeJson(includeFile, patterns);
     const runtimeIncludeFile = path.join(path.dirname(includeFile), "runtime-include.json");
-    writeFileSync(
-      runtimeIncludeFile,
-      JSON.stringify(["ui/src/pages/chat/chat-pane-retained-presentation.test.ts"]),
-    );
+    writeJson(runtimeIncludeFile, ["ui/src/pages/chat/chat-pane-retained-presentation.test.ts"]);
     vi.stubEnv("OPENCLAW_VITEST_INCLUDE_FILE", includeFile);
     vi.stubEnv("OPENCLAW_VITEST_POST_SHARD_INCLUDE_FILE", runtimeIncludeFile);
     // Chromium selection (which spawns the browser) must stay lazy and run once per process.
@@ -464,7 +430,7 @@ export default {
       [[nativeFiles[0]!], true],
       [["extensions/example/browser/example.browser.test.ts"], true],
     ] as const) {
-      writeFileSync(runtimeIncludeFile, JSON.stringify(files));
+      writeJson(runtimeIncludeFile, files);
       const partitionedBrowser = requireTestConfig(
         createUiBrowserVitestConfig({
           OPENCLAW_VITEST_POST_SHARD_INCLUDE_FILE: runtimeIncludeFile,
@@ -486,7 +452,7 @@ export default {
       );
     }
     expect(resolveChromium).toHaveBeenCalledTimes(1);
-    writeFileSync(includeFile, JSON.stringify([...nativeFiles, ...nodeFiles]));
+    writeJson(includeFile, [...nativeFiles, ...nodeFiles]);
     const scopedRoot = requireTestConfig(
       createUiVitestConfig({ OPENCLAW_VITEST_INCLUDE_FILE: includeFile }),
     );

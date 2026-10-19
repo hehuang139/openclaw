@@ -4,45 +4,17 @@ import { redactCredentialText, redactDiagnostic } from "./vitest/credential-reda
 
 describe("public test diagnostic redaction", () => {
   it("recognizes credential env names without hiding ordinary key fields", () => {
-    for (const name of [
-      "FAL_KEY",
-      "AZURE_SPEECH_KEY",
-      "BYTEPLUS_ACCESS_KEY_ID",
-      "OPENCLAW_LIVE_R2_SECRET_ACCESS_KEY",
-      "OPENCLAW_CLAUDE_CREDENTIALS_JSON",
-      "OPENCLAW_CODEX_AUTH_JSON",
-      "CLAUDE_CODE_OAUTH_TOKEN",
-      "GH_TOKEN",
-      "OPENAI_API_KEY",
-      "APIKEY",
-      "SOME_APIKEY",
-      "EXAMPLE_KEYS",
-      "EXAMPLE_CREDENTIAL",
-      "EXAMPLE_TOKEN",
-      "PASSWORD",
-      "SESSION_COOKIE",
-    ]) {
+    for (const name of `FAL_KEY AZURE_SPEECH_KEY BYTEPLUS_ACCESS_KEY_ID
+      OPENCLAW_LIVE_R2_SECRET_ACCESS_KEY OPENCLAW_CLAUDE_CREDENTIALS_JSON
+      OPENCLAW_CODEX_AUTH_JSON CLAUDE_CODE_OAUTH_TOKEN GH_TOKEN OPENAI_API_KEY
+      APIKEY SOME_APIKEY EXAMPLE_KEYS EXAMPLE_CREDENTIAL EXAMPLE_TOKEN PASSWORD SESSION_COOKIE`.split(
+      /\s+/u,
+    )) {
       expect(isCredentialEnvName(name), name).toBe(true);
     }
-    for (const name of [
-      "key",
-      "cacheKey",
-      "primaryKey",
-      "keys",
-      "sortKey",
-      "apiKey",
-      "SOMEAPIKEY",
-      "DBUS_SESSION_BUS_ADDRESS",
-      "XDG_SESSION_ID",
-      "TERM_SESSION_ID",
-      "SSH_AUTH_SOCK",
-      "MONKEY_PATCH",
-      "KEYBOARD_LAYOUT",
-      "PATH",
-      "HOME",
-      "fal_key",
-      "Example_CREDENTIAL",
-    ]) {
+    for (const name of `key cacheKey primaryKey keys sortKey apiKey SOMEAPIKEY
+      DBUS_SESSION_BUS_ADDRESS XDG_SESSION_ID TERM_SESSION_ID SSH_AUTH_SOCK
+      MONKEY_PATCH KEYBOARD_LAYOUT PATH HOME fal_key Example_CREDENTIAL`.split(/\s+/u)) {
       expect(isCredentialEnvName(name), name).toBe(false);
     }
   });
@@ -138,30 +110,18 @@ describe("public test diagnostic redaction", () => {
   });
 
   it("scrubs nested credential entry pairs while preserving keys and ordinary entries", () => {
-    const diagnostic = {
-      actual: { env: Object.entries({ EXAMPLE_TOKEN: "synthetic", NORMAL: "visible" }) },
+    const entries = (secret: string) => ({
+      actual: { env: Object.entries({ EXAMPLE_TOKEN: secret, NORMAL: "visible" }) },
       cause: {
         entries: [
-          ["apiKey", "synthetic", "retained"],
+          ["apiKey", secret, "retained"],
           ["NORMAL", "visible"],
         ],
       },
-    };
+    });
+    const diagnostic = entries("synthetic");
     redactDiagnostic(diagnostic);
-    const expected = {
-      actual: {
-        env: [
-          ["EXAMPLE_TOKEN", "<redacted len=9>"],
-          ["NORMAL", "visible"],
-        ],
-      },
-      cause: {
-        entries: [
-          ["apiKey", "<redacted len=9>", "retained"],
-          ["NORMAL", "visible"],
-        ],
-      },
-    };
+    const expected = entries("<redacted len=9>");
     expect(diagnostic).toEqual(expected);
     redactDiagnostic(diagnostic);
     expect(diagnostic).toEqual(expected);
