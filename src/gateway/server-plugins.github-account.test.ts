@@ -1,4 +1,3 @@
-import assert from "node:assert/strict";
 import { afterEach, expect, it, vi } from "vitest";
 import { setRuntimeConfigSnapshot } from "../config/runtime-snapshot.js";
 import * as pluginLoader from "../plugins/loader.js";
@@ -21,14 +20,18 @@ afterEach(() => {
 
 it.each(["in-process", "bound"] as const)(
   "resolves GitHub accounts through the %s trusted runtime and retains its lifetime",
-  (mode) =>
-    withOpenClawTestState(
+  async (mode) => {
+    await withOpenClawTestState(
       { scenario: "minimal", env: { GH_TOKEN: undefined, GITHUB_TOKEN: undefined } },
       async () => {
         const fixture = await createFixture("operator.read");
-        const cfg = structuredClone(fixture.cfg);
-        assert(cfg.gateway);
-        cfg.gateway.controlUi = { github: { token: "synthetic-github-lookup-token" } };
+        const cfg = {
+          ...fixture.cfg,
+          gateway: {
+            ...fixture.cfg.gateway,
+            controlUi: { github: { token: "synthetic-github-lookup-token" } },
+          },
+        };
         setRuntimeConfigSnapshot(cfg);
         const methods = createRequestGatewayMethodRegistry();
         fixture.context.getGatewayMethodRegistry = () => methods;
@@ -81,12 +84,6 @@ it.each(["in-process", "bound"] as const)(
         const lookup = async (login = " Visitor ", signal?: AbortSignal) =>
           await withPluginRuntimeGatewayRequestScope(scope, () => resolve({ login, signal }));
         const fetcher = vi.fn<typeof fetch>();
-        const respond = (body: unknown, init?: ResponseInit) =>
-          fetcher.mockClear().mockResolvedValue(Response.json(body, init));
-        const expectLookupError = async (error: Record<string, unknown>) => {
-          await expect(lookup()).resolves.toMatchObject({ error });
-          expect(fetcher).toHaveBeenCalledTimes(1);
-        };
         vi.stubGlobal("fetch", fetcher);
         try {
           await expect(
@@ -95,7 +92,9 @@ it.each(["in-process", "bound"] as const)(
             ),
           ).rejects.toThrow(/trusted official/);
           expect(fetcher).not.toHaveBeenCalled();
-          respond({ id: 42, login: "Current-Visitor", email: "unused@example.test" });
+          fetcher.mockResolvedValue(
+            Response.json({ id: 42, login: "Current-Visitor", email: "unused@example.test" }),
+          );
           await expect(lookup()).resolves.toEqual({ accountId: 42, login: "Current-Visitor" });
           expect(fetcher).toHaveBeenCalledTimes(1);
           expect(fetcher.mock.calls[0]?.[0]).toBe("https://api.github.com/users/Visitor");
@@ -106,50 +105,67 @@ it.each(["in-process", "bound"] as const)(
           await expect(lookup("../invalid")).resolves.toMatchObject({ error: { statusCode: 400 } });
           expect(fetcher).not.toHaveBeenCalled();
 
-          const upstreamError = { message: "private upstream body" };
-          const errors: Array<[unknown, number, number]> = [
-            [upstreamError, 404, 404],
-            [upstreamError, 503, 502],
-            [upstreamError, 403, 403],
-            [upstreamError, 401, 401],
-            [{ id: 0, login: "visitor" }, 200, 502],
-            [{ id: Number.MAX_SAFE_INTEGER + 1, login: "visitor" }, 200, 502],
-            [{ id: 42, login: "invalid/login" }, 200, 502],
-          ];
-          for (const [body, status, statusCode] of errors) {
-            respond(body, { status });
-            await expectLookupError({ statusCode, credentialConfigured: true });
+          for (const [status, statusCode] of [
+            [404, 404],
+            [503, 502],
+            [403, 403],
+            [401, 401],
+          ] as const) {
+            fetcher
+              .mockClear()
+              .mockResolvedValue(Response.json({ message: "private upstream body" }, { status }));
+            await expect(lookup()).resolves.toMatchObject({
+              error: { statusCode, credentialConfigured: true },
+            });
+            expect(fetcher).toHaveBeenCalledTimes(1);
+          }
+          for (const body of [
+            { id: 0, login: "visitor" },
+            { id: Number.MAX_SAFE_INTEGER + 1, login: "visitor" },
+            { id: 42, login: "invalid/login" },
+          ]) {
+            fetcher.mockClear().mockResolvedValue(Response.json(body));
+            await expect(lookup()).resolves.toMatchObject({ error: { statusCode: 502 } });
           }
           fetcher.mockClear().mockRejectedValue(new Error("private network detail"));
-          await expectLookupError({ statusCode: 502, message: "Could not reach GitHub" });
+          await expect(lookup()).resolves.toMatchObject({
+            error: { statusCode: 502, message: "Could not reach GitHub" },
+          });
 
           for (const credentialConfigured of [true, false]) {
             setRuntimeConfigSnapshot(credentialConfigured ? cfg : fixture.cfg);
-            respond(
-              { message: "private quota body" },
-              {
-                status: credentialConfigured ? 403 : 429,
-                headers: { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "2000000000" },
-              },
+            const quotaFetch = vi.fn<typeof fetch>().mockResolvedValue(
+              Response.json(
+                { message: "private quota body" },
+                {
+                  status: credentialConfigured ? 403 : 429,
+                  headers: { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "2000000000" },
+                },
+              ),
             );
-            await expectLookupError({
-              statusCode: 429,
-              retryAtMs: 2_000_000_000_000,
-              credentialConfigured,
+            vi.stubGlobal("fetch", quotaFetch);
+            await expect(lookup()).resolves.toMatchObject({
+              error: { statusCode: 429, retryAtMs: 2_000_000_000_000, credentialConfigured },
             });
+            expect(quotaFetch).toHaveBeenCalledTimes(1);
           }
           setRuntimeConfigSnapshot(cfg);
           const entered = createDeferredCore<AbortSignal>();
-          fetcher.mockImplementation(
-            (_url, init) =>
-              new Promise((_resolve, reject) => {
-                const signal = init?.signal;
-                assert(signal, "Expected lookup cancellation signal");
-                signal.addEventListener("abort", () => reject(new Error("Request aborted")), {
-                  once: true,
-                });
-                entered.resolve(signal);
-              }),
+          vi.stubGlobal(
+            "fetch",
+            vi.fn<typeof fetch>(
+              (_url, init) =>
+                new Promise((_resolve, reject) => {
+                  const signal = init?.signal;
+                  if (!signal) {
+                    throw new Error("Expected lookup cancellation signal");
+                  }
+                  signal.addEventListener("abort", () => reject(new Error("Request aborted")), {
+                    once: true,
+                  });
+                  entered.resolve(signal);
+                }),
+            ),
           );
           const cancellation = new AbortController();
           const pending = lookup("visitor", cancellation.signal);
@@ -161,10 +177,13 @@ it.each(["in-process", "bound"] as const)(
 
           const returning = createDeferredCore();
           const response = createDeferredCore<Response>();
-          fetcher.mockImplementation(async () => {
-            returning.resolve();
-            return await response.promise;
-          });
+          vi.stubGlobal(
+            "fetch",
+            vi.fn<typeof fetch>(async () => {
+              returning.resolve();
+              return await response.promise;
+            }),
+          );
           const retiring = expect(lookup()).rejects.toThrow();
           await returning.promise;
           if (retireGateway) {
@@ -183,5 +202,6 @@ it.each(["in-process", "bound"] as const)(
           await fixture.removeSessions();
         }
       },
-    ),
+    );
+  },
 );
