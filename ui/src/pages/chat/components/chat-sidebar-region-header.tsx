@@ -17,6 +17,7 @@ import { Menu, type MenuItem } from "../../../components/solid/menu.tsx";
 import "../../../components/tooltip.ts";
 import type { AgentIdentity } from "../../../lib/identity-avatar-view.ts";
 import { t } from "../../../lib/reactive/i18n.ts";
+import type { TabFocus } from "../../../lib/tabs.ts";
 import { readLinkFavicon } from "../link-favicon-cache.ts";
 import {
   sidebarActivePanel,
@@ -34,7 +35,7 @@ type SidebarRegionHeaderProps = RegionProps & {
   host: RegionElement;
   hostedRevision: () => number;
   refreshHostedTabs: () => void;
-  onFocusActiveReady: (focus: ((options?: FocusOptions) => void) | null) => void;
+  tabFocus: TabFocus;
 };
 
 type RegionTab = SolidPanelTabStripTab & {
@@ -275,7 +276,7 @@ export function SidebarRegionHeader(props: SidebarRegionHeaderProps) {
     >
       <div class="side-panel__header-tabs">
         <PanelTabStrip
-          onFocusActiveReady={props.onFocusActiveReady}
+          focusOwner={props.tabFocus}
           renderIcon={(tab) => (
             <Show
               when={tab().hostedTab}

@@ -9,6 +9,7 @@ import { cancelLayout, scheduleLayout } from "../../../lib/layout-frame.ts";
 import { t } from "../../../lib/reactive/i18n.ts";
 import { listen } from "../../../lib/reactive/listener.ts";
 import { defineSolidBridge } from "../../../lib/solid-bridge.ts";
+import { createTabFocus } from "../../../lib/tabs.ts";
 import { sidebarPanelDefinitions } from "../chat-pane-embedded-panels.ts";
 import { SidebarPanel as SidebarPanelView } from "../chat-pane-embedded-view.tsx";
 import {
@@ -44,8 +45,8 @@ const regionOperations = new WeakMap<
 
 function Region(props: RegionProps, host: RegionElement) {
   const panelHosts = new Map<SidebarSlotId, SidebarPanelHost>();
-  let focusActiveTab: ((options?: FocusOptions) => void) | null = null;
-  const focusActiveSideTab = (options?: FocusOptions) => focusActiveTab?.(options);
+  const tabFocus = createTabFocus();
+  const focusActiveSideTab = tabFocus.focusActive;
   regionOperations.set(host, {
     readPanelHost: (slot) =>
       panelHosts.get(slot) ??
@@ -393,7 +394,7 @@ function Region(props: RegionProps, host: RegionElement) {
                   host={host}
                   hostedRevision={hostedRevision}
                   refreshHostedTabs={refreshHostedTabs}
-                  onFocusActiveReady={(focus) => (focusActiveTab = focus)}
+                  tabFocus={tabFocus}
                 />
               </Show>
               <Show when={mounted()}>

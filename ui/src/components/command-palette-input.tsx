@@ -1,6 +1,6 @@
 import type { JSX } from "@solidjs/web";
-import { createEffect, onCleanup, onSettled } from "solid-js";
-import { createResizeObserver } from "../lib/reactive/observers.ts";
+import { onCleanup, onSettled } from "solid-js";
+import { createLayoutMeasurement } from "../lib/reactive/layout-measurement.ts";
 
 export const COMMAND_PALETTE_INPUT_ID = "cmd-palette-input";
 
@@ -26,7 +26,6 @@ export function CommandPaletteInput(props: CommandPaletteInputProps) {
   let textarea!: HTMLTextAreaElement;
   let entry!: HTMLDivElement;
   let actions!: HTMLDivElement;
-  let frame: number | undefined;
   let measuredValue: string | undefined;
   let measuredPlaceholder: string | undefined;
   function updateOverflow() {
@@ -64,41 +63,29 @@ export function CommandPaletteInput(props: CommandPaletteInputProps) {
     updateOverflow();
   }
 
-  const scheduleLayout = () => {
-    if (frame !== undefined) {
-      return;
-    }
-    frame = requestAnimationFrame(() => {
-      frame = undefined;
-      if (!textarea.isConnected) {
-        return;
-      }
+  createLayoutMeasurement(
+    () => {
+      const value = props.value;
+      const placeholder = props.placeholder;
+      // Input events already measured the edit; result navigation needs no layout.
+      return value !== measuredValue || placeholder !== measuredPlaceholder
+        ? [value, placeholder]
+        : undefined;
+    },
+    () => {
+      // Intrinsic sizing writes before reading scrollHeight and must stay atomic.
       updateLayout();
       measuredValue = textarea.value;
       measuredPlaceholder = textarea.placeholder;
-    });
-  };
-  createEffect(
-    () => ({ value: props.value, placeholder: props.placeholder }),
-    ({ value, placeholder }) => {
-      // Input events already measured the edit. Selection and search updates
-      // leave the caret, scroll position, and existing geometry untouched.
-      if (value !== measuredValue || placeholder !== measuredPlaceholder) {
-        scheduleLayout();
-      }
     },
+    { targets: () => [entry, actions] },
   );
-  createResizeObserver(() => [entry, actions], scheduleLayout);
   onSettled(() => {
     props.onInputRef(textarea);
-    scheduleLayout();
   });
   onCleanup(() => {
     // A replacement field can mount before the old interop root is disposed.
     props.onInputRef(undefined, textarea);
-    if (frame !== undefined) {
-      cancelAnimationFrame(frame);
-    }
   });
   return (
     <div ref={(element) => (entry = element)} class="cmd-palette__entry">
