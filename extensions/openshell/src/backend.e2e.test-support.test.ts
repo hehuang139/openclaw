@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { parse } from "yaml";
 import {
   buildOpenShellPolicyYaml,
@@ -14,26 +14,21 @@ it.each<[string, string[]]>([
   ["  ", ["10.0.0.0/8", "172.0.0.0/8", "192.168.0.0/16", "fc00::/7"]],
   [" 198.51.100.42 ", ["198.51.100.42/32"]],
 ])("host policy preserves IP override %j, endpoint and binary", (hostIp, allowedIps) => {
-  const policy: unknown = parse(
-    buildOpenShellPolicyYaml({ port: 17680, binaryPath: "/usr/bin/curl", hostIp }),
-  );
-  expect(policy).toMatchObject({
-    network_policies: {
-      host_echo: {
-        endpoints: [
-          {
-            host: "host.openshell.internal",
-            port: 17680,
-            protocol: "rest",
-            enforcement: "enforce",
-            access: "full",
-            allowed_ips: allowedIps,
-          },
-        ],
-        binaries: [{ path: "/usr/bin/curl" }],
+  const yaml = buildOpenShellPolicyYaml({ port: 17680, binaryPath: "/usr/bin/curl", hostIp });
+  const hostEcho = {
+    endpoints: [
+      {
+        host: "host.openshell.internal",
+        port: 17680,
+        protocol: "rest",
+        enforcement: "enforce",
+        access: "full",
+        allowed_ips: allowedIps,
       },
-    },
-  });
+    ],
+    binaries: [{ path: "/usr/bin/curl" }],
+  };
+  expect(parse(yaml)).toMatchObject({ network_policies: { host_echo: hostEcho } });
 });
 
 it.runIf(process.platform !== "win32")("reports a signal-killed probe as failure", async () => {
@@ -46,21 +41,15 @@ it.runIf(process.platform !== "win32")("reports a signal-killed probe as failure
   expect(result.code).not.toBe(0);
 });
 
-const roots: string[] = [];
-afterEach(async () => {
-  vi.restoreAllMocks();
-  await Promise.all(roots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true })));
-});
+afterEach(() => vi.restoreAllMocks());
 
 async function createCleanupFixture(options: { mode?: string; inventory?: string } = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "openshell-cleanup-test-"));
-  roots.push(root);
+  onTestFinished(() => fs.rm(root, { recursive: true, force: true }));
   const stateFile = path.join(root, "state.json");
   const command = path.join(root, "openshell");
   const initial = {
     names: ["first", "second"],
-    pending: "",
-    observations: 0,
     listCalls: 0,
     deletes: [] as string[],
     workspaceDeletes: 0,
@@ -80,11 +69,10 @@ if (args[0] === "workspace") {
   if (state.names.length) failure = "workspace still contains durable sandbox records";
   if (state.mode === "workspace-failure") failure = "workspace cleanup failed";
 } else if (args[3] === "delete") {
-  const name = args[4];
-  state.deletes.push(name);
-  state.pending = name;
+  state.pending = args[4];
+  state.deletes.push(state.pending);
   state.observations = 0;
-  if (state.mode === "delete-failure" && name === "first") failure = "delete failed";
+  if (state.mode === "delete-failure" && state.pending === "first") failure = "delete failed";
 } else if (args[3] === "list") {
   state.listCalls++;
   if (state.pending && ++state.observations >= 2 && state.mode !== "stuck") {
@@ -97,12 +85,8 @@ if (args[0] === "workspace") {
 } else {
   throw new Error("unexpected fixture command");
 }
-fs.writeFileSync(stateFile + ".next", JSON.stringify(state));
-fs.renameSync(stateFile + ".next", stateFile);
-if (failure) {
-  console.error(failure);
-  process.exit(1);
-}
+fs.writeFileSync(stateFile, JSON.stringify(state));
+if (failure) throw new Error(failure);
 if (state.mode === "stuck" && state.observations > 0) {
   fs.writeFileSync(stateFile + ".expired", "");
 }
@@ -122,28 +106,19 @@ if (state.mode === "stuck" && state.observations > 0) {
   };
 }
 
-async function expectAggregateFailure(operation: Promise<void>, message: string, exact = true) {
-  const errors = [expect.objectContaining({ message: expect.stringContaining(message) })];
-  await expect(operation).rejects.toBeInstanceOf(AggregateError);
-  await expect(operation).rejects.toHaveProperty(
-    "errors",
-    exact ? errors : expect.arrayContaining(errors),
-  );
-}
-
 describe.runIf(process.platform !== "win32")("OpenShell workspace cleanup", () => {
-  it.each([
-    ["non-JSON", "not json"],
-    ["unexpected sandbox", '[{"name":"someone-else"}]'],
-  ])("rejects %s inventory without deleting resources", async (_label, inventory) => {
-    const fixture = await createCleanupFixture({ inventory });
-    await expect(fixture.cleanup()).rejects.toThrow();
-    expect(await fixture.read()).toMatchObject({
-      listCalls: 1,
-      deletes: [],
-      workspaceDeletes: 0,
-    });
-  });
+  it.each(["not json", '[{"name":"someone-else"}]'])(
+    "rejects inventory %j without deleting resources",
+    async (inventory) => {
+      const fixture = await createCleanupFixture({ inventory });
+      await expect(fixture.cleanup()).rejects.toThrow();
+      expect(await fixture.read()).toMatchObject({
+        listCalls: 1,
+        deletes: [],
+        workspaceDeletes: 0,
+      });
+    },
+  );
 
   it.each([
     ["read-failure", "database is locked", { listCalls: 2, deletes: ["first", "second"] }],
@@ -162,7 +137,11 @@ describe.runIf(process.platform !== "win32")("OpenShell workspace cleanup", () =
     if (mode === "workspace-failure") {
       await expect(fixture.cleanup()).rejects.toThrow(message);
     } else {
-      await expectAggregateFailure(fixture.cleanup(), message, mode !== "stuck");
+      const cleanup = fixture.cleanup();
+      const errors = [expect.objectContaining({ message: expect.stringContaining(message) })];
+      const expectedErrors = mode === "stuck" ? expect.arrayContaining(errors) : errors;
+      await expect(cleanup).rejects.toBeInstanceOf(AggregateError);
+      await expect(cleanup).rejects.toHaveProperty("errors", expectedErrors);
     }
     expect(await fixture.read()).toMatchObject({
       ...state,

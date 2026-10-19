@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -25,30 +25,15 @@ export function buildOpenShellPolicyYaml(params: {
   const allowedIps = hostIp
     ? [`${hostIp}/32`]
     : ["10.0.0.0/8", "172.0.0.0/8", "192.168.0.0/16", "fc00::/7"];
-  const networkPolicies = `  host_echo:
-    name: host-echo
-    endpoints:
-      - host: host.openshell.internal
-        port: ${params.port}
-        protocol: rest
-        enforcement: enforce
-        access: full
-        allowed_ips:
-${allowedIps.map((ip) => `          - "${ip}"`).join("\n")}
-    binaries:
-      - path: ${params.binaryPath}`;
   return `version: 1
-
-filesystem_policy:
-  include_workdir: true
-  read_only: [/usr, /lib, /proc, /dev/urandom, /app, /etc, /var/log, /opt]
-  read_write: [/sandbox, /tmp, /dev/null]
-
+filesystem_policy: {include_workdir: true, read_only: [/usr, /lib, /proc, /dev/urandom, /app, /etc, /var/log, /opt], read_write: [/sandbox, /tmp, /dev/null]}
 landlock: {compatibility: best_effort}
 process: {run_as_user: sandbox, run_as_group: sandbox}
-
 network_policies:
-${networkPolicies}
+  host_echo:
+    name: host-echo
+    endpoints: [{host: host.openshell.internal, port: ${params.port}, protocol: rest, enforcement: enforce, access: full, allowed_ips: ${JSON.stringify(allowedIps)}}]
+    binaries: [{path: ${JSON.stringify(params.binaryPath)}}]
 `;
 }
 
@@ -62,56 +47,38 @@ export async function runCommand(params: {
   timeoutMs?: number;
 }): Promise<ExecResult> {
   return await new Promise((resolve, reject) => {
-    const child = spawn(params.command, params.args, {
-      cwd: params.cwd,
-      env: params.env,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    const stdoutChunks: Buffer[] = [];
-    const stderrChunks: Buffer[] = [];
-    let timedOut = false;
-    const timeout =
-      params.timeoutMs && params.timeoutMs > 0
-        ? setTimeout(() => {
-            timedOut = true;
-            child.kill("SIGKILL");
-          }, params.timeoutMs)
-        : null;
-
-    child.stdout.on("data", (chunk) => stdoutChunks.push(Buffer.from(chunk)));
-    child.stderr.on("data", (chunk) => stderrChunks.push(Buffer.from(chunk)));
-    child.on("error", reject);
-    child.on("close", (code) => {
-      if (timeout) {
-        clearTimeout(timeout);
-      }
-      const stdout = Buffer.concat(stdoutChunks).toString("utf8");
-      const stderr = Buffer.concat(stderrChunks).toString("utf8");
-      if (timedOut) {
-        reject(new Error(`command timed out: ${params.command} ${params.args.join(" ")}`));
-        return;
-      }
-      const exitCode = code ?? 1;
-      if (exitCode !== 0 && !params.allowFailure) {
-        const message = [
-          `command failed: ${params.command} ${params.args.join(" ")}`,
-          `exit: ${exitCode}`,
-        ];
-        for (const [label, output] of [
-          ["stdout", stdout],
-          ["stderr", stderr],
-        ] as const) {
-          if (output.trim().length > 0) {
-            message.push(`${label}:\n${output}`);
-          }
+    const child = execFile(
+      params.command,
+      params.args,
+      {
+        cwd: params.cwd,
+        env: params.env,
+        encoding: "utf8",
+        timeout: params.timeoutMs && params.timeoutMs > 0 ? params.timeoutMs : 0,
+        killSignal: "SIGKILL",
+        maxBuffer: Infinity,
+      },
+      (error, stdout, stderr) => {
+        const command = `${params.command} ${params.args.join(" ")}`;
+        if (error?.killed) {
+          return reject(new Error(`command timed out: ${command}`));
         }
-        reject(new Error(message.join("\n")));
-        return;
-      }
-      resolve({ code: exitCode, stdout, stderr });
-    });
-
-    child.stdin.end(params.stdin);
+        if (error && typeof error.code !== "number" && !error.signal) {
+          return reject(error);
+        }
+        const code = typeof error?.code === "number" ? error.code : error ? 1 : 0;
+        if (code === 0 || params.allowFailure) {
+          return resolve({ code, stdout, stderr });
+        }
+        const diagnostics = Object.entries({ stdout, stderr })
+          .filter(([, output]) => output.trim())
+          .map(([label, output]) => `${label}:\n${output}`);
+        reject(
+          new Error([`command failed: ${command}`, `exit: ${code}`, ...diagnostics].join("\n")),
+        );
+      },
+    );
+    child.stdin?.end(params.stdin);
   });
 }
 
@@ -121,6 +88,7 @@ export async function cleanupOpenShellWorkspace(params: {
   workspace: string;
   sandboxNames: string[];
 }): Promise<void> {
+  const { command, env, workspace, sandboxNames } = params;
   const deadline = Date.now() + 2 * 60_000;
   const remainingMs = () => {
     const remaining = deadline - Date.now();
@@ -130,24 +98,12 @@ export async function cleanupOpenShellWorkspace(params: {
     return remaining;
   };
   const run = (args: string[], timeoutMs = remainingMs()) =>
-    runCommand({
-      command: params.command,
-      env: params.env,
-      args,
-      timeoutMs,
-    });
-  const ownedNames = new Set(params.sandboxNames);
+    runCommand({ command, env, args, timeoutMs });
+  const runSandbox = (args: string[]) => run(["--workspace", workspace, "sandbox", ...args]);
+  const ownedNames = new Set(sandboxNames);
+  const inventoryLimit = String(ownedNames.size + 1);
   const listNames = async () => {
-    const result = await run([
-      "--workspace",
-      params.workspace,
-      "sandbox",
-      "list",
-      "--limit",
-      String(ownedNames.size + 1),
-      "--output",
-      "json",
-    ]);
+    const result = await runSandbox(["list", "--limit", inventoryLimit, "--output", "json"]);
     remainingMs();
     const sandboxes = z
       .array(z.object({ name: z.string().min(1) }))
@@ -155,11 +111,7 @@ export async function cleanupOpenShellWorkspace(params: {
     const names = sandboxes.map((sandbox) => sandbox.name);
     // This isolated workspace contains only the fixture's owned sandboxes. An extra
     // row or unexpected name must fail, never masquerade as a complete inventory.
-    if (
-      names.length > ownedNames.size ||
-      new Set(names).size !== names.length ||
-      names.some((name) => !ownedNames.has(name))
-    ) {
+    if (new Set(names).size !== names.length || names.some((name) => !ownedNames.has(name))) {
       throw new Error("Unexpected sandbox inventory in OpenShell fixture workspace");
     }
     return names;
@@ -168,13 +120,11 @@ export async function cleanupOpenShellWorkspace(params: {
   const failures: unknown[] = [];
   for (const sandboxName of [...ownedNames].filter((name) => presentNames.includes(name))) {
     try {
-      await run(["--workspace", params.workspace, "sandbox", "delete", sandboxName]);
+      await runSandbox(["delete", sandboxName]);
       // OpenShell v0.0.109 acknowledges deletion before its controller removes the
       // durable row. Observe absence before deleting the workspace; never retry errors.
-      if (failures.length === 0) {
-        while ((await listNames()).includes(sandboxName)) {
-          await delay(Math.min(250, remainingMs()));
-        }
+      while (failures.length === 0 && (await listNames()).includes(sandboxName)) {
+        await delay(Math.min(250, remainingMs()));
       }
     } catch (error) {
       failures.push(error);
@@ -183,7 +133,7 @@ export async function cleanupOpenShellWorkspace(params: {
   if (failures.length > 0) {
     throw new AggregateError(failures, "OpenShell sandbox cleanup failed");
   }
-  await run(["workspace", "delete", params.workspace], 30_000);
+  await run(["workspace", "delete", workspace], 30_000);
 }
 
 export async function runBackendExec(params: {
@@ -193,16 +143,12 @@ export async function runBackendExec(params: {
   allowFailure?: boolean;
   timeoutMs?: number;
 }): Promise<ExecResult> {
+  const { backend, command, env } = params;
   const workdir = expectDefined(
-    await params.backend.validateWorkdir?.(params.backend.workdir),
+    await backend.validateWorkdir?.(backend.workdir),
     "OpenShell validated working directory",
   );
-  const execSpec = await params.backend.buildExecSpec({
-    command: params.command,
-    workdir,
-    env: params.env ?? {},
-    usePty: false,
-  });
+  const execSpec = await backend.buildExecSpec({ command, workdir, env: env ?? {}, usePty: false });
   return await runPreparedBackendExec({ ...params, execSpec });
 }
 
@@ -289,18 +235,10 @@ export async function stressBackend(params: {
   workspaceDir: string;
 }): Promise<void> {
   const { backends, bridge, mode, workspaceDir } = params;
-  const startedAt = Date.now();
-  const log = (probe: string, details: Record<string, number | undefined>) =>
-    console.log(
-      JSON.stringify({
-        probe,
-        mode,
-        ...details,
-        elapsedMs: Date.now() - startedAt,
-      }),
-    );
+  const createExclusive = (filePath: string, data: string) =>
+    bridge.createFileExclusive?.({ filePath, data });
   const expectedIds: string[] = [];
-  const latencies: number[] = [];
+  const expectedFiles: Record<string, string> = {};
   const waves = 8;
   const concurrency = 8;
   for (let wave = 0; wave < waves; wave++) {
@@ -308,7 +246,11 @@ export async function stressBackend(params: {
     const results = await Promise.allSettled(
       Array.from({ length: concurrency }, async (_, slot) => {
         const id = `${wave}-${slot}`;
-        const started = Date.now();
+        expectedFiles[`@${slot % 2 === 0 ? "exec" : "file"}-${id}`] =
+          slot % 2 === 0 ? `value-${id}` : id;
+        if (slot === 3) {
+          expectedFiles[`@renamed-${id}`] = id;
+        }
         const backend = backends[(wave + Math.floor(slot / 2)) % backends.length]!;
         if (slot % 2 === 0) {
           expectedIds.push(id);
@@ -325,35 +267,26 @@ export async function stressBackend(params: {
             timeoutMs: 60_000,
           });
           expect(result.code).toBe(exitCode);
-        } else {
-          const filePath = `stress/@file-${id}`;
-          await bridge.writeFile({ filePath, data: id, mkdir: true });
-          const temporaryPath = `stress/tmp-${id}`;
-          switch (slot) {
-            case 1:
-              await expect(
-                bridge.createFileExclusive?.({ filePath, data: "overwrite" }),
-              ).resolves.toBe("exists");
-              break;
-            case 3:
-              await expect(
-                bridge.createFileExclusive?.({ filePath: temporaryPath, data: id }),
-              ).resolves.toBe("created");
-              await bridge.rename({ from: temporaryPath, to: `stress/@renamed-${id}` });
-              break;
-            case 5:
-              await bridge.mkdirp({ filePath: temporaryPath });
-              await bridge.remove({ filePath: temporaryPath, recursive: true });
-              break;
-            case 7:
-              await expect(bridge.stat({ filePath })).resolves.toMatchObject({
-                type: "file",
-                size: Buffer.byteLength(id),
-              });
-              break;
-          }
+          return;
         }
-        latencies.push(Date.now() - started);
+        const filePath = `stress/@file-${id}`;
+        await bridge.writeFile({ filePath, data: id, mkdir: true });
+        const temporaryPath = `stress/tmp-${id}`;
+        switch (slot) {
+          case 1:
+            return expect(createExclusive(filePath, "overwrite")).resolves.toBe("exists");
+          case 3:
+            await expect(createExclusive(temporaryPath, id)).resolves.toBe("created");
+            return bridge.rename({ from: temporaryPath, to: `stress/@renamed-${id}` });
+          case 5:
+            await bridge.mkdirp({ filePath: temporaryPath });
+            return bridge.remove({ filePath: temporaryPath, recursive: true });
+          case 7:
+            return expect(bridge.stat({ filePath })).resolves.toMatchObject({
+              type: "file",
+              size: Buffer.byteLength(id),
+            });
+        }
       }),
     );
     const failures = results.filter((result) => result.status === "rejected");
@@ -366,7 +299,6 @@ export async function stressBackend(params: {
     await expect(bridge.readFile({ filePath: `stress/@file-${wave}-1` })).resolves.toEqual(
       Buffer.from(`${wave}-1`),
     );
-    log("openshell-stress-progress", { completedWorkflows: (wave + 1) * concurrency });
   }
   // Read the remote tree without exec preparation: a fresh mirror upload could hide divergence.
   const inventory = await backends[0]!.runShellCommand({
@@ -374,22 +306,11 @@ export async function stressBackend(params: {
     args: [`${backends[0]!.workdir}/stress`],
   });
   const remoteFiles = JSON.parse(inventory.stdout.toString("utf8")) as Record<string, string>;
-  const expectedFiles: Record<string, string> = {};
   if (mode === "mirror") {
     const ledger = expectDefined(remoteFiles.ledger, "OpenShell mirror command ledger");
     expect(ledger.trim().split("\n").toSorted()).toEqual(expectedIds.toSorted());
     expectedFiles.ledger = ledger;
     expectedFiles.count = `${expectedIds.length}\n`;
-  }
-  for (let wave = 0; wave < waves; wave++) {
-    for (let slot = 0; slot < concurrency; slot++) {
-      const id = `${wave}-${slot}`;
-      expectedFiles[`@${slot % 2 === 0 ? "exec" : "file"}-${id}`] =
-        slot % 2 === 0 ? `value-${id}` : id;
-      if (slot === 3) {
-        expectedFiles[`@renamed-${id}`] = id;
-      }
-    }
   }
   expect(remoteFiles).toEqual(expectedFiles);
   if (mode === "mirror") {
@@ -401,20 +322,9 @@ export async function stressBackend(params: {
         Buffer.from(expected),
       );
     }
-  }
-  if (mode === "remote") {
+  } else {
     await expect(fs.stat(path.join(workspaceDir, "stress"))).rejects.toMatchObject({
       code: "ENOENT",
     });
   }
-  const orderedLatencies = latencies.toSorted((a, b) => a - b);
-  log("openshell-stress", {
-    workflows: waves * concurrency,
-    concurrency,
-    commands: expectedIds.length,
-    intentionalCommandFailures: waves,
-    p50Ms: orderedLatencies[Math.floor(latencies.length / 2)],
-    p95Ms: orderedLatencies[Math.floor(latencies.length * 0.95)],
-    verifiedFiles: Object.keys(expectedFiles).length,
-  });
 }
