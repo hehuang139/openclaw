@@ -1,7 +1,7 @@
 import type { PendingApprovalView } from "openclaw/plugin-sdk/approval-handler-runtime";
 import type { SystemAgentApprovalRequest } from "openclaw/plugin-sdk/approval-runtime";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
-import { describe, expect, it, vi } from "vitest";
+import { expect, it, vi } from "vitest";
 import { telegramApprovalNativeRuntime } from "./approval-handler.runtime.js";
 import { buildTelegramCanonicalApprovalTerminalText } from "./approval-terminal.js";
 
@@ -101,410 +101,353 @@ function terminalEntry(
   };
 }
 
-describe("telegramApprovalNativeRuntime", () => {
-  it("renders a cancelled system-agent result as lifecycle cancellation", () => {
-    expect(
-      buildTelegramCanonicalApprovalTerminalText({
-        result: {
-          applied: true,
-          approval: {
-            id: "system-agent:cancelled",
-            status: "cancelled",
-            reason: "run-aborted",
-            urlPath: "/approve/system-agent:cancelled",
-            createdAtMs: 0,
-            expiresAtMs: 60_000,
-            resolvedAtMs: 1_000,
-            presentation: {
-              kind: "system-agent",
-              title: "OpenClaw change",
-              description: "Restart the Gateway",
-              proposalHash: "a".repeat(64),
-              allowedDecisions: ["allow-once", "deny"],
-            },
+it("renders a cancelled system-agent result as lifecycle cancellation", () => {
+  expect(
+    buildTelegramCanonicalApprovalTerminalText({
+      result: {
+        applied: true,
+        approval: {
+          id: "system-agent:cancelled",
+          status: "cancelled",
+          reason: "run-aborted",
+          urlPath: "/approve/system-agent:cancelled",
+          createdAtMs: 0,
+          expiresAtMs: 60_000,
+          resolvedAtMs: 1_000,
+          presentation: {
+            kind: "system-agent",
+            title: "OpenClaw change",
+            description: "Restart the Gateway",
+            proposalHash: "a".repeat(64),
+            allowedDecisions: ["allow-once", "deny"],
           },
         },
-        fallbackApprovalId: "system-agent:cancelled",
-      }),
-    ).toBe("⚠️ OpenClaw change was cancelled because its run ended. No change was made. Retry.");
+      },
+      fallbackApprovalId: "system-agent:cancelled",
+    }),
+  ).toBe("⚠️ OpenClaw change was cancelled because its run ended. No change was made. Retry.");
+});
+
+it("builds the Control UI link with its configured base path and encoded approval ID", async () => {
+  const payload = await pendingSystem({
+    publicOrigin: "https://control.example.com",
+    controlUi: { basePath: "/openclaw/" },
+  });
+  expect(payload.buttons?.flat().find((button) => button.url)?.url).toBe(
+    "https://control.example.com/openclaw/approve/system-agent%3Achange-1",
+  );
+});
+
+it("omits the Control UI button when the Control UI is disabled", async () => {
+  const payload = await pendingSystem({
+    publicOrigin: "https://control.example.com",
+    controlUi: { enabled: false },
+  });
+  expect(payload.buttons).toEqual([]);
+});
+
+it("renders resolved and expired receipts without letting IDs inject lines", async () => {
+  const request = execRequest("req\n1");
+  const resolved = await presentation.buildResolvedResult({
+    ...base,
+    request,
+    resolved: { id: "req\n1", decision: "deny", resolvedBy: "telegram:9", ts: 1 },
+    view: {
+      approvalKind: "exec",
+      approvalId: "req\n1",
+      phase: "resolved",
+      title: "Exec approval",
+      metadata: [],
+      commandText: "echo hi",
+      decision: "deny",
+      resolvedBy: "telegram:9",
+    } as never,
+    entry: { chatId: "9", messageId: "m1" },
+  });
+  const expired = await presentation.buildExpiredResult({
+    ...base,
+    request,
+    view: {
+      approvalKind: "exec",
+      approvalId: "req\n1",
+      phase: "expired",
+      title: "Exec approval",
+      metadata: [],
+      commandText: "echo hi",
+    } as never,
+    entry: { chatId: "9", messageId: "m1" },
   });
 
-  it("builds the Control UI link with its configured base path and encoded approval ID", async () => {
-    const payload = await pendingSystem({
-      publicOrigin: "https://control.example.com",
-      controlUi: { basePath: "/openclaw/" },
-    });
-    expect(payload.buttons?.flat().find((button) => button.url)?.url).toBe(
-      "https://control.example.com/openclaw/approve/system-agent%3Achange-1",
-    );
+  expect(resolved).toEqual({
+    kind: "update",
+    payload: {
+      text: "✅ Exec approval resolved\nRecorded result: Denied\nResolved by: telegram:9\nID: req\\n1\n\nCommand:\necho hi",
+    },
   });
-
-  it("omits the Control UI button when the Control UI is disabled", async () => {
-    const payload = await pendingSystem({
-      publicOrigin: "https://control.example.com",
-      controlUi: { enabled: false },
-    });
-    expect(payload.buttons).toEqual([]);
+  expect(expired).toEqual({
+    kind: "update",
+    payload: {
+      text: "⏱️ Exec approval expired\nRecorded result: Expired\nID: req\\n1\n\nCommand:\necho hi",
+    },
   });
+});
 
-  it("renders resolved and expired receipts without letting IDs inject lines", async () => {
-    const request = execRequest("req\n1");
-    const resolved = await presentation.buildResolvedResult({
+it("renders an applied system-agent receipt with a bounded UTF-16 summary", async () => {
+  const summary = ` ${"x".repeat(2798)}😀tail `;
+  const request = systemRequest("system-agent:change-3", {
+    description: summary,
+    command: summary,
+  });
+  await expect(
+    presentation.buildResolvedResult({
       ...base,
       request,
       resolved: {
-        id: "req\n1",
-        decision: "deny",
-        resolvedBy: "telegram:9",
+        id: request.id,
+        decision: "allow-once",
         ts: 1,
+        applicationStatus: "applied",
       },
       view: {
-        approvalKind: "exec",
-        approvalId: "req\n1",
+        approvalKind: "system-agent",
+        approvalId: request.id,
         phase: "resolved",
-        title: "Exec approval",
+        title: "OpenClaw change",
         metadata: [],
-        commandText: "echo hi",
-        decision: "deny",
-        resolvedBy: "telegram:9",
-      } as never,
+        commandText: summary,
+        operationSummary: summary,
+        decision: "allow-once",
+        applicationStatus: "applied",
+      },
       entry: { chatId: "9", messageId: "m1" },
-    });
-    const expired = await presentation.buildExpiredResult({
-      ...base,
-      request,
-      view: {
-        approvalKind: "exec",
-        approvalId: "req\n1",
-        phase: "expired",
-        title: "Exec approval",
-        metadata: [],
-        commandText: "echo hi",
-      } as never,
-      entry: { chatId: "9", messageId: "m1" },
-    });
+    }),
+  ).resolves.toEqual({
+    kind: "update",
+    payload: {
+      text: `✅ OpenClaw change approved and applied: ${"x".repeat(2798)}…`,
+    },
+  });
+});
 
-    expect(resolved).toEqual({
-      kind: "update",
-      payload: {
-        text: "✅ Exec approval resolved\nRecorded result: Denied\nResolved by: telegram:9\nID: req\\n1\n\nCommand:\necho hi",
-      },
-    });
-    expect(expired).toEqual({
-      kind: "update",
-      payload: {
-        text: "⏱️ Exec approval expired\nRecorded result: Expired\nID: req\\n1\n\nCommand:\necho hi",
-      },
-    });
+it("updates the pending message and removes actions for terminal events", async () => {
+  const editMessage = vi.fn().mockResolvedValue({ ok: true, chatId: "9", messageId: "m1" });
+
+  await transport.updateEntry?.({
+    cfg: {} as never,
+    accountId: "default",
+    context: { token: "tg-token", deps: { editMessage } },
+    entry: { chatId: "9", messageId: "m1" },
+    request: execRequest("approval-1"),
+    approvalKind: "exec",
+    payload: { text: "Canonical result: <Denied>" },
+    phase: "resolved",
   });
 
-  it("renders an applied system-agent receipt with a bounded UTF-16 summary", async () => {
-    const summary = ` ${"x".repeat(2798)}😀tail `;
-    const request = systemRequest("system-agent:change-3", {
-      description: summary,
-      command: summary,
-      proposalHash: "c".repeat(64),
-      sessionId: "delegation-3",
-    });
-    await expect(
-      presentation.buildResolvedResult({
-        ...base,
-        request,
-        resolved: {
-          id: request.id,
-          decision: "allow-once",
-          ts: 1,
-          applicationStatus: "applied",
-        },
-        view: {
-          approvalKind: "system-agent",
-          approvalId: request.id,
-          phase: "resolved",
-          title: "OpenClaw change",
-          metadata: [],
-          commandText: summary,
-          operationSummary: summary,
-          decision: "allow-once",
-          applicationStatus: "applied",
-        },
-        entry: { chatId: "9", messageId: "m1" },
-      }),
-    ).resolves.toEqual({
-      kind: "update",
-      payload: {
-        text: `✅ OpenClaw change approved and applied: ${"x".repeat(2798)}…`,
-      },
-    });
+  expect(editMessage).toHaveBeenCalledWith("9", "m1", "Canonical result: &lt;Denied&gt;", {
+    cfg: {},
+    token: "tg-token",
+    accountId: "default",
+    textMode: "html",
+    buttons: [],
+  });
+});
+
+it("sends one terminal origin result and releases its dedupe entry after finalization", async () => {
+  const editMessage = vi.fn().mockResolvedValue({ ok: true });
+  const sendMessage = vi.fn().mockResolvedValue({ ok: true });
+  const request = systemRequest("system-agent:origin-followup", {
+    turnSourceChannel: "telegram",
+    turnSourceTo: "1234",
+    turnSourceThreadId: 42,
   });
 
-  it("updates the pending message and removes actions for terminal events", async () => {
-    const editMessage = vi.fn().mockResolvedValue({
-      ok: true,
-      chatId: "9",
-      messageId: "m1",
-    });
+  const terminal = terminalEntry(
+    request,
+    editMessage,
+    sendMessage,
+    "✅ OpenClaw change approved. Applying: restart the Gateway",
+  );
+  await transport.updateEntry?.({ ...terminal, entry: { chatId: "5678", messageId: "m1" } });
 
-    await transport.updateEntry?.({
-      cfg: {} as never,
-      accountId: "default",
-      context: {
-        token: "tg-token",
-        deps: { editMessage },
-      },
-      entry: { chatId: "9", messageId: "m1" },
-      request: execRequest("approval-1"),
-      approvalKind: "exec",
-      payload: { text: "Canonical result: <Denied>" },
-      phase: "resolved",
-    });
-
-    expect(editMessage).toHaveBeenCalledWith("9", "m1", "Canonical result: &lt;Denied&gt;", {
+  expect(sendMessage).toHaveBeenCalledWith(
+    "1234",
+    "✅ OpenClaw change approved. Applying: restart the Gateway",
+    {
       cfg: {},
       token: "tg-token",
       accountId: "default",
       textMode: "html",
-      buttons: [],
-    });
+      messageThreadId: 42,
+    },
+  );
+
+  await transport.updateEntry?.({ ...terminal, entry: { chatId: "9012", messageId: "m2" } });
+  expect(sendMessage).toHaveBeenCalledOnce();
+
+  observe?.onFinalized?.({
+    ...base,
+    request,
+    approvalKind: "system-agent",
+    phase: "resolved",
   });
 
-  it("sends one terminal origin result and releases its dedupe entry after finalization", async () => {
-    const editMessage = vi.fn().mockResolvedValue({ ok: true });
-    const sendMessage = vi.fn().mockResolvedValue({ ok: true });
-    const request = systemRequest("system-agent:origin-followup", {
-      proposalHash: "d".repeat(64),
-      sessionId: "delegation-origin-followup",
-      turnSourceChannel: "telegram",
-      turnSourceTo: "1234",
-      turnSourceThreadId: 42,
-    });
+  await transport.updateEntry?.({ ...terminal, entry: { chatId: "9013", messageId: "m3" } });
+  expect(sendMessage).toHaveBeenCalledTimes(2);
+});
 
-    const terminal = terminalEntry(
-      request,
-      editMessage,
-      sendMessage,
-      "✅ OpenClaw change approved. Applying: restart the Gateway",
-    );
-    await transport.updateEntry?.({
-      ...terminal,
-      entry: { chatId: "5678", messageId: "m1" },
-    });
+it("sends the origin result when the approver card edit fails", async () => {
+  const editMessage = vi.fn().mockRejectedValue(new Error("message was deleted"));
+  const sendMessage = vi.fn().mockResolvedValue({ ok: true });
+  const request = systemRequest("system-agent:origin-edit-failure", {
+    turnSourceChannel: "telegram",
+    turnSourceTo: "1234",
+  });
 
-    expect(sendMessage).toHaveBeenCalledWith(
-      "1234",
-      "✅ OpenClaw change approved. Applying: restart the Gateway",
-      {
-        cfg: {},
-        token: "tg-token",
-        accountId: "default",
-        textMode: "html",
-        messageThreadId: 42,
-      },
-    );
-
-    await transport.updateEntry?.({
-      ...terminal,
-      entry: { chatId: "9012", messageId: "m2" },
-    });
-    expect(sendMessage).toHaveBeenCalledOnce();
-
-    observe?.onFinalized?.({
+  await expect(
+    transport.updateEntry?.({
       ...base,
-      request,
-      approvalKind: "system-agent",
-      phase: "resolved",
-    });
-
-    await transport.updateEntry?.({
-      ...terminal,
-      entry: { chatId: "9013", messageId: "m3" },
-    });
-    expect(sendMessage).toHaveBeenCalledTimes(2);
-  });
-
-  it("sends the origin result when the approver card edit fails", async () => {
-    const editMessage = vi.fn().mockRejectedValue(new Error("message was deleted"));
-    const sendMessage = vi.fn().mockResolvedValue({ ok: true });
-    const request = systemRequest("system-agent:origin-edit-failure", {
-      proposalHash: "f".repeat(64),
-      sessionId: "delegation-origin-edit-failure",
-      turnSourceChannel: "telegram",
-      turnSourceTo: "1234",
-    });
-
-    await expect(
-      transport.updateEntry?.({
-        ...base,
-        context: { ...base.context, deps: { editMessage, sendMessage } },
-        entry: { chatId: "5678", messageId: "m1" },
-        request,
-        approvalKind: "system-agent",
-        payload: { text: "⚠️ OpenClaw change approved, but it was not applied." },
-        phase: "resolved",
-      }),
-    ).rejects.toThrow("message was deleted");
-    expect(sendMessage).toHaveBeenCalledWith(
-      "1234",
-      "⚠️ OpenClaw change approved, but it was not applied.",
-      {
-        cfg: {},
-        token: "tg-token",
-        accountId: "default",
-        textMode: "html",
-      },
-    );
-  });
-
-  it("sends origin notices only through the originating Telegram account", async () => {
-    const editMessage = vi.fn().mockResolvedValue({ ok: true });
-    const sendMessage = vi.fn().mockResolvedValue({ ok: true });
-    const request = systemRequest("system-agent:origin-account", {
-      proposalHash: "g".repeat(64),
-      sessionId: "delegation-origin-account",
-      turnSourceChannel: "telegram",
-      turnSourceTo: "1234",
-      turnSourceAccountId: "origin",
-    });
-    const payload = { text: "✅ OpenClaw change approved and applied." };
-
-    await transport.updateEntry?.({
-      cfg: {} as never,
-      accountId: "forwarding",
-      context: { token: "tg-token", deps: { editMessage, sendMessage } },
+      context: { ...base.context, deps: { editMessage, sendMessage } },
       entry: { chatId: "5678", messageId: "m1" },
       request,
       approvalKind: "system-agent",
-      payload,
+      payload: { text: "⚠️ OpenClaw change approved, but it was not applied." },
       phase: "resolved",
-    });
-    expect(sendMessage).not.toHaveBeenCalled();
+    }),
+  ).rejects.toThrow("message was deleted");
+  expect(sendMessage).toHaveBeenCalledWith(
+    "1234",
+    "⚠️ OpenClaw change approved, but it was not applied.",
+    { cfg: {}, token: "tg-token", accountId: "default", textMode: "html" },
+  );
+});
 
-    await transport.updateEntry?.({
-      cfg: {} as never,
-      accountId: "origin",
-      context: { token: "tg-token", deps: { editMessage, sendMessage } },
-      entry: { chatId: "5678", messageId: "m1" },
-      request,
-      approvalKind: "system-agent",
-      payload,
-      phase: "resolved",
-    });
-    expect(sendMessage).toHaveBeenCalledOnce();
+it("sends origin notices only through the originating Telegram account", async () => {
+  const editMessage = vi.fn().mockResolvedValue({ ok: true });
+  const sendMessage = vi.fn().mockResolvedValue({ ok: true });
+  const request = systemRequest("system-agent:origin-account", {
+    turnSourceChannel: "telegram",
+    turnSourceTo: "1234",
+    turnSourceAccountId: "origin",
   });
+  const terminal = {
+    ...terminalEntry(request, editMessage, sendMessage, "✅ OpenClaw change approved and applied."),
+    entry: { chatId: "5678", messageId: "m1" },
+  };
 
-  it("delivers only allowed pending actions into the originating forum topic", async () => {
-    const sendTyping = vi.fn().mockResolvedValue({ ok: true });
-    const sendMessage = vi.fn().mockResolvedValue({
-      chatId: "-1003841603622",
-      messageId: "m1",
-    });
-    const request = execRequest("req-1");
-    const view: PendingApprovalView = {
-      approvalKind: "exec",
-      approvalId: "req-1",
-      phase: "pending",
-      title: "Exec approval",
-      metadata: [],
-      commandText: "echo hi",
-      expiresAtMs: 60_000,
-      actions: [
-        approvalAction("exec", "req-1", "allow-once", "Allow Once", "success"),
-        approvalAction("exec", "req-1", "deny", "Deny", "danger"),
-      ],
-    };
-    const params = {
-      ...base,
-      context: { ...base.context, deps: { sendTyping, sendMessage } },
-      request,
-      approvalKind: "exec" as const,
-      view,
-      plannedTarget: {
-        surface: "origin" as const,
-        reason: "preferred" as const,
-        target: { to: "telegram:-1003841603622:topic:928" },
-      },
-    };
-    await deliver(params);
+  await transport.updateEntry?.({ ...terminal, accountId: "forwarding" });
+  expect(sendMessage).not.toHaveBeenCalled();
 
-    expect(sendTyping).toHaveBeenCalledWith(
-      "-1003841603622",
-      expect.objectContaining({ messageThreadId: 928 }),
-    );
-    expect(sendMessage).toHaveBeenCalledWith(
-      "-1003841603622",
-      expect.stringContaining("/approve req-1 allow-once"),
-      expect.objectContaining({
-        messageThreadId: 928,
-        buttons: [
-          [
-            expect.objectContaining({ text: "Allow Once", callback_data: "tga1:e:o:req-1" }),
-            expect.objectContaining({ text: "Deny", callback_data: "tga1:e:d:req-1" }),
-          ],
+  await transport.updateEntry?.({ ...terminal, accountId: "origin" });
+  expect(sendMessage).toHaveBeenCalledOnce();
+});
+
+it("delivers only allowed pending actions into the originating forum topic", async () => {
+  const sendTyping = vi.fn().mockResolvedValue({ ok: true });
+  const sendMessage = vi.fn().mockResolvedValue({ chatId: "-1003841603622", messageId: "m1" });
+  const request = execRequest("req-1");
+  const view: PendingApprovalView = {
+    approvalKind: "exec",
+    approvalId: "req-1",
+    phase: "pending",
+    title: "Exec approval",
+    metadata: [],
+    commandText: "echo hi",
+    expiresAtMs: 60_000,
+    actions: [
+      approvalAction("exec", "req-1", "allow-once", "Allow Once", "success"),
+      approvalAction("exec", "req-1", "deny", "Deny", "danger"),
+    ],
+  };
+  const params = {
+    ...base,
+    context: { ...base.context, deps: { sendTyping, sendMessage } },
+    request,
+    approvalKind: "exec" as const,
+    view,
+    plannedTarget: {
+      surface: "origin" as const,
+      reason: "preferred" as const,
+      target: { to: "telegram:-1003841603622:topic:928" },
+    },
+  };
+  await deliver(params);
+
+  expect(sendTyping).toHaveBeenCalledWith(
+    "-1003841603622",
+    expect.objectContaining({ messageThreadId: 928 }),
+  );
+  expect(sendMessage).toHaveBeenCalledWith(
+    "-1003841603622",
+    expect.stringContaining("/approve req-1 allow-once"),
+    expect.objectContaining({
+      messageThreadId: 928,
+      buttons: [
+        [
+          expect.objectContaining({ text: "Allow Once", callback_data: "tga1:e:o:req-1" }),
+          expect.objectContaining({ text: "Deny", callback_data: "tga1:e:d:req-1" }),
         ],
-      }),
-    );
-    expect(sendMessage.mock.calls[0]?.[1]).not.toContain("allow-always");
-    expect(sendMessage.mock.calls[0]?.[2]).not.toHaveProperty("directMessagesTopicId");
-  });
+      ],
+    }),
+  );
+  expect(sendMessage.mock.calls[0]?.[1]).not.toContain("allow-always");
+  expect(sendMessage.mock.calls[0]?.[2]).not.toHaveProperty("directMessagesTopicId");
+});
 
-  it("delivers plugin scope and actions using channel Direct Messages topic metadata", async () => {
-    const sendTyping = vi.fn().mockResolvedValue({ ok: true });
-    const sendMessage = vi.fn().mockResolvedValue({
-      chatId: "-1003841603622",
-      messageId: "m1",
-    });
-    const scope = {
-      kind: "message-send" as const,
-      target: "email",
-      recipientCount: 3,
-      recipients: ["alice@example.com"],
-      audience: "external" as const,
-    };
-    const request = {
-      approvalKind: "plugin" as const,
-      id: "plugin:req-1",
-      request: {
-        title: "Send email",
-        description: "Deliver the requested announcement.",
-        scope,
-      },
-      createdAtMs: 0,
-      expiresAtMs: 60_000,
-    };
-    const view: PendingApprovalView = {
-      approvalKind: "plugin",
-      phase: "pending",
-      approvalId: "plugin:req-1",
+it("delivers plugin scope and actions using channel Direct Messages topic metadata", async () => {
+  const sendTyping = vi.fn().mockResolvedValue({ ok: true });
+  const sendMessage = vi.fn().mockResolvedValue({ chatId: "-1003841603622", messageId: "m1" });
+  const scope = {
+    kind: "message-send" as const,
+    target: "email",
+    recipientCount: 3,
+    recipients: ["alice@example.com"],
+    audience: "external" as const,
+  };
+  const request = {
+    approvalKind: "plugin" as const,
+    id: "plugin:req-1",
+    request: {
       title: "Send email",
       description: "Deliver the requested announcement.",
-      severity: "warning",
       scope,
-      metadata: [],
-      expiresAtMs: 60_000,
-      actions: [approvalAction("plugin", "plugin:req-1", "deny", "Deny", "danger")],
-    };
-    const params = {
-      ...base,
-      context: { ...base.context, deps: { sendTyping, sendMessage } },
-      request,
-      approvalKind: "plugin" as const,
-      view,
-      plannedTarget: {
-        surface: "origin" as const,
-        reason: "preferred" as const,
-        target: { to: "telegram:-1003841603622:direct-topic:77" },
-      },
-    };
-    await deliver(params);
+    },
+    createdAtMs: 0,
+    expiresAtMs: 60_000,
+  };
+  const view: PendingApprovalView = {
+    approvalKind: "plugin",
+    phase: "pending",
+    approvalId: "plugin:req-1",
+    title: "Send email",
+    description: "Deliver the requested announcement.",
+    severity: "warning",
+    scope,
+    metadata: [],
+    expiresAtMs: 60_000,
+    actions: [approvalAction("plugin", "plugin:req-1", "deny", "Deny", "danger")],
+  };
+  const params = {
+    ...base,
+    context: { ...base.context, deps: { sendTyping, sendMessage } },
+    request,
+    approvalKind: "plugin" as const,
+    view,
+    plannedTarget: {
+      surface: "origin" as const,
+      reason: "preferred" as const,
+      target: { to: "telegram:-1003841603622:direct-topic:77" },
+    },
+  };
+  await deliver(params);
 
-    expect(sendMessage).toHaveBeenCalledWith(
-      "-1003841603622",
-      expect.stringContaining("3 recipients via email"),
-      expect.objectContaining({
-        directMessagesTopicId: 77,
-        buttons: [[expect.objectContaining({ callback_data: "tga1:p:d:plugin:req-1" })]],
-      }),
-    );
-    expect(sendMessage.mock.calls[0]?.[2]).not.toHaveProperty("messageThreadId");
-    expect(sendMessage.mock.calls[0]?.[1]).toContain("alice@example.com");
-  });
+  expect(sendMessage).toHaveBeenCalledWith(
+    "-1003841603622",
+    expect.stringContaining("3 recipients via email"),
+    expect.objectContaining({
+      directMessagesTopicId: 77,
+      buttons: [[expect.objectContaining({ callback_data: "tga1:p:d:plugin:req-1" })]],
+    }),
+  );
+  expect(sendMessage.mock.calls[0]?.[2]).not.toHaveProperty("messageThreadId");
+  expect(sendMessage.mock.calls[0]?.[1]).toContain("alice@example.com");
 });

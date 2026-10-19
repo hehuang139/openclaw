@@ -35,6 +35,14 @@ function resolveAccountWithEnv(
 ) {
   return withEnv(env, () => resolveTelegramAccount({ cfg, ...(accountId ? { accountId } : {}) }));
 }
+function restrictedConfig(allowFrom: string[], root: TelegramAccountConfig = {}) {
+  return telegramConfig({
+    enabled: true,
+    allowFrom: ["123"],
+    ...root,
+    accounts: { alerts: { botToken: "bot-token", dmPolicy: "open", allowFrom } },
+  });
+}
 
 describe("resolveTelegramAccount", () => {
   it.each([
@@ -71,10 +79,7 @@ describe("resolveTelegramAccount", () => {
 
   it("preserves normalized agent-bound accounts and default-agent selection", () => {
     const cfg = telegramConfig(
-      {
-        botToken: "tok-default",
-        accounts: { Alerts: { botToken: "tok-alerts" } },
-      },
+      { botToken: "tok-default", accounts: { Alerts: { botToken: "tok-alerts" } } },
       {
         agents: { entries: { primary: {} } },
         bindings: [
@@ -94,13 +99,7 @@ describe("resolveTelegramAccount", () => {
     const cfg = telegramConfig(
       {
         botToken: "tok-default",
-        accounts: {
-          fusion: {
-            enabled: false,
-            name: "Fusion",
-            botToken: "tok-fusion",
-          },
-        },
+        accounts: { fusion: { enabled: false, name: "Fusion", botToken: "tok-fusion" } },
       },
       { bindings: [{ agentId: "fusion", match: { channel: "telegram", accountId: "fusion" } }] },
     ) as unknown as OpenClawConfig;
@@ -110,8 +109,7 @@ describe("resolveTelegramAccount", () => {
 
     const accounts = listEnabledTelegramAccounts(cfg);
     expect(accounts.map((account) => account.accountId)).toEqual(["default"]);
-    expect(accounts[0]?.token).toBe("tok-default");
-    expect(accounts[0]?.tokenSource).toBe("config");
+    expect(accounts[0]).toMatchObject({ token: "tok-default", tokenSource: "config" });
   });
 
   it.each([
@@ -140,10 +138,7 @@ describe("resolveTelegramAccount", () => {
 describe("resolveDefaultTelegramAccountId", () => {
   it("selects an account without requiring an ambient agent during legacy repair", () => {
     const cfg: OpenClawConfig = telegramConfig(
-      {
-        defaultAccount: "work",
-        accounts: { alerts: {}, work: {} },
-      },
+      { defaultAccount: "work", accounts: { alerts: {}, work: {} } },
       { agents: { entries: { main: {}, research: {} } } },
     );
 
@@ -155,10 +150,7 @@ describe("resolveDefaultTelegramAccountId", () => {
       async (home) => {
         const config = {
           channels: {
-            telegram: {
-              defaultAccount: "alerts",
-              accounts: { alerts: {}, work: {} },
-            },
+            telegram: { defaultAccount: "alerts", accounts: { alerts: {}, work: {} } },
           },
           agents: { entries: { main: { default: true }, research: {} } },
           bindings: [{ agentId: "main", match: { channel: "telegram", accountId: "work" } }],
@@ -212,25 +204,11 @@ describe("mergeTelegramAccountConfig", () => {
   );
 
   it("drops account wildcard DM access when top-level allowFrom is restrictive", async () => {
-    const cfg: OpenClawConfig = telegramConfig({
-      enabled: true,
-      dmPolicy: "allowlist",
-      allowFrom: ["123"],
-      accounts: {
-        alerts: {
-          enabled: true,
-          botToken: "bot-token",
-          dmPolicy: "open",
-          allowFrom: ["*"],
-        },
-      },
-    });
+    const cfg = restrictedConfig(["*"], { dmPolicy: "allowlist" });
 
     setTelegramRuntime(createPluginRuntimeMock());
     const merged = mergeTelegramAccountConfig(cfg, "alerts");
-    expect(merged.botToken).toBe("bot-token");
-    expect(merged.dmPolicy).toBe("open");
-    expect(merged.allowFrom).toEqual(["123"]);
+    expect(merged).toMatchObject({ botToken: "bot-token", dmPolicy: "open", allowFrom: ["123"] });
     for (const senderId of [123, 456]) {
       expect(
         await isTelegramDmAccessAllowed({
@@ -251,17 +229,7 @@ describe("mergeTelegramAccountConfig", () => {
   });
 
   it("keeps explicit account allowlist entries while dropping a conflicting wildcard", () => {
-    const cfg: OpenClawConfig = telegramConfig({
-      enabled: true,
-      allowFrom: ["123"],
-      accounts: {
-        alerts: {
-          botToken: "bot-token",
-          dmPolicy: "open",
-          allowFrom: ["456", "*"],
-        },
-      },
-    });
+    const cfg = restrictedConfig(["456", "*"]);
 
     const merged = mergeTelegramAccountConfig(cfg, "alerts");
     expect(merged.allowFrom).toEqual(["456"]);

@@ -118,10 +118,7 @@ it.each([false, true])(
       expect(requests).toEqual([
         {
           method: "editMessageText",
-          fields: expect.objectContaining({
-            chat_id: "123",
-            message_id: 42,
-          }),
+          fields: expect.objectContaining({ chat_id: "123", message_id: 42 }),
         },
       ]);
       const fields = requests[0]!.fields;
@@ -170,22 +167,14 @@ it.each([
 ])("routes registered $name caption edits to Telegram captions", async ({ caption, expected }) => {
   await withEditState(async () => {
     await edit(
-      {
-        message: "The caption must take precedence over text.",
-        caption,
-      },
+      { message: "The caption must take precedence over text.", caption },
       { botToken: "123456:caption-edit", richMessages: true },
     );
 
     expect(requests).toEqual([
       {
         method: "editMessageCaption",
-        fields: {
-          chat_id: "123",
-          message_id: 42,
-          caption: expected,
-          parse_mode: "HTML",
-        },
+        fields: { chat_id: "123", message_id: 42, caption: expected, parse_mode: "HTML" },
       },
     ]);
   });
