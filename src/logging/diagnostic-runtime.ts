@@ -4,6 +4,7 @@ import {
 } from "../infra/diagnostic-events.js";
 import {
   getDiagnosticSessionState,
+  peekDiagnosticSessionState,
   touchDiagnosticSessionState,
   type SessionRef,
   type SessionStateValue,
@@ -91,7 +92,14 @@ export function logSessionStateChange(
   if (!areDiagnosticsEnabledForProcess()) {
     return;
   }
-  const state = getDiagnosticSessionState(params);
+  // Controller retirement observes existing state; message lifecycle owns its identity.
+  const projectsIdle = params.state === "idle" && params.consumeQueuedTurn === false;
+  const state = projectsIdle
+    ? peekDiagnosticSessionState(params)
+    : getDiagnosticSessionState(params);
+  if (!state || (projectsIdle && state.state === "idle")) {
+    return;
+  }
   const prevState = state.state;
   state.state = params.state;
   touchDiagnosticSessionState(state);
