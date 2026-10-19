@@ -808,25 +808,29 @@ suite.define(() => {
       // before measuring edits to an already-present draft.
       await waitForCommittedComposerDraft(page, scopeKey, "seed", 0);
       const scrollDuringWait = scrollAwayAndBack
-        ? page.locator(".chat-pane-cache__pane--active .chat-thread").evaluate(async (element) => {
-            const thread = element as HTMLElement;
-            const originalTop = thread.scrollTop;
-            // Move during the stability sample, then restore its original geometry.
-            await new Promise<void>((resolve) => {
-              globalThis.setTimeout(resolve, 100);
-            });
-            thread.scrollTo({ top: originalTop - 8, behavior: "instant" });
-            await new Promise<void>((resolve) => {
-              requestAnimationFrame(() => resolve());
-            });
-            const awayTop = thread.scrollTop;
-            thread.scrollTo({ top: originalTop, behavior: "instant" });
-            return { originalTop, awayTop, restoredTop: thread.scrollTop };
-          })
+        ? (async () => {
+            const thread = page.locator(".chat-pane-cache__pane--active .chat-thread");
+            const originalTop = await thread.evaluate((element) => element.scrollTop);
+            // Real reader input retires end-follow; an 8 px offset is still at the end.
+            await thread.hover();
+            await page.mouse.wheel(0, -100);
+            await expect
+              .poll(() => thread.evaluate((element) => element.scrollTop))
+              .toBe(originalTop - 100);
+            const awayTop = await thread.evaluate((element) => element.scrollTop);
+            await page.mouse.wheel(0, originalTop - awayTop);
+            await expect
+              .poll(() => thread.evaluate((element) => element.scrollTop))
+              .toBe(originalTop);
+            return {
+              originalTop,
+              awayTop,
+              restoredTop: await thread.evaluate((element) => element.scrollTop),
+            };
+          })()
         : Promise.resolve(null);
       // Finish startup scrolling before measuring steady-state composer invalidations.
-      await waitForChatScrollIdle(page);
-      const scroll = await scrollDuringWait;
+      const [, scroll] = await Promise.all([waitForChatScrollIdle(page), scrollDuringWait]);
       if (scroll) {
         expect(scroll.awayTop).toBeLessThan(scroll.originalTop);
         expect(scroll.restoredTop).toBe(scroll.originalTop);
