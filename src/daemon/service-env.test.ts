@@ -140,6 +140,26 @@ describe("service PATH", () => {
 });
 
 describe("service environment", () => {
+  it.each([
+    ["linux", "/state/secret-egress-proxy/gateway-ABC123/trust-bundle.pem", undefined],
+    ["darwin", "/state/secret-egress-proxy/gateway-ABC123/trust-bundle.pem", "/etc/ssl/cert.pem"],
+    ["win32", "C:\\state\\secret-egress-proxy\\gateway-ABC123\\trust-bundle.pem", undefined],
+    ["linux", "/opt/openclaw/corporate-ca.pem", "/opt/openclaw/corporate-ca.pem"],
+  ] satisfies Array<[NodeJS.Platform, string, string | undefined]>)(
+    "uses durable startup trust for %s services (%s)",
+    (platform, caPath, expected) => {
+      const params = {
+        env: { HOME: home, NODE_EXTRA_CA_CERTS: caPath },
+        platform,
+        execPath: "/usr/bin/node",
+      };
+      expect(buildServiceEnvironment({ ...params, port: 18789 }).NODE_EXTRA_CA_CERTS).toBe(
+        expected,
+      );
+      expect(buildNodeServiceEnvironment(params).NODE_EXTRA_CA_CERTS).toBe(expected);
+    },
+  );
+
   it("preserves config write protection without enabling Nix mode", () => {
     const env = serviceEnv({ OPENCLAW_CONFIG_READONLY: "1" }, { platform: "linux" });
     expect([resolveIsConfigReadOnly(env), resolveIsNixMode(env)]).toEqual([true, false]);

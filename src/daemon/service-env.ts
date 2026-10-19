@@ -37,6 +37,14 @@ export const SERVICE_PROXY_ENV_KEYS = [
   "all_proxy",
 ] as const;
 
+export function isEphemeralServiceCaPath(value: string | undefined): boolean {
+  // Gateway secret-egress trust bundles are deleted when their owning process exits.
+  // Recognize the producer's reserved path even after the bundle has disappeared.
+  return /[\\/]secret-egress-proxy[\\/]gateway-[^\\/]+[\\/]trust-bundle\.pem$/.test(
+    value?.trim() ?? "",
+  );
+}
+
 function normalizeServicePathDir(dir: string | undefined): string | undefined {
   const trimmed = dir?.trim();
   // Service PATH snapshots are only emitted for macOS/Linux; keep POSIX semantics
@@ -333,7 +341,9 @@ function buildCommonServiceEnvironment(
   // works correctly when running as a LaunchAgent without extra user configuration.
   // On Linux, nvm-installed Node may need the host CA bundle injected before startup.
   const startupTlsEnv = resolveNodeStartupTlsEnvironment({
-    env,
+    env: isEphemeralServiceCaPath(env.NODE_EXTRA_CA_CERTS)
+      ? { ...env, NODE_EXTRA_CA_CERTS: undefined }
+      : env,
     platform,
     execPath,
   });

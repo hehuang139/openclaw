@@ -28,6 +28,7 @@ import {
 } from "../../daemon/runtime-pin-state.js";
 import { readEmbeddedGatewayToken } from "../../daemon/service-audit.js";
 import { mergeGatewayServiceEnv } from "../../daemon/service-env-merge.js";
+import { isEphemeralServiceCaPath } from "../../daemon/service-env.js";
 import {
   sanitizeServiceInspectionError,
   ServiceStartRefusalError,
@@ -123,7 +124,11 @@ export function mergeInstallInvocationEnv(params: {
   const currentEnv: NodeJS.ProcessEnv = {};
   for (const [rawKey, rawValue] of Object.entries(params.env)) {
     const key = normalizeEnvVarKey(rawKey, { portable: true });
-    if (!key || isDangerousHostEnvVarName(key)) {
+    if (
+      !key ||
+      isDangerousHostEnvVarName(key) ||
+      (key.toUpperCase() === "NODE_EXTRA_CA_CERTS" && isEphemeralServiceCaPath(rawValue))
+    ) {
       continue;
     }
     currentEnv[normalizeInstallEnvKey(key)] = rawValue;
@@ -154,11 +159,12 @@ export function mergeInstallInvocationEnv(params: {
     ) {
       continue;
     }
-    // An installed CA file is additive, operator-owned Node startup trust; retain it on reinstall.
+    // An operator-provided CA file is additive Node startup trust; retain it on reinstall.
     // Never replay service-owned TLS-disable, proxy, or loader overrides from the old environment.
     if (
       isDangerousHostEnvVarName(key) ||
-      (isDangerousHostEnvOverrideVarName(key) && upper !== "NODE_EXTRA_CA_CERTS")
+      (isDangerousHostEnvOverrideVarName(key) && upper !== "NODE_EXTRA_CA_CERTS") ||
+      (upper === "NODE_EXTRA_CA_CERTS" && isEphemeralServiceCaPath(rawValue))
     ) {
       continue;
     }

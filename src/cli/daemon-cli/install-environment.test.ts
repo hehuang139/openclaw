@@ -2,6 +2,38 @@ import { describe, expect, it } from "vitest";
 import { mergeInstallInvocationEnv } from "./install.js";
 
 describe("mergeInstallInvocationEnv", () => {
+  it.each([
+    { platform: "linux" as const, caKey: "NODE_EXTRA_CA_CERTS", separator: "/" },
+    { platform: "win32" as const, caKey: "node_extra_ca_certs", separator: "\\" },
+  ])(
+    "does not carry process-owned egress trust into an install on $platform",
+    ({ platform, caKey, separator }) => {
+      const ephemeralCa = [
+        "",
+        "state",
+        "secret-egress-proxy",
+        "gateway-ABC123",
+        "trust-bundle.pem",
+      ].join(separator);
+      const corporateCa = "/opt/openclaw/corporate-ca.pem";
+      for (const existingCa of [undefined, ephemeralCa, corporateCa]) {
+        const env = mergeInstallInvocationEnv({
+          env: { [caKey]: ephemeralCa },
+          existingServiceEnv: existingCa ? { [caKey]: existingCa } : undefined,
+          platform,
+        });
+        expect(env.NODE_EXTRA_CA_CERTS).toBe(existingCa === corporateCa ? corporateCa : undefined);
+      }
+      expect(
+        mergeInstallInvocationEnv({
+          env: {},
+          existingServiceEnv: { [caKey]: ephemeralCa },
+          platform,
+        }).NODE_EXTRA_CA_CERTS,
+      ).toBeUndefined();
+    },
+  );
+
   it("uses only the current shell's HOMEBREW_PREFIX", () => {
     const existingServiceEnv = { HOMEBREW_PREFIX: "/opt/homebrew" };
     const env = mergeInstallInvocationEnv({ env: {}, existingServiceEnv, platform: "darwin" });
