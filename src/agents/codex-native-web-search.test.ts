@@ -27,54 +27,34 @@ function activate(params: Parameters<typeof resolveCodexNativeSearchActivation>[
     ...params,
   });
 }
-function expectInactive(params: Parameters<typeof activate>[0], inactiveReason: string) {
-  expect(activate(params)).toMatchObject({ state: "managed_only", inactiveReason });
-}
-
 describe("resolveCodexNativeSearchActivation", () => {
-  it("returns managed_only when native Codex search is disabled", () => {
-    expectInactive(
+  it.each<[string, Parameters<typeof activate>[0], string]>([
+    [
+      "native search disabled",
       { config: searchConfig({ enabled: true }), modelProvider: "openai" },
       "codex_not_enabled",
-    );
-  });
-
-  it("keeps an explicit managed provider authoritative on the ChatGPT transport", () => {
-    expectInactive(
+    ],
+    [
+      "explicit managed provider",
       { config: searchConfig({ provider: "brave", openaiCodex: { enabled: true } }) },
       "managed_provider_selected",
-    );
-  });
-
-  it("returns managed_only for non-eligible models", () => {
-    expectInactive({ modelProvider: "openai", modelApi: "openai-responses" }, "model_not_eligible");
-  });
-
-  it.each([{ name: "without auth", config: baseConfig }] as const)(
-    "leaves credential admission to the model request for direct openai $name",
-    ({ config }) => {
-      const result = activate({ config, modelProvider: "openai" });
-      expect(result).toMatchObject({ state: "native_active", codexMode: "cached" });
-      expect(result).not.toHaveProperty("inactiveReason");
-    },
-  );
-
-  it("keeps all search disabled when global web search is disabled", () => {
-    expectInactive(
+    ],
+    [
+      "ineligible model",
+      { modelProvider: "openai", modelApi: "openai-responses" },
+      "model_not_eligible",
+    ],
+    [
+      "global disable",
       {
         config: searchConfig({ enabled: false, openaiCodex: { enabled: true, mode: "live" } }),
         modelProvider: "openai",
       },
       "globally_disabled",
-    );
-  });
-
-  it("keeps native injection disabled when the session disables web search", () => {
-    expectInactive({ webSearchEnabled: false }, "globally_disabled");
-  });
-
-  it("keeps native search inactive when the agent denies group:web via session key", () => {
-    expectInactive(
+    ],
+    ["session disable", { webSearchEnabled: false }, "globally_disabled"],
+    [
+      "agent policy",
       {
         config: {
           ...baseConfig,
@@ -84,52 +64,50 @@ describe("resolveCodexNativeSearchActivation", () => {
         modelId: "gpt-5.5",
       },
       "tool_policy_denied",
-    );
-  });
-
-  it("keeps native search inactive when provider policy denies web_search", () => {
-    expectInactive(
+    ],
+    [
+      "provider policy",
       {
-        modelId: "gpt-5.5",
         config: {
           ...baseConfig,
           tools: {
             ...baseConfig.tools,
-            byProvider: {
-              "gateway/gpt-5.5": { deny: ["web_search"] },
-            },
+            byProvider: { "gateway/gpt-5.5": { deny: ["web_search"] } },
           },
         },
+        modelId: "gpt-5.5",
       },
       "tool_policy_denied",
-    );
-  });
-
-  it("keeps native search inactive when sender policy denies web_search", () => {
-    expectInactive(
+    ],
+    [
+      "sender policy",
       {
-        modelId: "gpt-5.5",
         config: {
           ...baseConfig,
           tools: {
             ...baseConfig.tools,
-            toolsBySender: {
-              "channel:msteams:alice": { deny: ["web_search"] },
-            },
+            toolsBySender: { "channel:msteams:alice": { deny: ["web_search"] } },
           },
         },
+        modelId: "gpt-5.5",
         messageProvider: "teams",
         senderId: "alice",
       },
       "tool_policy_denied",
-    );
-  });
-
-  it("keeps native search inactive when sandbox policy denies group:web", () => {
-    expectInactive(
+    ],
+    [
+      "sandbox policy",
       { sandboxToolPolicy: { deny: ["group:web"] }, modelId: "gpt-5.5" },
       "tool_policy_denied",
-    );
+    ],
+  ])("keeps native search inactive: %s", (name, params, reason) => {
+    expect(activate(params), name).toMatchObject({ state: "managed_only", inactiveReason: reason });
+  });
+
+  it("leaves credential admission to the model request for direct openai without auth", () => {
+    const result = activate({ config: baseConfig, modelProvider: "openai" });
+    expect(result).toMatchObject({ state: "native_active", codexMode: "cached" });
+    expect(result).not.toHaveProperty("inactiveReason");
   });
 
   it("keeps native search inactive when inherited session policy denies web_search", async () => {

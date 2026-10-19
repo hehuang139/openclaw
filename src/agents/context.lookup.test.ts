@@ -6,6 +6,7 @@ import type { ContextWindowCatalog } from "./context-cache-projection.js";
 import { replaceDiscoveredContextTokenCache } from "./context-cache.js";
 import { CONTEXT_WINDOW_RUNTIME_STATE } from "./context-runtime-state.js";
 import { resetContextWindowCacheForTest } from "./context.test-support.js";
+type Owner = { config: OpenClawConfig; modelCatalog: ContextWindowCatalog };
 
 const state = vi.hoisted(() => {
   const initialConfig: OpenClawConfig = {};
@@ -14,15 +15,8 @@ const state = vi.hoisted(() => {
     config: initialConfig,
     catalog,
     loadConfig: vi.fn<() => OpenClawConfig>(),
-    loadOwner: vi.fn<(_params: unknown) => Promise<{ modelCatalog: ContextWindowCatalog }>>(),
-    publishedOwner: vi.fn<
-      (_params: unknown) =>
-        | {
-            config: OpenClawConfig;
-            modelCatalog: ContextWindowCatalog;
-          }
-        | undefined
-    >(),
+    loadOwner: vi.fn<(_params: unknown) => Promise<Pick<Owner, "modelCatalog">>>(),
+    publishedOwner: vi.fn<(_params: unknown) => Owner | undefined>(),
   };
 });
 
@@ -52,6 +46,11 @@ function model(id: string, contextWindow: number, contextTokens?: number): Model
 function config(provider: string, ...models: ModelDefinitionConfig[]): OpenClawConfig {
   return { models: { providers: { [provider]: { baseUrl: "https://example.invalid", models } } } };
 }
+const discovered = (id: string, contextWindow: number, provider?: string) => ({
+  id,
+  contextWindow,
+  provider,
+});
 
 let context: typeof import("./context.js");
 function tokens(
@@ -123,9 +122,7 @@ describe("context cache lifecycle", () => {
   it("replaces configured token overrides before refreshing discovery", async () => {
     state.config = config("openrouter", model("claude-sonnet", 321_000, 111_000));
     expect(tokens("claude-sonnet", { allowAsyncLoad: false })).toBe(111_000);
-    state.catalog.entries = [
-      { provider: "openrouter", id: "claude-sonnet", contextWindow: 654_321 },
-    ];
+    state.catalog.entries = [discovered("claude-sonnet", 654_321, "openrouter")];
     const pending = context.refreshContextWindowCache(
       config("openrouter", model("claude-sonnet", 222_000)),
     );
@@ -137,11 +134,7 @@ describe("context cache lifecycle", () => {
   it("loads exact read-only metadata rather than the Gateway-published owner", async () => {
     const cfg = config("anthropic", model("claude-opus-4.7-20260219", 200_000));
     state.catalog.entries = [
-      {
-        id: "anthropic/claude-opus-4.7-20260219",
-        provider: "anthropic",
-        contextWindow: 200_000,
-      },
+      discovered("anthropic/claude-opus-4.7-20260219", 200_000, "anthropic"),
     ];
     await context.ensureContextWindowCacheLoaded(cfg);
     expect(state.loadOwner).toHaveBeenCalledWith({ config: cfg, readOnly: true });
@@ -161,7 +154,7 @@ describe("context cache lifecycle", () => {
       const pending = context.ensureContextWindowCacheLoaded();
       await started.promise;
 
-      state.catalog.entries = [{ provider: "synthetic", id: "new-model", contextWindow: 222_000 }];
+      state.catalog.entries = [discovered("new-model", 222_000, "synthetic")];
       await context.refreshContextWindowCache({});
       const options = { provider: "synthetic", allowAsyncLoad: false };
       expect(tokens("new-model", options)).toBe(222_000);
@@ -171,7 +164,7 @@ describe("context cache lifecycle", () => {
       } else {
         older.resolve({
           modelCatalog: {
-            entries: [{ provider: "synthetic", id: "old-model", contextWindow: 111_000 }],
+            entries: [discovered("old-model", 111_000, "synthetic")],
           },
         });
       }
@@ -186,8 +179,8 @@ describe("context cache lifecycle", () => {
     const requested = config("synthetic", model("stale-model", 111_000));
     state.config = config("synthetic", model("current-model", 222_000));
     state.catalog = {
-      entries: [{ id: "discovered-model", provider: "synthetic", contextWindow: 64_000 }],
-      staticEntries: [{ id: "static-model", provider: "google", contextWindow: 1_048_576 }],
+      entries: [discovered("discovered-model", 64_000, "synthetic")],
+      staticEntries: [discovered("static-model", 1_048_576, "google")],
     };
     await context.prewarmContextWindowCacheAfterReady({ config: requested });
     expect(state.publishedOwner).toHaveBeenCalledWith({
@@ -224,10 +217,9 @@ describe("context cache lifecycle", () => {
 
   it("does not publish prewarm cancelled during cooperative projection", async () => {
     let cancelled = false;
-    state.catalog.entries = Array.from({ length: 600 }, (_, index) => ({
-      id: `cancelled-${index}`,
-      contextWindow: 64_000,
-    }));
+    state.catalog.entries = Array.from({ length: 600 }, (_, index) =>
+      discovered(`cancelled-${index}`, 64_000),
+    );
     state.publishedOwner.mockImplementationOnce(() => {
       queueMicrotask(() => {
         cancelled = true;
@@ -249,13 +241,9 @@ describe("context cache lifecycle", () => {
 describe("provider-owned context lookup", () => {
   it("uses self-prefixed provider discovery ahead of the bare cross-provider minimum", async () => {
     state.catalog.entries = [
-      { provider: "github-copilot", id: "gemini-3.1-pro-preview", contextWindow: 128_000 },
-      { id: "gemini-3.1-pro-preview", contextWindow: 128_000 },
-      {
-        provider: "google-gemini-cli",
-        id: "google-gemini-cli/gemini-3.1-pro-preview",
-        contextWindow: 1_048_576,
-      },
+      discovered("gemini-3.1-pro-preview", 128_000, "github-copilot"),
+      discovered("gemini-3.1-pro-preview", 128_000),
+      discovered("google-gemini-cli/gemini-3.1-pro-preview", 1_048_576, "google-gemini-cli"),
     ];
     await context.ensureContextWindowCacheLoaded();
     expect(tokens("gemini-3.1-pro-preview", { provider: "google-gemini-cli" })).toBe(1_048_576);
@@ -287,9 +275,7 @@ describe("provider-owned context lookup", () => {
   });
 
   it("does not confuse raw slash model ids with verified provider identity", async () => {
-    state.catalog.entries = [
-      { provider: "openrouter", id: "google/gemini-2.5-pro", contextWindow: 999_000 },
-    ];
+    state.catalog.entries = [discovered("google/gemini-2.5-pro", 999_000, "openrouter")];
     await context.ensureContextWindowCacheLoaded();
     const cfg = config("google", model("gemini-2.5-pro", 2_000_000));
     expect(tokens("gemini-2.5-pro", { cfg, provider: "google" })).toBe(2_000_000);

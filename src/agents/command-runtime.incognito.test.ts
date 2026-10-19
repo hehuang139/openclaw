@@ -1,7 +1,7 @@
 import "../test-utils/prepare-compiled-subprocesses.js";
 import path from "node:path";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, expect, it, vi } from "vitest";
 import { observeHostDataSql } from "../../test/helpers/sqlite-statement-execution-counter.js";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import { getReplyPayloadMetadata, setReplyPayloadMetadata } from "../auto-reply/reply-payload.js";
@@ -38,6 +38,7 @@ import { createAgentPatchedSessionModelRunGuard } from "./session-model-auto-rev
 const tempDirs = useAutoCleanupTempDirTracker(afterAll);
 const authority = { assertCurrent() {}, authorize() {} };
 let actor: ReturnType<typeof memorySessionActorOwners.get>;
+let other: typeof actor;
 const bindings: SessionActorStorageBinding[] = [];
 let sql: ReturnType<typeof observeHostDataSql>;
 function openOwner(prefix: string) {
@@ -62,12 +63,14 @@ afterEach(() => {
 });
 beforeAll(() => {
   actor = openOwner("command-runtime-incognito-");
+  other = openOwner("command-runtime-other-root-");
 });
 afterAll(async () => {
   for (const binding of bindings) {
     await binding.actor.release();
   }
   memorySessionActorOwners.closeDatabase(actor);
+  memorySessionActorOwners.closeDatabase(other);
 });
 
 async function create(
@@ -98,16 +101,19 @@ async function create(
   expect(
     await handle.storage!.mutate({ type: "session.entry.create", input: { entry } }, authority),
   ).toMatchObject({ kind: "committed" });
+  const target = { agentId: "main", storePath: owner.path, sessionKey, sessionId: entry.sessionId };
   return {
     binding,
-    target: { agentId: "main", storePath: owner.path, sessionKey, sessionId: entry.sessionId },
+    target,
     entry,
+    run: <T>(callback: () => T) => runWithSessionActorStorage(binding, callback),
+    read: () => owner.readSession(sessionKey, authority)?.entry,
   };
 }
 
 async function messages(target: Awaited<ReturnType<typeof create>>["target"]) {
-  return (await loadTranscriptEvents(target)).filter(
-    (event) => isRecord(event) && event.type === "message",
+  return (await loadTranscriptEvents(target)).flatMap((event) =>
+    isRecord(event) && event.type === "message" ? [event.message] : [],
   );
 }
 
@@ -128,117 +134,97 @@ const patchedModel = {
   },
 } satisfies Partial<SessionEntry>;
 
-describe("captured actor isolation", () => {
-  let other: typeof actor;
-  beforeAll(async () => {
-    other = openOwner("command-runtime-other-root-");
-  });
-  afterAll(async () => {
-    memorySessionActorOwners.closeDatabase(other);
-  });
-
-  it("settles queued CLI records on their captured actor after abort and outside the binding", async () => {
-    const controller = new AbortController();
-    const { target, binding } = await create(
-      "cli-records",
-      { activeWriterRunId: "cli-run" },
-      actor,
-      controller.signal,
-    );
-    const foreign = await create("cli-records", { activeWriterRunId: "cli-run" }, other);
-    const recorder = runWithSessionActorStorage(binding, () =>
-      createCliDispatchTranscriptRecorder({
-        ...target,
-        runId: "cli-run",
-        prompt: "private prompt",
-        provider: "openai",
-        model: "gpt-4.1",
-        expectedLifecycleRevision: "original",
-        expectedWriterRunId: "cli-run",
-      }),
-    );
-    runWithSessionActorStorage(foreign.binding, () => {
-      recorder.noteToolEvent({ phase: "start", toolName: "read", toolCallId: "tool-1" });
-      recorder.noteToolEvent({
-        phase: "result",
-        toolName: "read",
-        toolCallId: "tool-1",
-        result: "private result",
-      });
-      recorder.noteAssistantText("partial private reply");
+it("settles queued CLI records on their captured actor after abort and outside the binding", async () => {
+  const controller = new AbortController();
+  const { target, binding, run } = await create(
+    "cli-records",
+    { activeWriterRunId: "cli-run" },
+    actor,
+    controller.signal,
+  );
+  const foreign = await create("cli-records", { activeWriterRunId: "cli-run" }, other);
+  const recorder = run(() =>
+    createCliDispatchTranscriptRecorder({
+      ...target,
+      runId: "cli-run",
+      prompt: "private prompt",
+      provider: "openai",
+      model: "gpt-4.1",
+      expectedLifecycleRevision: "original",
+      expectedWriterRunId: "cli-run",
+    }),
+  );
+  foreign.run(() => {
+    recorder.noteToolEvent({ phase: "start", toolName: "read", toolCallId: "tool-1" });
+    recorder.noteToolEvent({
+      phase: "result",
+      toolName: "read",
+      toolCallId: "tool-1",
+      result: "private result",
     });
-    // Abort before the recorder's Promise FIFO can start its first append.
-    controller.abort(new Error("run stopped"));
-    expect(() => binding.actor.assertReadable()).toThrow("run stopped");
-    recorder.flushAssistantSnapshot();
-    await recorder.finalize();
-
-    expect(await messages(target)).toMatchObject([
-      { message: { role: "user", content: [{ text: "private prompt" }] } },
-      { message: { role: "assistant", content: [{ type: "toolCall", id: "tool-1" }] } },
-      { message: { role: "toolResult", content: [{ text: "private result" }] } },
-      {
-        message: {
-          role: "assistant",
-          content: [{ text: "partial private reply" }],
-          stopReason: "aborted",
-        },
-      },
-    ]);
-    expect(await messages(foreign.target)).toEqual([]);
+    recorder.noteAssistantText("partial private reply");
   });
+  // Abort before the recorder's Promise FIFO can start its first append.
+  controller.abort(new Error("run stopped"));
+  expect(() => binding.actor.assertReadable()).toThrow("run stopped");
+  recorder.flushAssistantSnapshot();
+  await recorder.finalize();
 
-  it("rolls back a failed model and appends its visible note to the original actor after cancellation", async () => {
-    const controller = new AbortController();
-    const { target, binding } = await create("rollback", patchedModel, actor, controller.signal);
-    const foreign = await create("rollback", patchedModel, other);
-    const onError = vi.fn();
-    const guard = await runWithSessionActorStorage(binding, () =>
-      createAgentPatchedSessionModelRunGuard({ ...target, cfg: {}, onError }),
-    );
-    controller.abort(new Error("run finished"));
-    expect(() => binding.actor.assertReadable()).toThrow("run finished");
-    await runWithSessionActorStorage(foreign.binding, () =>
-      guard.fail(new Error("model unavailable"), "model_not_found"),
-    );
+  expect(await messages(target)).toMatchObject([
+    { role: "user", content: [{ text: "private prompt" }] },
+    { role: "assistant", content: [{ type: "toolCall", id: "tool-1" }] },
+    { role: "toolResult", content: [{ text: "private result" }] },
+    { role: "assistant", content: [{ text: "partial private reply" }], stopReason: "aborted" },
+  ]);
+  expect(await messages(foreign.target)).toEqual([]);
+});
 
-    expect(onError).not.toHaveBeenCalled();
-    const reverted = actor.readSession(target.sessionKey, authority)?.entry;
-    expect(reverted).toMatchObject({
-      model: "gpt-4o",
-      modelOverride: "gpt-4o",
-    });
-    expect(reverted?.modelFallback).toBeUndefined();
-    expect(await messages(target)).toContainEqual(
-      expect.objectContaining({
-        message: expect.objectContaining({
-          role: "custom",
-          customType: "openclaw.system-note",
-          display: true,
-          content: "System note: model openai/gpt-4.1 failed; reverted to openai/gpt-4o.",
-        }),
-      }),
-    );
-    expect(other.readSession(foreign.target.sessionKey, authority)?.entry).toMatchObject(
-      patchedModel,
-    );
-    expect(await messages(foreign.target)).toEqual([]);
-  });
+it("rolls back a failed model and appends its visible note to the original actor after cancellation", async () => {
+  const controller = new AbortController();
+  const { target, binding, run, read } = await create(
+    "rollback",
+    patchedModel,
+    actor,
+    controller.signal,
+  );
+  const foreign = await create("rollback", patchedModel, other);
+  const onError = vi.fn();
+  const guard = await run(() =>
+    createAgentPatchedSessionModelRunGuard({ ...target, cfg: {}, onError }),
+  );
+  controller.abort(new Error("run finished"));
+  expect(() => binding.actor.assertReadable()).toThrow("run finished");
+  await foreign.run(() => guard.fail(new Error("model unavailable"), "model_not_found"));
+
+  expect(onError).not.toHaveBeenCalled();
+  const reverted = read();
+  expect(reverted).toMatchObject({ model: "gpt-4o", modelOverride: "gpt-4o" });
+  expect(reverted?.modelFallback).toBeUndefined();
+  expect(await messages(target)).toContainEqual(
+    expect.objectContaining({
+      role: "custom",
+      customType: "openclaw.system-note",
+      display: true,
+      content: "System note: model openai/gpt-4.1 failed; reverted to openai/gpt-4o.",
+    }),
+  );
+  expect(foreign.read()).toMatchObject(patchedModel);
+  expect(await messages(foreign.target)).toEqual([]);
 });
 
 it("does not roll a replacement session back using a previous incarnation's model guard", async () => {
-  const { target, entry, binding } = await create("rollback-replaced", patchedModel);
+  const { target, entry, run, read } = await create("rollback-replaced", patchedModel);
   const onError = vi.fn();
-  const guard = await runWithSessionActorStorage(binding, () =>
+  const guard = await run(() =>
     createAgentPatchedSessionModelRunGuard({ ...target, cfg: {}, onError }),
   );
-  await runWithSessionActorStorage(binding, () =>
+  await run(() =>
     replaceSessionEntry(target, { ...entry, sessionId: "replacement", lifecycleRevision: "next" }),
   );
   await guard.fail(new Error("late failed model"), "model_not_found");
 
   expect(onError).not.toHaveBeenCalled();
-  expect(actor.readSession(target.sessionKey, authority)?.entry).toMatchObject({
+  expect(read()).toMatchObject({
     sessionId: "replacement",
     lifecycleRevision: "next",
     ...patchedModel,
@@ -280,7 +266,7 @@ it.each([true, false])(
   "retains final-delivery authority with a stored path: %s",
   async (hasStorePath) => {
     vi.stubEnv("OPENCLAW_STATE_DIR", path.resolve(actor.path, "../../../.."));
-    const { target, entry, binding } = await create(`final-delivery-${hasStorePath}`, {
+    const { target, entry, run } = await create(`final-delivery-${hasStorePath}`, {
       activeWriterRunId: "first-writer",
     });
     entry.restartRecoveryHarnessCompletion = {
@@ -303,7 +289,7 @@ it.each([true, false])(
         expectedWriterRunId: "first-writer",
       },
     });
-    const result = await runWithSessionActorStorage(binding, async () => {
+    const result = await run(async () => {
       await replaceSessionEntry(target, entry);
       return persistPendingFinalDeliveryMarker({
         ...target,
@@ -327,25 +313,18 @@ it.each([true, false])(
       },
     });
     await prepareDelivery(payload);
+    const deliveryAuthority = () =>
+      getReplyPayloadMetadata(payload)?.sessionWriterDeliveryAuthority;
+    const assertDelivery = () => assertSessionWriterDeliveryAuthorized(deliveryAuthority());
     try {
-      expect(
-        getReplyPayloadMetadata(payload)?.sessionWriterDeliveryAuthority?.readCurrentSession,
-      ).toBeTypeOf("function");
+      expect(deliveryAuthority()?.readCurrentSession).toBeTypeOf("function");
       expect(isDispatchFinalReplySessionWriterAuthorized(payload)).toBe(true);
-      expect(() =>
-        assertSessionWriterDeliveryAuthorized(
-          getReplyPayloadMetadata(payload)?.sessionWriterDeliveryAuthority,
-        ),
-      ).not.toThrow();
-      await runWithSessionActorStorage(binding, () =>
+      expect(assertDelivery).not.toThrow();
+      await run(() =>
         patchSessionEntryCore(target, () => ({ activeWriterRunId: "replacement-writer" })),
       );
       expect(isDispatchFinalReplySessionWriterAuthorized(payload)).toBe(false);
-      expect(() =>
-        assertSessionWriterDeliveryAuthorized(
-          getReplyPayloadMetadata(payload)?.sessionWriterDeliveryAuthority,
-        ),
-      ).toThrow(/writer changed/i);
+      expect(assertDelivery).toThrow(/writer changed/i);
     } finally {
       release();
     }

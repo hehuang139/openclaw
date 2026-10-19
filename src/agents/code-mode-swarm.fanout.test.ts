@@ -4,6 +4,25 @@ import { resolveCodeModeConfig } from "./code-mode.js";
 import { resetCodeModeTestState, testing } from "./code-mode.test-support.js";
 
 afterEach(resetCodeModeTestState);
+type Input = Parameters<typeof testing.runCodeModeExecutor>[0];
+type Resume = Extract<Input, { kind: "resume" }>;
+function createExecutor(limit: number) {
+  const config = resolveCodeModeConfig({
+    tools: { codeMode: { enabled: true, maxPendingToolCalls: limit } },
+  });
+  const run = (input: Input) =>
+    testing.runCodeModeExecutor(input, { timeoutMs: 10_000, executor: config.executor });
+  const initialization = { config, apiFiles: [], namespaces: [], swarmEnabled: true };
+  return {
+    exec: (source: string, catalog: unknown[] = []) =>
+      run({ kind: "exec", source, catalog, ...initialization }),
+    resume: (
+      continuation: Resume["continuation"],
+      settledRequests: Resume["settledRequests"],
+      pendingRequests?: Resume["pendingRequests"],
+    ) => run({ kind: "resume", config, continuation, settledRequests, pendingRequests }),
+  };
+}
 
 describe("Swarm pipeline backpressure", () => {
   it.each([
@@ -16,9 +35,7 @@ describe("Swarm pipeline backpressure", () => {
   ])(
     "accounts for $count items with $limit slots, partial settlement $partial and follow-up tools $followup",
     async ({ limit, count, partial, followup, refill = false }) => {
-      const config = resolveCodeModeConfig({
-        tools: { codeMode: { enabled: true, maxPendingToolCalls: limit } },
-      });
+      const executor = createExecutor(limit);
       const source = `
       const initial = ${refill} ? Array.from({ length: 16 }, (_, i) => progress({ value: "initial-" + i })) : [];
       const timers = ${refill} ? Array.from({ length: 128 }, () => setTimeout(() => { throw new Error("canceled queued timer fired"); }, 60_000)) : [];
@@ -39,20 +56,10 @@ describe("Swarm pipeline backpressure", () => {
         ? { status: outcome.status, value: outcome.value }
         : { status: outcome.status, error: outcome.reason.message });
     `;
-      let result: CodeModeWorkerResult = await testing.runCodeModeExecutor(
-        {
-          kind: "exec",
-          source,
-          config,
-          catalog: [{ callableName: "progress", name: "progress", source: "openclaw" }],
-          apiFiles: [],
-          namespaces: [],
-          swarmEnabled: true,
-        },
-        { timeoutMs: 10_000, executor: config.executor },
-      );
+      let result: CodeModeWorkerResult = await executor.exec(source, [
+        { callableName: "progress", name: "progress", source: "openclaw" },
+      ]);
       const collectors = new Map<string, string>();
-      const spawnedPrompts: string[] = [];
       const progressItems: unknown[] = [];
       // Drive real executor continuations with controlled child results; this tests request
       // admission and resumption, not a mock of the guest's Promise implementation.
@@ -72,7 +79,6 @@ describe("Swarm pipeline backpressure", () => {
             }
             const runId = `collector-${collectors.size}`;
             collectors.set(runId, prompt);
-            spawnedPrompts.push(prompt);
             value = { status: "accepted", runId };
           } else if (request.method === "callValue") {
             expect(request.args[0]).toBe("progress");
@@ -95,16 +101,7 @@ describe("Swarm pipeline backpressure", () => {
           }
           return { id: request.id, ok: true as const, json: JSON.stringify(value) };
         });
-        result = await testing.runCodeModeExecutor(
-          {
-            kind: "resume",
-            continuation: result.continuation,
-            config,
-            settledRequests,
-            pendingRequests,
-          },
-          { timeoutMs: 10_000, executor: config.executor },
-        );
+        result = await executor.resume(result.continuation, settledRequests, pendingRequests);
       }
       expect(result.status, result.status === "failed" ? result.error : undefined).toBe(
         "completed",
@@ -120,6 +117,7 @@ describe("Swarm pipeline backpressure", () => {
             : { status: "fulfilled", value: `done-${index}` },
         ),
       );
+      const spawnedPrompts = [...collectors.values()];
       expect(spawnedPrompts).toHaveLength(count * 2 - 1);
       expect(new Set(spawnedPrompts).size).toBe(spawnedPrompts.length);
       const expectedProgress = followup
@@ -144,13 +142,8 @@ describe("Swarm pipeline backpressure", () => {
   it.each([false, true])(
     "preserves queued collector arguments and structured=%s results",
     async (structured) => {
-      const config = resolveCodeModeConfig({
-        tools: { codeMode: { enabled: true, maxPendingToolCalls: 1 } },
-      });
-      let result = await testing.runCodeModeExecutor(
-        {
-          kind: "exec",
-          source: `
+      const executor = createExecutor(1);
+      let result = await executor.exec(`
           const timer = setTimeout(() => { throw new Error("canceled timer fired"); }, 60_000);
           const options = { label: "original", ...(${structured} ? { schema: { type: "object" } } : {}) };
           const collector = agents.run("Queued research", options);
@@ -159,14 +152,7 @@ describe("Swarm pipeline backpressure", () => {
           else options.schema = { type: "object" };
           clearTimeout(timer);
           return await collector;
-        `,
-          config,
-          catalog: [],
-          namespaces: [],
-          swarmEnabled: true,
-        },
-        { timeoutMs: 10_000, executor: config.executor },
-      );
+        `);
       expect(result).toMatchObject({
         status: "waiting",
         canceledRequestIds: ["bridge:sleep:1"],
@@ -196,10 +182,7 @@ describe("Swarm pipeline backpressure", () => {
                 },
           ),
         }));
-        result = await testing.runCodeModeExecutor(
-          { kind: "resume", continuation: result.continuation, config, settledRequests },
-          { timeoutMs: 10_000, executor: config.executor },
-        );
+        result = await executor.resume(result.continuation, settledRequests);
       }
       expect(result.status).toBe("completed");
       if (result.status !== "completed") {
