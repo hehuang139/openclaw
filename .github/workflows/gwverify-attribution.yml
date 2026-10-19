@@ -1,0 +1,76 @@
+name: Gateway regression attribution
+
+on:
+  push:
+    branches: [dbasync/gwverify]
+    paths: [.github/workflows/gwverify-attribution.yml]
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  NODE_DISABLE_COMPILE_CACHE: "1"
+  PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN: "false"
+
+jobs:
+  replay:
+    name: replay (${{ matrix.label }})
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - label: current-main
+            ref: c2549f8295d09f520f119de44d77e1c7dc25779a
+            suite: both
+          - label: pr1-parent
+            ref: a91d268d77cb98c399f4b3bdd7436f59386ab3c0
+            suite: x
+          - label: pr1-squash
+            ref: 18a4db39b5c359671e2f9ae57f35f0d5450d01ed
+            suite: x
+          - label: pr1-original-ci
+            ref: 69dc60689c49a3dca0254ae878b78f892657a060
+            suite: x
+          - label: pr2-parent
+            ref: c5111f4067a3978c989e061293056659b264c5c4
+            suite: requester
+          - label: pr2-squash
+            ref: 205fbaf20f3a77d3234f39ecb7723ddd1412d574
+            suite: requester
+          - label: pr2-original-ci
+            ref: 0959a97a2da9c4caa7686246de70dd2ebe32900e
+            suite: requester
+    steps:
+      - name: Checkout exact comparison revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ matrix.ref }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Setup repository runtimes and dependencies
+        uses: ./.github/actions/setup-node-env
+        with:
+          cache-mode: restore
+      - name: Replay exact failing cases
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ matrix.ref }}
+          REPLAY_SUITE: ${{ matrix.suite }}
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          files=()
+          if [[ "$REPLAY_SUITE" == x || "$REPLAY_SUITE" == both ]]; then
+            files+=(src/gateway/x-publication-owner-composition.e2e.test.ts)
+          fi
+          if [[ "$REPLAY_SUITE" == requester || "$REPLAY_SUITE" == both ]]; then
+            files+=(test/gateway-restored-requester-settle.e2e.test.ts)
+          fi
+          node scripts/run-vitest.mjs run --config test/vitest/vitest.e2e.config.ts \
+            "${files[@]}" --maxWorkers=1 \
+            -t 'renews stale X authority|normal runtime budget: runtime timeout'
