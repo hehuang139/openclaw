@@ -1,7 +1,7 @@
 // A real process kill distinguishes restored operator custody from a live request.
 import { randomUUID } from "node:crypto";
+import { once } from "node:events";
 import { expect, it, vi } from "vitest";
-import { inspectManagedProcessGroup } from "../scripts/lib/managed-child-process.mts";
 import { isLiveTestEnabled, logLiveProgress } from "../src/agents/live-test-helpers.js";
 import { createExternalGates } from "../src/agents/subagents/announce/subagent-external-gate.test-support.js";
 import { loadSubagentRegistryFromSqlite } from "../src/agents/subagents/registry/subagent-registry-state.fixture.test-support.js";
@@ -168,14 +168,9 @@ it.skipIf(!isLiveTestEnabled() || process.platform === "win32")(
         if (!original?.pid) {
           throw new Error("Fixture Gateway process unavailable before kill");
         }
-        process.kill(-original.pid, "SIGKILL");
-        await vi.waitFor(
-          () =>
-            expect(inspectManagedProcessGroup(original, { errorPolicy: "indeterminate" })).toBe(
-              "dead",
-            ),
-          { timeout: 10_000 },
-        );
+        const closed = once(original, "close");
+        expect(original.kill("SIGKILL")).toBe(true);
+        expect(await closed).toEqual([null, "SIGKILL"]);
         await instance.stopGateway();
         parentGate.release("PARENT_CHECKPOINT_COMPLETE");
         logLiveProgress("recovered parent: waiting for restored parent to spawn and complete");
