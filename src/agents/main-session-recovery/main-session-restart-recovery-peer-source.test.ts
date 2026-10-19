@@ -177,6 +177,7 @@ it("recovers a consumed peer input through two process losses without replaying 
     }));
 
     const dispatchGate = createDeferred();
+    const finalDispatchGate = createDeferred();
     const dispatches: string[] = [];
     const skipped: string[] = [];
     let assertEffectCurrent: (() => void) | undefined;
@@ -201,9 +202,7 @@ it("recovers a consumed peer input through two process losses without replaying 
         });
         options?.onAccepted?.({ runId: request.idempotencyKey, status: "accepted" });
         options?.onExecutionStarted?.();
-        if (dispatches.length === 1) {
-          await dispatchGate.promise;
-        }
+        await (dispatches.length === 1 ? dispatchGate.promise : finalDispatchGate.promise);
         return { runId: request.idempotencyKey, status: "ok" } as T;
       },
     };
@@ -242,18 +241,24 @@ it("recovers a consumed peer input through two process losses without replaying 
       rotateAgentEventLifecycleGeneration();
       current = true;
       await markStartupOrphanedMainSessionsForRecovery({ cfg, stateDir: state.stateDir });
-      expect(await recover()).toEqual({ started: 0, settled: 1, failed: 0, skipped: 0 });
+      expect(await recover()).toEqual({ started: 1, settled: 0, failed: 0, skipped: 0 });
       expect(dispatches).toHaveLength(2);
       expect(
         dispatches.every((prompt) => prompt.includes("Your previous turn was interrupted")),
       ).toBe(true);
       expect(receiver).toHaveBeenCalledOnce();
-      expect(loadSessionEntry(target)).toMatchObject({ status: "done", abortedLastRun: false });
+      expect(() => assertEffectCurrent!()).not.toThrow();
+      finalDispatchGate.resolve();
+      await vi.waitFor(() => {
+        expect(() => assertEffectCurrent!()).toThrow();
+      });
+      expect(loadSessionEntry(target)).toMatchObject({ abortedLastRun: false });
       expect(loadSessionEntry(target)?.mainRestartRecovery?.tombstone).toBeUndefined();
       expect(await loadTranscriptEvents(target)).toEqual(originalTranscript);
     } finally {
       current = false;
       dispatchGate.resolve();
+      finalDispatchGate.resolve();
     }
   });
 });
