@@ -1,9 +1,11 @@
 import { once } from "node:events";
 import fs from "node:fs";
+import { request as httpRequest } from "node:http";
 import { createServer as createHttpsServer, type Server } from "node:https";
-import net from "node:net";
+import net, { type Socket } from "node:net";
 import os from "node:os";
 import path from "node:path";
+import tls from "node:tls";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { WebSocketServer } from "../../../packages/gateway-client/src/websocket.test-support.js";
 import { createTempDirTracker } from "../../../test/helpers/temp-dir.js";
@@ -14,21 +16,12 @@ import {
   type SecretEgressProcessGrant,
   type SecretEgressProxyHandle,
 } from "./proxy-server.js";
-import {
-  closeServer,
-  connectTls as openTls,
-  connectTunnel as openTunnel,
-  copyCa,
-  listen,
-  socketTracker,
-} from "./proxy.test-support.js";
 
 type AuditEvent = Parameters<Parameters<typeof startSecretEgressProxyServer>[0]["onAudit"]>[0];
 
 const value = "synthetic-websocket-credential";
 const seedDirs = createTempDirTracker();
-const sockets = socketTracker();
-const track = sockets.track;
+const sockets = new Set<Socket>();
 let seedDir: string;
 let leaf: Awaited<ReturnType<typeof generateLocalProxyLeaf>>;
 let caDir: string;
@@ -46,8 +39,50 @@ let observed: Array<{
   proxyAuth: string | undefined;
 }>;
 
+function track<T extends Socket>(socket: T): T {
+  sockets.add(socket);
+  socket.once("close", () => sockets.delete(socket));
+  socket.on("error", () => {});
+  return socket;
+}
+
 function connectTunnel() {
-  return openTunnel(proxyEnv, port, track);
+  const auth = new URL(proxyEnv.HTTPS_PROXY!).password;
+  const proxyUrl = new URL(proxy.proxyOrigin);
+  return new Promise<{ status: number; socket: Socket }>((resolve, reject) => {
+    const request = httpRequest({
+      hostname: proxyUrl.hostname,
+      port: proxyUrl.port,
+      method: "CONNECT",
+      // CONNECT targets this test proxy, never Node's environment proxy.
+      agent: false,
+      path: `localhost:${port}`,
+      headers: {
+        "Proxy-Authorization": `Basic ${Buffer.from(`openclaw:${auth}`).toString("base64")}`,
+      },
+    });
+    request.once("socket", track);
+    request.once("connect", (response, socket) =>
+      resolve({ status: response.statusCode ?? 0, socket: track(socket) }),
+    );
+    request.once("error", reject);
+    request.end();
+  });
+}
+
+async function connectTls(): Promise<tls.TLSSocket> {
+  const connected = await connectTunnel();
+  expect(connected.status).toBe(200);
+  const socket = track(
+    tls.connect({
+      socket: connected.socket,
+      servername: "localhost",
+      ca: fs.readFileSync(proxy.caCertPath),
+    }),
+  );
+  await once(socket, "secureConnect");
+  expect(socket.authorized).toBe(true);
+  return socket;
 }
 
 async function rawUpgrade(
@@ -67,7 +102,7 @@ async function rawUpgrade(
         connected.once("connect", () => resolve(connected));
         connected.once("error", reject);
       })
-    : await openTls(await connectTunnel(), proxy.caCertPath, track);
+    : await connectTls();
   const received: Buffer[] = [];
   socket.on("data", (chunk: Buffer) => received.push(chunk));
   const closed = new Promise<void>((resolve) => {
@@ -129,7 +164,9 @@ afterAll(() => seedDirs.cleanup());
 
 beforeEach(async () => {
   caDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-egress-websocket-"));
-  copyCa(seedDir, caDir);
+  for (const file of ["root-ca.pem", "root-ca-key.pem", "leaf-key.pem"]) {
+    fs.copyFileSync(path.join(seedDir, file), path.join(caDir, file));
+  }
   auditEvents = [];
   proxy = await startSecretEgressProxyServer({
     caDir,
@@ -179,7 +216,13 @@ beforeEach(async () => {
     wss.handleUpgrade(request, socket, head, (client) => wss.emit("connection", client, request));
     socket.uncork();
   });
-  port = await listen(origin);
+  origin.listen(0, "127.0.0.1");
+  await once(origin, "listening");
+  const address = origin.address();
+  if (!address || typeof address === "string") {
+    throw new Error("Origin did not bind");
+  }
+  port = address.port;
   sentinel = sealSecretSentinel(value, { label: "websocket-test" });
   grant = proxy.registerProcess([{ name: "SERVICE_KEY", sentinel, allowedHosts: ["localhost"] }]);
   proxyEnv = grant.env;
@@ -189,10 +232,17 @@ afterEach(async () => {
   for (const client of wss.clients) {
     client.terminate();
   }
-  sockets.destroy();
+  for (const socket of sockets) {
+    socket.destroy();
+  }
+  sockets.clear();
   await proxy.stop();
-  await closeServer(wss);
-  await closeServer(origin);
+  await new Promise<void>((resolve) => {
+    wss.close(() => resolve());
+  });
+  await new Promise<void>((resolve) => {
+    origin.close(() => resolve());
+  });
   fs.rmSync(caDir, { recursive: true, force: true });
 });
 
@@ -214,11 +264,8 @@ describe("secret egress WebSocket forwarding", () => {
   });
 
   it("substitutes handshake credentials and preserves bidirectional framed data", async () => {
-    const client = await rawUpgrade({
-      pathname: `/socket?key=${sentinel}`,
-      head: clientFrame("first-frame"),
-    });
-    expect(await receive(client, "first-frame")).toMatch(/^HTTP\/1\.1 101 [\s\S]*ready/);
+    const client = await rawUpgrade({ pathname: `/socket?key=${sentinel}` });
+    expect(await receive(client, "ready")).toMatch(/^HTTP\/1\.1 101 /);
     expect(observed).toEqual([
       { authorization: `Bearer ${value}`, url: `/socket?key=${value}`, proxyAuth: undefined },
     ]);
@@ -345,6 +392,11 @@ describe("secret egress WebSocket forwarding", () => {
     }
     await Promise.all([request.closed, originClosed]);
     expect(Buffer.concat(request.received)).toHaveLength(0);
+  });
+
+  it("forwards both head buffers without dropping the first WebSocket frames", async () => {
+    const request = await rawUpgrade({ head: clientFrame("first-frame") });
+    expect(await receive(request, "first-frame")).toMatch(/^HTTP\/1\.1 101 [\s\S]*ready/);
   });
 
   it("closes both ends of an established WebSocket when its process grant is revoked", async () => {

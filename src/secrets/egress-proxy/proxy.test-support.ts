@@ -1,4 +1,4 @@
-import { once } from "node:events";
+import { once, type EventEmitter } from "node:events";
 import fs from "node:fs";
 import {
   request,
@@ -10,33 +10,84 @@ import type { Server, Socket } from "node:net";
 import path from "node:path";
 import { text } from "node:stream/consumers";
 import tls from "node:tls";
-import { expect } from "vitest";
+import { beforeAll, expect } from "vitest";
+import { createTempDirTracker } from "../../../test/helpers/temp-dir.js";
+import { ensureSecretEgressProxyCa, generateLocalProxyLeaf } from "../../proxy-capture/ca.js";
+import { startSecretEgressProxyServer, type SecretEgressProxyAuditEvent } from "./proxy-server.js";
+
+export function createProxy(
+  caDir: string,
+  audit: SecretEgressProxyAuditEvent[],
+  policy: Pick<
+    Parameters<typeof startSecretEgressProxyServer>[0],
+    "allowedHosts" | "bypassHosts"
+  > = {},
+) {
+  return startSecretEgressProxyServer({ caDir, onAudit: (event) => audit.push(event), ...policy });
+}
+
+export function useCaSeed(prefix: string) {
+  const dirs = createTempDirTracker();
+  let dir: string;
+  let leaf: Awaited<ReturnType<typeof generateLocalProxyLeaf>>;
+  beforeAll(async () => {
+    dir = dirs.make(`${prefix}seed-`);
+    const ca = await ensureSecretEgressProxyCa(dir);
+    leaf = await generateLocalProxyLeaf({ certDir: dir, ca, hostname: "localhost" });
+  });
+  return {
+    get leaf() {
+      return leaf;
+    },
+    make() {
+      const target = dirs.make(prefix);
+      copyCa(dir, target);
+      return target;
+    },
+    cleanup: () => dirs.cleanup(),
+  };
+}
+
+export function onClose(stream: Pick<EventEmitter, "once">): Promise<void> {
+  return new Promise((resolve) => {
+    stream.once("close", () => resolve());
+  });
+}
+
+export function capture(stream: NodeJS.ReadableStream) {
+  const chunks: Buffer[] = [];
+  stream.on("data", (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
+  const bytes = () => Buffer.concat(chunks);
+  return {
+    closed: onClose(stream),
+    bytes,
+    text: () => bytes().toString(),
+    async until(expected: string | Buffer) {
+      while (!bytes().includes(expected)) {
+        await once(stream, "data");
+      }
+      return bytes().toString();
+    },
+  };
+}
+
+export const binding = (
+  sentinel: string,
+  allowedHosts: readonly string[] = ["localhost"],
+  name = "SERVICE_API_KEY",
+) => ({ name, sentinel, allowedHosts });
 
 export async function readResponse(response: IncomingMessage) {
   return { status: response.statusCode ?? 0, body: await text(response) };
 }
 
-export function proxyRequest(
-  env: Record<string, string>,
-  options: Omit<RequestOptions, "headers"> & {
-    headers?: OutgoingHttpHeaders;
-    chunks?: readonly (string | Buffer)[];
-  },
+export function openRequest(
+  options: RequestOptions,
+  chunks: readonly (string | Buffer)[] = [],
   track?: (socket: Socket) => void,
 ): Promise<IncomingMessage> {
-  const endpoint = new URL(env.HTTP_PROXY!);
-  const { chunks = [], ...requestOptions } = options;
   return new Promise((resolve, reject) => {
-    const outgoing = request(
-      {
-        hostname: endpoint.hostname,
-        port: endpoint.port,
-        agent: false,
-        ...requestOptions,
-        headers: { "Proxy-Authorization": basicAuth(endpoint.password), ...options.headers },
-      },
-      resolve,
-    );
+    const outgoing = request({ agent: false, ...options }, resolve);
     if (track) {
       outgoing.once("socket", track);
     }
@@ -48,10 +99,33 @@ export function proxyRequest(
   });
 }
 
-export const basicAuth = (password: string) =>
-  `Basic ${Buffer.from(`openclaw:${password}`).toString("base64")}`;
+export function proxyRequest(
+  env: Record<string, string>,
+  options: Omit<RequestOptions, "headers"> & {
+    headers?: OutgoingHttpHeaders;
+    chunks?: readonly (string | Buffer)[];
+  },
+  track?: (socket: Socket) => void,
+) {
+  const endpoint = new URL(env.HTTP_PROXY!);
+  const { chunks, ...requestOptions } = options;
+  return openRequest(
+    {
+      hostname: endpoint.hostname,
+      port: endpoint.port,
+      ...requestOptions,
+      headers: { "Proxy-Authorization": basicAuth(endpoint.password), ...options.headers },
+    },
+    chunks,
+    track,
+  );
+}
 
-export function copyCa(source: string, target: string) {
+export const basic = (credentials: string) =>
+  `Basic ${Buffer.from(credentials).toString("base64")}`;
+export const basicAuth = (password: string) => basic(`openclaw:${password}`);
+
+function copyCa(source: string, target: string) {
   for (const file of ["root-ca.pem", "root-ca-key.pem", "leaf-key.pem"]) {
     fs.copyFileSync(path.join(source, file), path.join(target, file));
   }
