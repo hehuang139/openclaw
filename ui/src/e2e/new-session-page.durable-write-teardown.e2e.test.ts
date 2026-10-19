@@ -9,6 +9,7 @@ import {
   installMockGateway,
   navigateInApp,
   waitForCommittedNewSessionDraft,
+  pollValue,
 } from "./new-session-page.test-support.ts";
 import { waitForCommittedComposerDraft } from "./settle.test-support.ts";
 
@@ -25,6 +26,16 @@ type DurableWriteTeardownGlobal = typeof globalThis & {
   };
 };
 
+function teardownState<Key extends keyof DurableWriteTeardownGlobal["durableWriteTeardown"]>(
+  page: Page,
+  key: Key,
+) {
+  return page.evaluate(
+    (field) => (globalThis as DurableWriteTeardownGlobal).durableWriteTeardown[field],
+    key,
+  );
+}
+
 async function rawDraftMatches(
   page: Page,
   expectedText: string,
@@ -36,26 +47,19 @@ async function rawDraftMatches(
       if (!databases.some((database) => database.name === "openclaw-control-ui")) {
         return false;
       }
-      const database = await new Promise<IDBDatabase>((resolve, reject) => {
-        const request = indexedDB.open("openclaw-control-ui");
-        request.addEventListener("success", () => resolve(request.result), { once: true });
-        request.addEventListener(
-          "error",
-          () => reject(request.error ?? new Error("IndexedDB open failed")),
-          { once: true },
-        );
-      });
-      try {
-        const transaction = database.transaction("composerDrafts", "readonly");
-        const records = await new Promise<unknown[]>((resolve, reject) => {
-          const request = transaction.objectStore("composerDrafts").getAll();
+      const result = <T>(request: IDBRequest<T>) =>
+        new Promise<T>((resolve, reject) => {
           request.addEventListener("success", () => resolve(request.result), { once: true });
           request.addEventListener(
             "error",
-            () => reject(request.error ?? new Error("IndexedDB read failed")),
+            () => reject(request.error ?? new Error("IndexedDB request failed")),
             { once: true },
           );
         });
+      const database = await result(indexedDB.open("openclaw-control-ui"));
+      try {
+        const transaction = database.transaction("composerDrafts", "readonly");
+        const records: unknown[] = await result(transaction.objectStore("composerDrafts").getAll());
         return records.some((value) => {
           if (!value || typeof value !== "object") {
             return false;
@@ -77,14 +81,9 @@ async function rawDraftMatches(
 
 suite.define(() => {
   it("coalesces a burst of near-limit attachment draft mutations into one write", async () => {
-    const context = await suite.browser.newContext(createControlUiE2eContextOptions());
-    try {
-      const page = await context.newPage();
+    await suite.withPage(createControlUiE2eContextOptions(), async ({ page }) => {
       await page.addInitScript(() => {
-        const originalTransaction = Object.getOwnPropertyDescriptor(
-          IDBDatabase.prototype,
-          "transaction",
-        )?.value as IDBDatabase["transaction"];
+        const originalTransaction = IDBDatabase.prototype.transaction;
         const state = globalThis as typeof globalThis & {
           composerDraftReadwriteTransactions: number;
         };
@@ -136,139 +135,109 @@ suite.define(() => {
             .composerDraftReadwriteTransactions,
       );
       expect(transactionCount).toBe(1);
-    } finally {
-      await context.close();
-    }
+    });
   });
 
   it("starts an attachment write while an earlier text write is still pending", async () => {
-    const context = await suite.browser.newContext(createControlUiE2eContextOptions());
-    try {
-      const text = "keep the attachment added during the pending text write";
-      const fileName = "favicon-32.png";
-      const firstPage = await context.newPage();
-      await firstPage.addInitScript(() => {
-        const originalTransaction = Object.getOwnPropertyDescriptor(
-          IDBDatabase.prototype,
-          "transaction",
-        )?.value as IDBDatabase["transaction"];
-        const originalGet = Object.getOwnPropertyDescriptor(IDBObjectStore.prototype, "get")
-          ?.value as IDBObjectStore["get"];
-        const state = globalThis as DurableWriteTeardownGlobal;
-        state.durableWriteTeardown = {
-          blockNextRead: false,
-          blockedRead: false,
-          completedReads: 0,
-          teardownActive: false,
-          teardownStartedWrite: false,
-        };
-        IDBDatabase.prototype.transaction = function (
-          this: IDBDatabase,
-          ...args: Parameters<IDBDatabase["transaction"]>
-        ) {
-          const [storeNames, mode] = args;
-          const names = typeof storeNames === "string" ? [storeNames] : Array.from(storeNames);
-          if (
-            state.durableWriteTeardown.teardownActive &&
-            mode === "readwrite" &&
-            names.includes("composerDrafts")
+    await suite.withPage(
+      createControlUiE2eContextOptions(),
+      async ({ page: firstPage, context }) => {
+        const text = "keep the attachment added during the pending text write";
+        const fileName = "favicon-32.png";
+        await firstPage.addInitScript(() => {
+          const originalTransaction = IDBDatabase.prototype.transaction;
+          const originalGet = IDBObjectStore.prototype.get;
+          const state = globalThis as DurableWriteTeardownGlobal;
+          state.durableWriteTeardown = {
+            blockNextRead: false,
+            blockedRead: false,
+            completedReads: 0,
+            teardownActive: false,
+            teardownStartedWrite: false,
+          };
+          IDBDatabase.prototype.transaction = function (
+            this: IDBDatabase,
+            ...args: Parameters<IDBDatabase["transaction"]>
           ) {
-            state.durableWriteTeardown.teardownStartedWrite = true;
-          }
-          return originalTransaction.apply(this, args);
-        } as IDBDatabase["transaction"];
-        IDBObjectStore.prototype.get = function (query: IDBValidKey | IDBKeyRange) {
-          if (this.name !== "composerDrafts") {
-            return originalGet.call(this, query);
-          }
-          if (state.durableWriteTeardown.blockNextRead) {
-            state.durableWriteTeardown.blockNextRead = false;
-            state.durableWriteTeardown.blockedRead = true;
-            return new EventTarget() as IDBRequest;
-          }
-          const request = originalGet.call(this, query);
-          request.addEventListener(
-            "success",
-            () => {
-              state.durableWriteTeardown.completedReads += 1;
-            },
-            { once: true },
-          );
-          return request;
-        };
-      });
-      await installMockGateway(firstPage);
-      await firstPage.goto(`${suite.server.baseUrl}new`);
-      await expect
-        .poll(() =>
-          firstPage.evaluate(
-            () => (globalThis as DurableWriteTeardownGlobal).durableWriteTeardown.completedReads,
-          ),
-        )
-        .toBeGreaterThan(0);
-      await firstPage.evaluate(() => {
-        (globalThis as DurableWriteTeardownGlobal).durableWriteTeardown.blockNextRead = true;
-      });
-      await firstPage.locator(".new-session-page__message").fill(text);
-      await expect
-        .poll(() =>
-          firstPage.evaluate(
-            () => (globalThis as DurableWriteTeardownGlobal).durableWriteTeardown.blockedRead,
-          ),
-        )
-        .toBe(true);
-
-      await firstPage.evaluate((previewLabel) => {
-        const host = document.querySelector("openclaw-new-session-page")!;
-        const state = (globalThis as DurableWriteTeardownGlobal).durableWriteTeardown;
-        // Remove in the ready-preview turn, before protocol latency can expire the debounce.
-        const observer = new MutationObserver(() => {
-          if (
-            host.querySelector(".chat-attachment-image-button")?.getAttribute("aria-label") !==
-            previewLabel
-          ) {
-            return;
-          }
-          observer.disconnect();
-          state.teardownActive = true;
-          // The next task closes this window before the 200 ms debounce can start a write.
-          globalThis.setTimeout(() => {
-            state.teardownActive = false;
-          }, 0);
-          host.remove();
+            const [storeNames, mode] = args;
+            const names = typeof storeNames === "string" ? [storeNames] : Array.from(storeNames);
+            if (
+              state.durableWriteTeardown.teardownActive &&
+              mode === "readwrite" &&
+              names.includes("composerDrafts")
+            ) {
+              state.durableWriteTeardown.teardownStartedWrite = true;
+            }
+            return originalTransaction.apply(this, args);
+          } as IDBDatabase["transaction"];
+          IDBObjectStore.prototype.get = function (query: IDBValidKey | IDBKeyRange) {
+            if (this.name !== "composerDrafts") {
+              return originalGet.call(this, query);
+            }
+            if (state.durableWriteTeardown.blockNextRead) {
+              state.durableWriteTeardown.blockNextRead = false;
+              state.durableWriteTeardown.blockedRead = true;
+              return new EventTarget() as IDBRequest;
+            }
+            const request = originalGet.call(this, query);
+            request.addEventListener(
+              "success",
+              () => {
+                state.durableWriteTeardown.completedReads += 1;
+              },
+              { once: true },
+            );
+            return request;
+          };
         });
-        observer.observe(host, { childList: true, subtree: true, attributes: true });
-      }, `Open image ${fileName}`);
-      await firstPage
-        .locator(".agent-chat__photo-input")
-        .setInputFiles(path.join(process.cwd(), "ui/public/favicon-32.png"));
-      await expect
-        .poll(() =>
-          firstPage.evaluate(
-            () =>
-              (globalThis as DurableWriteTeardownGlobal).durableWriteTeardown.teardownStartedWrite,
-          ),
-        )
-        .toBe(true);
-      await waitForCommittedNewSessionDraft(firstPage, text, 1);
-      await firstPage.close();
+        await installMockGateway(firstPage);
+        await firstPage.goto(`${suite.server.baseUrl}new`);
+        await expect.poll(() => teardownState(firstPage, "completedReads")).toBeGreaterThan(0);
+        await firstPage.evaluate(() => {
+          (globalThis as DurableWriteTeardownGlobal).durableWriteTeardown.blockNextRead = true;
+        });
+        await firstPage.locator(".new-session-page__message").fill(text);
+        await expect.poll(() => teardownState(firstPage, "blockedRead")).toBe(true);
 
-      const restoredPage = await context.newPage();
-      await installMockGateway(restoredPage);
-      await restoredPage.goto(`${suite.server.baseUrl}new`);
-      await expect
-        .poll(() => restoredPage.locator(".new-session-page__message").inputValue())
-        .toBe(text);
-      await restoredPage.getByRole("button", { name: `Open image ${fileName}` }).waitFor();
-    } finally {
-      await context.close();
-    }
+        await firstPage.evaluate((previewLabel) => {
+          const host = document.querySelector("openclaw-new-session-page")!;
+          const state = (globalThis as DurableWriteTeardownGlobal).durableWriteTeardown;
+          // Remove in the ready-preview turn, before protocol latency can expire the debounce.
+          const observer = new MutationObserver(() => {
+            if (
+              host.querySelector(".chat-attachment-image-button")?.getAttribute("aria-label") !==
+              previewLabel
+            ) {
+              return;
+            }
+            observer.disconnect();
+            state.teardownActive = true;
+            // The next task closes this window before the 200 ms debounce can start a write.
+            globalThis.setTimeout(() => {
+              state.teardownActive = false;
+            }, 0);
+            host.remove();
+          });
+          observer.observe(host, { childList: true, subtree: true, attributes: true });
+        }, `Open image ${fileName}`);
+        await firstPage
+          .locator(".agent-chat__photo-input")
+          .setInputFiles(path.join(process.cwd(), "ui/public/favicon-32.png"));
+        await expect.poll(() => teardownState(firstPage, "teardownStartedWrite")).toBe(true);
+        await waitForCommittedNewSessionDraft(firstPage, text, 1);
+        await firstPage.close();
+
+        const restoredPage = await context.newPage();
+        await installMockGateway(restoredPage);
+        await restoredPage.goto(`${suite.server.baseUrl}new`);
+        await pollValue(restoredPage.locator(".new-session-page__message")).toBe(text);
+        await restoredPage.getByRole("button", { name: `Open image ${fileName}` }).waitFor();
+      },
+    );
   });
 
   it("isolates route drafts and retires incognito and submitted drafts", async () => {
-    const context = await suite.browser.newContext(createControlUiE2eContextOptions());
-    try {
-      const page = await context.newPage();
+    await suite.withPage(createControlUiE2eContextOptions(), async ({ page, context }) => {
       await installMockGateway(page, {
         methodResponses: {
           "sessions.create": { key: "agent:main:retired-draft", runStarted: true },
@@ -278,17 +247,17 @@ suite.define(() => {
       const message = page.locator(".new-session-page__message");
       await message.fill("main route draft");
       await navigateInApp(page, "new-session", "?agent=writer");
-      await expect.poll(() => message.inputValue()).toBe("");
+      await pollValue(message).toBe("");
       await message.fill("writer route draft");
       await navigateInApp(page, "new-session", "?agent=main");
-      await expect.poll(() => message.inputValue()).toBe("main route draft");
+      await pollValue(message).toBe("main route draft");
 
       await page.getByRole("switch", { name: "Incognito" }).click();
       await waitForCommittedNewSessionDraft(page, null, 0);
       await page.reload();
-      await expect.poll(() => message.inputValue()).toBe("");
+      await pollValue(message).toBe("");
       await navigateInApp(page, "new-session", "?agent=writer");
-      await expect.poll(() => message.inputValue()).toBe("writer route draft");
+      await pollValue(message).toBe("writer route draft");
       await page.getByRole("button", { name: "Start session" }).click();
       await page.waitForURL(
         (url) => url.pathname === controlUiSessionPath("agent:main:retired-draft"),
@@ -299,11 +268,7 @@ suite.define(() => {
       const restoredPage = await context.newPage();
       await installMockGateway(restoredPage);
       await restoredPage.goto(`${suite.server.baseUrl}new?agent=writer`);
-      await expect
-        .poll(() => restoredPage.locator(".new-session-page__message").inputValue())
-        .toBe("");
-    } finally {
-      await context.close();
-    }
+      await pollValue(restoredPage.locator(".new-session-page__message")).toBe("");
+    });
   });
 });

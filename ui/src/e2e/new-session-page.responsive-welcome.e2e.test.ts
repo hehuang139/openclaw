@@ -8,9 +8,25 @@ import {
   createNewSessionPageE2eSuite,
   installMockGateway,
   waitForGatewayRecoveryScope,
+  pollAttribute,
+  pollCount,
+  pollText,
 } from "./new-session-page.test-support.ts";
 
 const suite = createNewSessionPageE2eSuite();
+const recent = (id: string, label: string, updatedAt: number) => ({
+  key: `agent:main:dashboard:${id}`,
+  kind: "direct",
+  label,
+  updatedAt,
+});
+const sessionList = (sessions: ReturnType<typeof recent>[], ts = Date.now()) => ({
+  count: sessions.length,
+  defaults: { contextTokens: null, model: null, modelProvider: null },
+  path: "",
+  sessions,
+  ts,
+});
 
 suite.define(() => {
   it.each([1, 2])("keeps phone setup compact with %s agents", async (agentCount) => {
@@ -64,11 +80,11 @@ suite.define(() => {
           .getByRole("button", { name: "New worktree Isolated copy of the repo", exact: true })
           .click();
         await page.keyboard.press("Escape");
-        await expect.poll(() => checkout.getAttribute("data-worktree")).toBe("true");
+        await pollAttribute(checkout, "data-worktree").toBe("true");
         const selectors = page.locator(
           ".new-session-page .agent-select__trigger, .new-session-page__triggers .new-session-page__trigger",
         );
-        await expect.poll(() => selectors.count()).toBe(agentCount + 2);
+        await pollCount(selectors).toBe(agentCount + 2);
         await page.evaluate(() => document.fonts.ready);
         for (const { width, mobile } of [
           { width: 390, mobile: true },
@@ -89,9 +105,7 @@ suite.define(() => {
           await captureNewSessionComposerUiProof(suite, page, `mobile-setup-${width}.png`);
           if (captureUiProofEnabled && width === 390 && agentCount === 2) {
             await evaluateControlUiContext(page, (context) => context.theme.setMode("dark"));
-            await expect
-              .poll(() => page.locator("html").getAttribute("data-theme-mode"))
-              .toBe("dark");
+            await pollAttribute(page.locator("html"), "data-theme-mode").toBe("dark");
             await captureNewSessionComposerUiProof(suite, page, "mobile-setup-dark.png");
             await evaluateControlUiContext(page, (context) => context.theme.setMode("light"));
           }
@@ -132,7 +146,7 @@ suite.define(() => {
         await page.setViewportSize({ width: 320, height: 700 });
         for (const selector of await selectors.all()) {
           await selector.click();
-          await expect.poll(() => selector.getAttribute("aria-expanded")).toBe("true");
+          await pollAttribute(selector, "aria-expanded").toBe("true");
           const panelSelector =
             ".oc-popover.new-session-page__picker-popover:popover-open, .agent-select__menu:popover-open";
           await waitForLayoutSettled(page, panelSelector);
@@ -141,20 +155,18 @@ suite.define(() => {
           expect(panelBox!.x + panelBox!.width).toBeLessThanOrEqual(320);
           expect(await page.evaluate(() => window.scrollX)).toBe(0);
           await page.keyboard.press("Escape");
-          await expect.poll(() => selector.getAttribute("aria-expanded")).toBe("false");
+          await pollAttribute(selector, "aria-expanded").toBe("false");
           await selector.focus();
           await page.keyboard.press("Enter");
-          await expect.poll(() => selector.getAttribute("aria-expanded")).toBe("true");
+          await pollAttribute(selector, "aria-expanded").toBe("true");
           await page.keyboard.press("Escape");
-          await expect.poll(() => selector.getAttribute("aria-expanded")).toBe("false");
+          await pollAttribute(selector, "aria-expanded").toBe("false");
         }
         await checkout.click();
         const baseRef = page.locator("#new-session-worktree-base-ref");
         await baseRef.fill("feature/mobile-layout-with-a-long-branch-name");
         await page.keyboard.press("Escape");
-        await expect
-          .poll(() => checkout.textContent())
-          .toContain("feature/mobile-layout-with-a-long-branch-name");
+        await pollText(checkout).toContain("feature/mobile-layout-with-a-long-branch-name");
         const triggerRow = page.locator(".new-session-page__triggers");
         expect(
           await triggerRow.evaluate((element) => element.scrollWidth <= element.clientWidth),
@@ -191,25 +203,19 @@ suite.define(() => {
     await suite.withPage({ viewport: { width: 1280, height: 900 } }, async ({ page }) => {
       await installMockGateway(page, {
         methodResponses: {
-          "sessions.list": {
-            count: 0,
-            defaults: { contextTokens: null, model: null, modelProvider: null },
-            path: "",
-            sessions: [],
-            ts: Date.now(),
-          },
+          "sessions.list": sessionList([]),
         },
       });
 
       await page.goto(`${suite.server.baseUrl}new`);
       const suggestions = page.locator(".agent-chat__suggestion:visible");
-      await expect.poll(() => suggestions.count()).toBe(4);
+      await pollCount(suggestions).toBe(4);
 
       await page.setViewportSize({ width: 390, height: 844 });
-      await expect.poll(() => suggestions.count()).toBe(0);
+      await pollCount(suggestions).toBe(0);
 
       await page.setViewportSize({ width: 1280, height: 900 });
-      await expect.poll(() => suggestions.count()).toBe(4);
+      await pollCount(suggestions).toBe(4);
     });
   });
 
@@ -221,47 +227,34 @@ suite.define(() => {
       });
       await installMockGateway(page, {
         methodResponses: {
-          "sessions.list": {
-            count: 4,
-            defaults: { contextTokens: null, model: null, modelProvider: null },
-            path: "",
-            sessions: [
+          "sessions.list": sessionList(
+            [
               {
-                key: "agent:main:dashboard:theme",
-                kind: "direct",
-                label: "Install and set up theme",
-                updatedAt: now - 5_000,
+                ...recent("theme", "Install and set up theme", now - 5_000),
                 ...checkout("neat-lobster"),
               },
               {
-                key: "agent:main:dashboard:pr",
-                kind: "direct",
-                label: "I'll pull the PR details and diff from GitHub and summarize the review",
-                updatedAt: now - 32 * 60_000,
+                ...recent(
+                  "pr",
+                  "I'll pull the PR details and diff from GitHub and summarize the review",
+                  now - 32 * 60_000,
+                ),
                 ...checkout(),
               },
               {
-                key: "agent:main:dashboard:clawhub",
-                kind: "direct",
-                label: "ClawHub app detection via deeplinks",
-                updatedAt: now - 2 * 86_400_000,
+                ...recent("clawhub", "ClawHub app detection via deeplinks", now - 2 * 86_400_000),
                 ...checkout("tender-krill"),
               },
-              {
-                key: "agent:main:dashboard:ads",
-                kind: "direct",
-                label: "Stop Facebook and Google ads",
-                updatedAt: now - 5 * 86_400_000,
-              },
+              recent("ads", "Stop Facebook and Google ads", now - 5 * 86_400_000),
             ],
-            ts: now,
-          },
+            now,
+          ),
         },
       });
 
       await page.goto(`${suite.server.baseUrl}new`);
       const rows = page.locator(".agent-chat__recent");
-      await expect.poll(() => rows.count()).toBe(4);
+      await pollCount(rows).toBe(4);
       await page.evaluate(() => document.fonts.ready);
       // A narrow chat pane; the second pass lets inherited text wrap, as a
       // theme or plugin stylesheet may, which must not squeeze the timestamp.
@@ -309,25 +302,12 @@ suite.define(() => {
     await suite.withPage({ viewport: { width: 320, height: 568 } }, async ({ page }) => {
       await installMockGateway(page, {
         methodResponses: {
-          "sessions.list": {
-            count: 1,
-            defaults: { contextTokens: null, model: null, modelProvider: null },
-            path: "",
-            sessions: [
-              {
-                key: "agent:main:dashboard:recent",
-                kind: "direct",
-                label: "Recent work",
-                updatedAt: Date.now(),
-              },
-            ],
-            ts: Date.now(),
-          },
+          "sessions.list": sessionList([recent("recent", "Recent work", Date.now())]),
         },
       });
 
       await page.goto(`${suite.server.baseUrl}new`);
-      await expect.poll(() => page.locator(".agent-chat__recent").count()).toBe(1);
+      await pollCount(page.locator(".agent-chat__recent")).toBe(1);
       expect(await page.locator(".agent-chat__recent").isVisible()).toBe(false);
       const scroll = page.locator(".new-session-page__scroll");
       const composer = page.locator(".new-session-page__composer");
@@ -388,10 +368,8 @@ suite.define(() => {
       });
       await page.getByRole("option", { name: /Bob/ }).click();
       const preview = page.locator(".new-session-page__composer .chat-reply-preview");
-      await expect.poll(() => preview.textContent()).toContain("Will notify");
-      await expect
-        .poll(() => preview.locator(".composer-context-strip__person-name").textContent())
-        .toBe("Bob");
+      await pollText(preview).toContain("Will notify");
+      await pollText(preview.locator(".composer-context-strip__person-name")).toBe("Bob");
       const remove = preview.getByRole("button", { name: "Remove mention" });
 
       for (const viewport of [
@@ -451,7 +429,7 @@ suite.define(() => {
       }
 
       await remove.click();
-      await expect.poll(() => preview.count()).toBe(0);
+      await pollCount(preview).toBe(0);
       expect(await textarea.inputValue()).toBe("@Bob ");
       await captureNewSessionComposerUiProof(suite, page, "cold-mention-removed.png");
     });

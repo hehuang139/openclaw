@@ -1,3 +1,4 @@
+import type { Locator } from "playwright";
 import { expect, it } from "vitest";
 import type { ChatPageHost } from "../pages/chat/chat-state-host.ts";
 import {
@@ -6,6 +7,7 @@ import {
   createCloudAgentsListResponse,
   createNewSessionPageE2eSuite,
   createdSessionListResult,
+  LOCAL_GIT_WORKSPACE_RESPONSES,
   expectPastedPngImage,
   installMockGateway,
   pastePng,
@@ -13,10 +15,31 @@ import {
   pollLocatorText,
   replaceGatewayClient,
   waitForCommittedChatRoute,
+  pollCount,
 } from "./new-session-page.test-support.ts";
 import { holdRecoveryDigest } from "./session-placement-recovery-module-boundaries.test-support.ts";
 
 const suite = createNewSessionPageE2eSuite();
+const startupResponses = (sessionKey: string) => ({
+  "agents.list": createCloudAgentsListResponse(),
+  "environments.list": { environments: [], profiles: [{ id: "aws", providerId: "crabbox" }] },
+  "worktrees.branches": LOCAL_GIT_WORKSPACE_RESPONSES["worktrees.branches"],
+  "sessions.create": { key: sessionKey },
+  "sessions.list": createdSessionListResult(sessionKey),
+});
+async function sendOrdinaryTurn(pane: Locator) {
+  return pane.evaluate(async (element) => {
+    const { state } = element as HTMLElement & { state: ChatPageHost };
+    state.handleChatDraftChange("later ordinary turn");
+    await state.handleSendChat();
+    return { draft: state.chatMessage, queued: state.chatQueue.map((item) => item.text) };
+  });
+}
+async function expectFailedGroup(group: Locator) {
+  await group.waitFor({ state: "visible" });
+  await pollLocatorText(group.locator(".chat-send-status")).toContain("Not sent");
+  await expectPastedPngImage(group.locator("img.chat-message-image"));
+}
 
 suite.define(() => {
   it.each(["cancelled", "failed", "unconfirmed"] as const)(
@@ -34,18 +57,8 @@ suite.define(() => {
             ...(outcome === "unconfirmed" ? ["sessions.send", "chat.history"] : []),
           ],
           methodResponses: {
-            "agents.list": createCloudAgentsListResponse(),
-            "environments.list": {
-              environments: [],
-              profiles: [{ id: "aws", providerId: "crabbox" }],
-            },
-            "worktrees.branches": {
-              branches: [{ kind: "local", name: "main" }],
-              defaultBranch: "main",
-              repositoryStatus: "git",
-            },
+            ...startupResponses(sessionKey),
             "sessions.create": { key: sessionKey, sessionId: "incognito-startup" },
-            "sessions.list": createdSessionListResult(sessionKey),
             "sessions.describe": { session: { sessionId: "incognito-startup" } },
           },
         });
@@ -93,7 +106,7 @@ suite.define(() => {
           await gateway.setMethodResponse("sessions.describe", { session: null });
           await gateway.resolveDeferred("sessions.dispatch", {});
           await pollLocatorText(retained).toContain("Your prompt is kept here");
-          await expect.poll(() => working.count()).toBe(0);
+          await pollCount(working).toBe(0);
           expect(
             await retained.locator(".agent-chat__composer-shell button:enabled:visible").count(),
           ).toBe(0);
@@ -108,7 +121,7 @@ suite.define(() => {
             },
           );
           await pollLocatorText(retained.getByRole("alert")).toContain(diagnostic);
-          await expect.poll(() => working.count()).toBe(0);
+          await pollCount(working).toBe(0);
           expect(await retained.textContent()).not.toContain("temporary session was cleaned up");
           const action = retained.getByRole("button", {
             name: outcome === "unconfirmed" ? "Check delivery" : "Retry",
@@ -174,18 +187,7 @@ suite.define(() => {
             featureMethods: ["sessions.create", "sessions.dispatch", "chat.startup"],
             workspaceGit: true,
             methodResponses: {
-              "agents.list": createCloudAgentsListResponse(),
-              "environments.list": {
-                environments: [],
-                profiles: [{ id: "aws", providerId: "crabbox" }],
-              },
-              "worktrees.branches": {
-                branches: [{ kind: "local", name: "main" }],
-                defaultBranch: "main",
-                repositoryStatus: "git",
-              },
-              "sessions.create": { key: sessionKey },
-              "sessions.list": createdSessionListResult(sessionKey),
+              ...startupResponses(sessionKey),
               "sessions.describe": { session: {} },
               "chat.history": {
                 messages: [],
@@ -202,6 +204,7 @@ suite.define(() => {
             .getByRole("button", { name: "aws", exact: true })
             .click();
           const composer = page.locator(".new-session-page__message");
+          const chatComposer = page.locator(".agent-chat__composer-combobox textarea");
           await composer.fill(message);
           await pastePng(composer);
           await page.getByRole("button", { name: "Start session" }).click();
@@ -233,7 +236,7 @@ suite.define(() => {
 
           const alert = page.getByRole("alert").filter({ hasText: "cloud profile was removed" });
           await pollLocatorText(alert).toContain("cloud profile was removed");
-          await expect.poll(() => working.count()).toBe(0);
+          await pollCount(working).toBe(0);
           expect(await alert.locator("summary").count()).toBe(1);
           await alert.locator("summary").click();
           const text = alert.locator("pre");
@@ -247,9 +250,7 @@ suite.define(() => {
           expect(await gateway.getRequests("sessions.send")).toHaveLength(0);
           expect(await gateway.getRequests("sessions.delete")).toHaveLength(0);
           const failedGroup = page.locator(".chat-group.user", { hasText: message });
-          await failedGroup.waitFor({ state: "visible" });
-          await pollLocatorText(failedGroup.locator(".chat-send-status")).toContain("Not sent");
-          await expectPastedPngImage(failedGroup.locator("img.chat-message-image"));
+          await expectFailedGroup(failedGroup);
           if (disconnect) {
             await gateway.setOnline(false);
             if (replaceClient) {
@@ -264,15 +265,8 @@ suite.define(() => {
               )
               .toBe(false);
             // Use the public page action: non-composer callers must share admission.
-            const offline = await pane.evaluate(async (element) => {
-              const { state } = element as HTMLElement & { state: ChatPageHost };
-              state.handleChatDraftChange("later ordinary turn");
-              await state.handleSendChat();
-              return { draft: state.chatMessage, queued: state.chatQueue.map((item) => item.text) };
-            });
-            const composerDisabled = await page
-              .locator(".agent-chat__composer-combobox textarea")
-              .isDisabled();
+            const offline = await sendOrdinaryTurn(pane);
+            const composerDisabled = await chatComposer.isDisabled();
             await failedGroup.waitFor({ state: "visible" });
             await pollLocatorText(pane.locator(".chat-working-indicator")).toContain(
               "Reconnecting",
@@ -298,9 +292,7 @@ suite.define(() => {
               offline: { draft: "", queued: ["later ordinary turn"] },
               sends: [],
             });
-            expect(await page.locator(".agent-chat__composer-combobox textarea").inputValue()).toBe(
-              "",
-            );
+            expect(await chatComposer.inputValue()).toBe("");
             expect(await gateway.getRequests("sessions.dispatch")).toHaveLength(1);
           } else {
             if (coldScope) {
@@ -321,18 +313,8 @@ suite.define(() => {
                 )
                 .toBe(true);
               expect(await failedGroup.count()).toBe(0);
-              const blocked = await pane.evaluate(async (element) => {
-                const { state } = element as HTMLElement & { state: ChatPageHost };
-                state.handleChatDraftChange("later ordinary turn");
-                await state.handleSendChat();
-                return {
-                  draft: state.chatMessage,
-                  queued: state.chatQueue.map((item) => item.text),
-                };
-              });
-              const composerDisabled = await page
-                .locator(".agent-chat__composer-combobox textarea")
-                .isDisabled();
+              const blocked = await sendOrdinaryTurn(pane);
+              const composerDisabled = await chatComposer.isDisabled();
               const heldSend = pane.getByRole("button", {
                 name: "Finishing connection recovery. Try sending again when it is ready.",
                 exact: true,
@@ -360,9 +342,7 @@ suite.define(() => {
               expect(composerDisabled).toBe(false);
             }
           }
-          await failedGroup.waitFor({ state: "visible" });
-          await pollLocatorText(failedGroup.locator(".chat-send-status")).toContain("Not sent");
-          await expectPastedPngImage(failedGroup.locator("img.chat-message-image"));
+          await expectFailedGroup(failedGroup);
           expect(await gateway.getRequests("sessions.dispatch")).toHaveLength(disconnect ? 1 : 0);
           expect(await gateway.getRequests("sessions.send")).toHaveLength(0);
           if (disconnect) {
@@ -387,9 +367,7 @@ suite.define(() => {
           });
           expect(await gateway.getRequests("sessions.create")).toHaveLength(disconnect ? 1 : 0);
           if (disconnect || coldScope) {
-            expect(await page.locator(".agent-chat__composer-combobox textarea").inputValue()).toBe(
-              disconnect ? "" : "later ordinary turn",
-            );
+            expect(await chatComposer.inputValue()).toBe(disconnect ? "" : "later ordinary turn");
             if (disconnect) {
               const follower = await gateway.waitForRequest("chat.send");
               expect(follower.params).toMatchObject({ sessionKey, message: "later ordinary turn" });

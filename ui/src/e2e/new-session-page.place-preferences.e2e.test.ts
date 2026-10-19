@@ -1,5 +1,7 @@
 import { gatewayOriginScope } from "@openclaw/gateway-client/browser";
+import type { Page } from "playwright";
 import { expect, it } from "vitest";
+import type { NewSessionPreference } from "../pages/new-session/preferences.ts";
 import {
   waitForControlUiGatewayReady,
   waitForControlUiGatewayReconnecting,
@@ -11,6 +13,9 @@ import {
   createNewSessionPageE2eSuite,
   installMockGateway,
   pollLocatorText,
+  pollAttribute,
+  pollValue,
+  pollEnabled,
 } from "./new-session-page.test-support.ts";
 
 const suite = createNewSessionPageE2eSuite();
@@ -25,6 +30,36 @@ const REGISTERED_PROJECT = {
   repoRoot: "/srv/registered",
   source: "registered",
 };
+
+const savedSetup = (setup: NewSessionPreference) => ({
+  workspace: WORKSPACE,
+  folder: WORKSPACE,
+  ...setup,
+});
+const durablePreferences = (setup: NewSessionPreference) => ({
+  status: "ok",
+  entries: { "new-session.migration.v1": true, "new-session.v1:main": savedSetup(setup) },
+});
+async function seedLocalPreferences(page: Page, setup: NewSessionPreference) {
+  const url = new URL(suite.server.baseUrl);
+  const gateway = `${url.protocol === "https:" ? "wss:" : "ws:"}//${url.host}`;
+  await page.addInitScript(({ key, value }) => localStorage.setItem(key, JSON.stringify(value)), {
+    key: `openclaw.new-session.preferences.v1:${gatewayOriginScope(gateway)}`,
+    value: { agents: { main: savedSetup(setup) } },
+  });
+}
+async function tryBlockedSubmission(page: Page) {
+  await page.getByRole("button", { name: "Start session", exact: true }).click({ force: true });
+  const message = page.locator(".new-session-page__message");
+  await message.press("Enter");
+  await message.press("Control+Enter");
+}
+async function reconnect(page: Page, gateway: Awaited<ReturnType<typeof installMockGateway>>) {
+  await gateway.setOnline(false);
+  await waitForControlUiGatewayReconnecting(page);
+  await gateway.setOnline(true);
+  await waitForControlUiGatewayReady(page);
+}
 
 suite.define(() => {
   it.each(["rejected", "unavailable"] as const)(
@@ -43,13 +78,7 @@ suite.define(() => {
           ],
           deferredMethods: ["worktrees.branches"],
           methodResponses: {
-            "users.prefs.get": {
-              status: "ok",
-              entries: {
-                "new-session.migration.v1": true,
-                "new-session.v1:main": { workspace: WORKSPACE, folder: WORKSPACE, worktree: true },
-              },
-            },
+            "users.prefs.get": durablePreferences({ worktree: true }),
             "users.prefs.set": { status: "ok" },
             "worktrees.branches": GIT_BRANCHES,
           },
@@ -60,9 +89,7 @@ suite.define(() => {
         const start = page.getByRole("button", { name: "Start session", exact: true });
         await message.fill("keep this task isolated");
         // Reasoned blocks intentionally accept clicks to explain why Start is gated.
-        await start.click({ force: true });
-        await message.press("Enter");
-        await message.press("Control+Enter");
+        await tryBlockedSubmission(page);
         expect(await gateway.getRequests("sessions.create")).toHaveLength(0);
         const restoring = page
           .locator(".agent-chat__composer-status-text")
@@ -85,22 +112,17 @@ suite.define(() => {
         expect(await start.getAttribute("aria-disabled")).toBe("true");
         const checkout = page.locator("#new-session-checkout-trigger");
         expect(await checkout.getAttribute("data-worktree")).toBe("true");
-        await start.click({ force: true });
-        await message.press("Enter");
-        await message.press("Control+Enter");
+        await tryBlockedSubmission(page);
         expect(await gateway.getRequests("sessions.create")).toHaveLength(0);
 
         if (result === "rejected") {
-          await gateway.setOnline(false);
-          await waitForControlUiGatewayReconnecting(page);
-          await gateway.setOnline(true);
-          await waitForControlUiGatewayReady(page);
-          await expect.poll(() => start.getAttribute("aria-disabled")).toBe("false");
+          await reconnect(page, gateway);
+          await pollAttribute(start, "aria-disabled").toBe("false");
         } else {
           await checkout.click();
           await page.getByRole("button", { name: "Current checkout", exact: true }).click();
           await page.keyboard.press("Escape");
-          await expect.poll(() => start.getAttribute("aria-disabled")).toBe("false");
+          await pollAttribute(start, "aria-disabled").toBe("false");
         }
         await start.click();
         const create = await gateway.waitForRequest("sessions.create");
@@ -118,119 +140,75 @@ suite.define(() => {
   );
 
   it("ignores a restored cloud preference for a write-scoped caller", async () => {
-    const context = await suite.browser.newContext({ locale: "en-US", serviceWorkers: "block" });
-    const page = await context.newPage();
-    const appUrl = new URL(suite.server.baseUrl);
-    const gatewayUrl = `${appUrl.protocol === "https:" ? "wss:" : "ws:"}//${appUrl.host}`;
-    const storageKey = `openclaw.new-session.preferences.v1:${gatewayOriginScope(gatewayUrl)}`;
-    await page.addInitScript(
-      ({ key, workspace }) => {
-        localStorage.setItem(
-          key,
-          JSON.stringify({
-            agents: {
-              main: { workspace, folder: workspace, where: { kind: "cloud", id: "aws" } },
-            },
-          }),
-        );
-      },
-      { key: storageKey, workspace: WORKSPACE },
-    );
-    const gateway = await installMockGateway(page, {
-      workspace: WORKSPACE,
-      workspaceGit: true,
-      operatorScopes: ["operator.read", "operator.write"],
-      methodResponses: {
-        "environments.list": {
-          environments: [
-            {
-              id: "node:writer-runner",
-              type: "node",
-              label: "Writer runner",
-              status: "available",
-              sessionHost: true,
-              workerSlots: { total: 1, available: 1 },
-            },
-          ],
-          profiles: [{ id: "aws", providerId: "crabbox" }],
+    await suite.withPage({ locale: "en-US", serviceWorkers: "block" }, async ({ page }) => {
+      await seedLocalPreferences(page, { where: { kind: "cloud", id: "aws" } });
+      const gateway = await installMockGateway(page, {
+        workspace: WORKSPACE,
+        workspaceGit: true,
+        operatorScopes: ["operator.read", "operator.write"],
+        methodResponses: {
+          "environments.list": {
+            environments: [
+              {
+                id: "node:writer-runner",
+                type: "node",
+                label: "Writer runner",
+                status: "available",
+                sessionHost: true,
+                workerSlots: { total: 1, available: 1 },
+              },
+            ],
+            profiles: [{ id: "aws", providerId: "crabbox" }],
+          },
+          "worktrees.branches": GIT_BRANCHES,
         },
-        "worktrees.branches": GIT_BRANCHES,
-      },
-    });
+      });
 
-    try {
       await page.goto(`${suite.server.baseUrl}new`);
       await gateway.waitForRequest("environments.list");
       const where = page.locator("#new-session-where-trigger");
-      await expect.poll(() => where.getAttribute("data-cloud-profile")).toBeNull();
+      await pollAttribute(where, "data-cloud-profile").toBeNull();
       await where.click();
       const picker = page.locator(".oc-popover.new-session-page__where-popover");
       await picker.locator('[data-value="device:writer-runner"]').waitFor();
       expect(await picker.locator('[data-value="cloud:aws"]').count()).toBe(0);
       await page.keyboard.press("Escape");
       await page.locator(".new-session-page__message").fill("start locally");
-      await expect
-        .poll(() => page.getByRole("button", { name: "Start session" }).isEnabled())
-        .toBe(true);
-    } finally {
-      await context.close();
-    }
+      await pollEnabled(page.getByRole("button", { name: "Start session" })).toBe(true);
+    });
   });
 
   it("restores three-chip defaults from local storage without a durable identity", async () => {
-    const context = await suite.browser.newContext({ locale: "en-US", serviceWorkers: "block" });
-    const page = await context.newPage();
-    const appUrl = new URL(suite.server.baseUrl);
-    const gatewayUrl = `${appUrl.protocol === "https:" ? "wss:" : "ws:"}//${appUrl.host}`;
-    const storageKey = `openclaw.new-session.preferences.v1:${gatewayOriginScope(gatewayUrl)}`;
-    await page.addInitScript(
-      ({ key, workspace }) => {
-        localStorage.setItem(
-          key,
-          JSON.stringify({
-            agents: {
-              main: {
-                workspace,
-                folder: workspace,
-                where: { kind: "local" },
-                projectId: "registered",
-                worktree: true,
-                baseRef: "release/local",
-                worktreeName: "browser-task",
-              },
-            },
-          }),
-        );
-      },
-      { key: storageKey, workspace: WORKSPACE },
-    );
-    const gateway = await installMockGateway(page, {
-      workspace: WORKSPACE,
-      workspaceGit: true,
-      featureMethods: ["projects.list", "sessions.create", "worktrees.branches"],
-      methodResponses: {
-        "projects.list": { projects: [REGISTERED_PROJECT], recents: [] },
-        "worktrees.branches": GIT_BRANCHES,
-      },
-    });
+    await suite.withPage({ locale: "en-US", serviceWorkers: "block" }, async ({ page }) => {
+      await seedLocalPreferences(page, {
+        where: { kind: "local" },
+        projectId: "registered",
+        worktree: true,
+        baseRef: "release/local",
+        worktreeName: "browser-task",
+      });
+      const gateway = await installMockGateway(page, {
+        workspace: WORKSPACE,
+        workspaceGit: true,
+        featureMethods: ["projects.list", "sessions.create", "worktrees.branches"],
+        methodResponses: {
+          "projects.list": { projects: [REGISTERED_PROJECT], recents: [] },
+          "worktrees.branches": GIT_BRANCHES,
+        },
+      });
 
-    try {
       await page.goto(`${suite.server.baseUrl}new`);
       const project = page.locator("#new-session-project-trigger");
       const checkout = page.locator("#new-session-checkout-trigger");
-      await expect.poll(() => project.getAttribute("data-project-id")).toBe("registered");
+      await pollAttribute(project, "data-project-id").toBe("registered");
       await pollLocatorText(project.locator(".new-session-page__trigger-label")).toBe("Registered");
-      await expect.poll(() => checkout.getAttribute("data-worktree")).toBe("true");
+      await pollAttribute(checkout, "data-worktree").toBe("true");
       await checkout.click();
-      await expect.poll(() => checkoutBaseRefInput(page).inputValue()).toBe("release/local");
-      await expect
-        .poll(() => page.getByLabel("Name", { exact: true }).inputValue())
-        .toBe("browser-task");
+      await pollValue(checkoutBaseRefInput(page)).toBe("release/local");
+      await pollValue(page.getByLabel("Name", { exact: true })).toBe("browser-task");
       expect(await gateway.getRequests("users.prefs.get")).toHaveLength(0);
       expect(await gateway.getRequests("users.prefs.set")).toHaveLength(0);
-    } finally {
-      await context.close();
-    }
+    });
   });
 
   it("keeps saved project submission gated after discovery fails until reconnect restores it", async () => {
@@ -241,17 +219,7 @@ suite.define(() => {
         featureMethods: ["users.prefs.get", "users.prefs.set", "sessions.create", "projects.list"],
         deferredMethods: ["projects.list"],
         methodResponses: {
-          "users.prefs.get": {
-            status: "ok",
-            entries: {
-              "new-session.migration.v1": true,
-              "new-session.v1:main": {
-                workspace: WORKSPACE,
-                folder: WORKSPACE,
-                projectId: REGISTERED_PROJECT.id,
-              },
-            },
-          },
+          "users.prefs.get": durablePreferences({ projectId: REGISTERED_PROJECT.id }),
           "users.prefs.set": { status: "ok" },
           "projects.list": { projects: [REGISTERED_PROJECT], recents: [] },
           "worktrees.branches": GIT_BRANCHES,
@@ -271,15 +239,10 @@ suite.define(() => {
       });
       await captureUiProof(suite, page, "saved-project-rejected.png");
       expect(await start.getAttribute("aria-disabled")).toBe("true");
-      await start.click({ force: true });
-      await message.press("Enter");
-      await message.press("Control+Enter");
+      await tryBlockedSubmission(page);
       expect(await gateway.getRequests("sessions.create")).toHaveLength(0);
 
-      await gateway.setOnline(false);
-      await waitForControlUiGatewayReconnecting(page);
-      await gateway.setOnline(true);
-      await waitForControlUiGatewayReady(page);
+      await reconnect(page, gateway);
       await page.locator('#new-session-project-trigger[data-project-id="registered"]').waitFor();
       await start.click();
       const create = await gateway.waitForRequest("sessions.create");
@@ -291,69 +254,53 @@ suite.define(() => {
   });
 
   it("restores identity-scoped Where, What, and Checkout defaults after discovery", async () => {
-    const context = await suite.browser.newContext({ locale: "en-US", serviceWorkers: "block" });
-    const page = await context.newPage();
-    const gateway = await installMockGateway(page, {
-      workspace: WORKSPACE,
-      workspaceGit: true,
-      presenceUsers: [{ self: true, id: "profile-alice", name: "Alice" }],
-      featureMethods: [
-        "chat.metadata",
-        "chat.startup",
-        "environments.list",
-        "projects.list",
-        "sessions.create",
-        "users.prefs.get",
-        "users.prefs.set",
-        "worktrees.branches",
-      ],
-      methodResponses: {
-        "environments.list": {
-          environments: [{ id: "gateway", type: "local", status: "available" }],
-          profiles: [{ id: "aws", providerId: "crabbox" }],
-        },
-        "projects.list": { projects: [REGISTERED_PROJECT], recents: [] },
-        "users.prefs.get": {
-          status: "ok",
-          entries: {
-            "new-session.migration.v1": true,
-            "new-session.v1:main": {
-              workspace: WORKSPACE,
-              folder: WORKSPACE,
-              where: { kind: "cloud", id: "aws" },
-              projectId: "registered",
-              worktree: true,
-              baseRef: "release/next",
-              worktreeName: "identity-task",
-            },
+    await suite.withPage({ locale: "en-US", serviceWorkers: "block" }, async ({ page }) => {
+      const gateway = await installMockGateway(page, {
+        workspace: WORKSPACE,
+        workspaceGit: true,
+        presenceUsers: [{ self: true, id: "profile-alice", name: "Alice" }],
+        featureMethods: [
+          "chat.metadata",
+          "chat.startup",
+          "environments.list",
+          "projects.list",
+          "sessions.create",
+          "users.prefs.get",
+          "users.prefs.set",
+          "worktrees.branches",
+        ],
+        methodResponses: {
+          "environments.list": {
+            environments: [{ id: "gateway", type: "local", status: "available" }],
+            profiles: [{ id: "aws", providerId: "crabbox" }],
           },
+          "projects.list": { projects: [REGISTERED_PROJECT], recents: [] },
+          "users.prefs.get": durablePreferences({
+            where: { kind: "cloud", id: "aws" },
+            projectId: "registered",
+            worktree: true,
+            baseRef: "release/next",
+            worktreeName: "identity-task",
+          }),
+          "users.prefs.set": { status: "ok" },
+          "worktrees.branches": GIT_BRANCHES,
         },
-        "users.prefs.set": { status: "ok" },
-        "worktrees.branches": GIT_BRANCHES,
-      },
-    });
+      });
 
-    try {
       await page.goto(`${suite.server.baseUrl}new`);
       await gateway.waitForRequest("users.prefs.get");
       const where = page.locator("#new-session-where-trigger");
       const project = page.locator("#new-session-project-trigger");
       const checkout = page.locator("#new-session-checkout-trigger");
-      await expect.poll(() => where.getAttribute("data-cloud-profile")).toBe("aws");
+      await pollAttribute(where, "data-cloud-profile").toBe("aws");
       await pollLocatorText(where.locator(".new-session-page__trigger-label")).toBe("aws");
-      await expect.poll(() => project.getAttribute("data-project-id")).toBe("registered");
+      await pollAttribute(project, "data-project-id").toBe("registered");
       await pollLocatorText(project.locator(".new-session-page__trigger-label")).toBe("Registered");
-      await expect.poll(() => checkout.getAttribute("data-worktree")).toBe("true");
+      await pollAttribute(checkout, "data-worktree").toBe("true");
       await checkout.click();
       const checkoutPopover = page.locator(".oc-popover.new-session-page__checkout-popover");
-      await expect
-        .poll(() => checkoutBaseRefInput(checkoutPopover).inputValue())
-        .toBe("release/next");
-      await expect
-        .poll(() => checkoutPopover.getByLabel("Name", { exact: true }).inputValue())
-        .toBe("identity-task");
-    } finally {
-      await context.close();
-    }
+      await pollValue(checkoutBaseRefInput(checkoutPopover)).toBe("release/next");
+      await pollValue(checkoutPopover.getByLabel("Name", { exact: true })).toBe("identity-task");
+    });
   });
 });
