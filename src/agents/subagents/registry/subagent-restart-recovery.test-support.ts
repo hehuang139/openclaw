@@ -40,7 +40,6 @@ import {
   activateSubagentRegistry,
   resetSubagentRegistryForTests,
 } from "./subagent-registry.test-helpers.js";
-import type { SubagentRunRecord } from "./subagent-registry.types.js";
 
 // mock-isolation: Registry recovery owns both announcement exports without loading delivery state.
 vi.mock("../announce/subagent-announce.js", () => ({
@@ -54,9 +53,7 @@ vi.mock("../../../infra/agent-events.js", async (importOriginal) => {
   return { ...actual, onAgentEvent: vi.fn(actual.onAgentEvent) };
 });
 
-export function makeRestartRecoveryRun(
-  overrides: Partial<SubagentRunRecordOverrides>,
-): SubagentRunRecord {
+export function makeRestartRecoveryRun(overrides: Partial<SubagentRunRecordOverrides>) {
   return createCanonicalSubagentRunFixture(
     createSubagentRunRecord({
       runId: "run",

@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
-import { awaitGateBeforeSettlement, createDeferred } from "../../../../test/helpers/promise.js";
+import { createDeferred } from "../../../../test/helpers/promise.js";
 import { getRuntimeConfig } from "../../../config/config.js";
 import {
   clearRuntimeConfigSnapshot,
@@ -28,7 +28,6 @@ import {
   reserveSessionControllerSource,
   retireSessionControllerInput,
 } from "../../../sessions/session-controller.mailbox.js";
-import { executeExistingOpenClawStateRead } from "../../../state/openclaw-state-db-readonly.js";
 import * as stateWorker from "../../../state/openclaw-state-worker-store.js";
 import { observeMainThreadSql } from "../../../test-utils/main-thread-sql-spies.test-support.js";
 import { createEmbeddedRunHandle } from "../../embedded-agent-runner/runs.test-support.js";
@@ -38,11 +37,13 @@ import {
   detachActiveEmbeddedRun,
 } from "./subagent-control-native.test-support.js";
 import { prepareSubagentKillSession } from "./subagent-control-session.js";
-import { mutateSubagentRuns } from "./subagent-registry-persistence.js";
 import { reconcileDurableSubagentKillIntent } from "./subagent-registry-sweep-kill.js";
 import { registerSubagentSweepKillCustodyTests } from "./subagent-registry-sweeper-kill-custody.test-support.js";
 import { retireSupersededSubagentRun } from "./subagent-registry-sweeper-retire.js";
 import {
+  createSweepGate,
+  persistRuns,
+  readPersistedRuns,
   registerSubagentSweeperSessionReadTests,
   registerSubagentSweepCompletionRecoveryTests,
   registerSubagentSweepRetainedAuthorityTests,
@@ -234,35 +235,20 @@ describe("subagent registry recovery scheduling", () => {
         { sessionKey: sibling.childSessionKey, env: state.env },
         { ...sessionEntry, sessionId: "sibling-session", status: undefined },
       );
-      const completion = createDeferred();
-      const completionStarted = createDeferred();
-      completeSubagentRunWithRecovery.mockImplementationOnce(() => {
-        completionStarted.resolve();
-        return completion.promise;
-      });
-      const pending = sweeper.sweepOnce();
-      try {
-        await awaitGateBeforeSettlement(
-          completionStarted.promise,
-          pending,
-          "Sweep settled before entering the held completion",
-        );
+      const gate = createSweepGate();
+      completeSubagentRunWithRecovery.mockImplementationOnce(gate.wait);
+      await gate.check(sweeper, async (finish) => {
         expect(completeSubagentRunWithRecovery).toHaveBeenCalledOnce();
         replaceSessionEntrySync(
           { sessionKey: sibling.childSessionKey, env: state.env },
           { ...sessionEntry, sessionId: "sibling-session", status: "done", endedAt: Date.now() },
         );
-        completion.resolve();
-        await pending;
+        await finish();
         expect(completeSubagentRunWithRecovery).toHaveBeenLastCalledWith(
           expect.objectContaining({ runId: sibling.runId, outcome: { status: "ok" } }),
           "sweeper-session-completion",
         );
-      } finally {
-        completion.resolve();
-        await pending;
-        await sweeper.reset();
-      }
+      });
     });
   });
 
@@ -274,38 +260,61 @@ describe("subagent registry recovery scheduling", () => {
     "does not finalize interrupted work after its Gateway %s changes during classification",
     async (change) => {
       const runtime = { current: createMockGatewayRecoveryRuntime() };
-      const classification = createDeferred<{ status: "terminal"; error: string }>();
-      recoverRow.mockReturnValue(classification.promise);
+      const gate = createSweepGate();
+      recoverRow.mockImplementationOnce(async () => {
+        await gate.wait();
+        return { status: "terminal", error: "Gateway restart" };
+      });
       const { finalizeInterruptedSubagentRun, completeSubagentRunWithRecovery, sweeper } =
         createHarness(runtime);
-      const pending = sweeper.sweepOnce();
-      try {
-        await vi.waitFor(() => expect(recoverRow).toHaveBeenCalledOnce());
+      await gate.check(sweeper, async (finish) => {
+        expect(recoverRow).toHaveBeenCalledOnce();
         if (change === "lifecycle") {
           rotateAgentEventLifecycleGeneration();
         } else {
           runtime.current = createMockGatewayRecoveryRuntime();
         }
-      } finally {
-        classification.resolve({ status: "terminal", error: "Gateway restart" });
-        await pending;
-      }
-      expect(finalizeInterruptedSubagentRun).not.toHaveBeenCalled();
-      expect(completeSubagentRunWithRecovery).not.toHaveBeenCalled();
+        await finish();
+        expect(finalizeInterruptedSubagentRun).not.toHaveBeenCalled();
+        expect(completeSubagentRunWithRecovery).not.toHaveBeenCalled();
+      });
     },
   );
 
-  it("retries terminal settlement without dispatching a child", async () => {
-    recoverRow.mockResolvedValue({ status: "terminal", error: "Gateway restart" });
-    const { entry, finalizeInterruptedSubagentRun, sweeper } = createHarness({});
-    finalizeInterruptedSubagentRun.mockResolvedValueOnce(0).mockResolvedValueOnce(1);
-    await sweeper.sweepOnce();
-    await vi.advanceTimersByTimeAsync(1_000);
-    expect(finalizeInterruptedSubagentRun).toHaveBeenCalledTimes(2);
-    expect(
-      finalizeInterruptedSubagentRun.mock.calls.every(([params]) => params.expectedEntry === entry),
-    ).toBe(true);
-  });
+  it.each([false, true])(
+    "retries terminal settlement only while its generation remains current (replacement=%s)",
+    async (replacement) => {
+      recoverRow.mockResolvedValue({
+        status: "terminal",
+        error: replacement ? "interrupted" : "Gateway restart",
+      });
+      const { entry, runs, finalizeInterruptedSubagentRun, sweeper } = createHarness(
+        replacement ? { current: createMockGatewayRecoveryRuntime() } : {},
+      );
+      const gate = createSweepGate();
+      finalizeInterruptedSubagentRun.mockResolvedValue(1).mockImplementationOnce(async () => {
+        await gate.wait();
+        return 0;
+      });
+      await gate.check(sweeper, async (finish) => {
+        expect(finalizeInterruptedSubagentRun).toHaveBeenCalledOnce();
+        if (replacement) {
+          const newer = run();
+          newer.runId = "newer-recovery-run";
+          newer.generation = (entry.generation ?? 0) + 1;
+          runs.set(newer.runId, newer);
+        }
+        await finish();
+        await vi.advanceTimersByTimeAsync(replacement ? 5_000 : 1_000);
+        expect(finalizeInterruptedSubagentRun).toHaveBeenCalledTimes(replacement ? 1 : 2);
+        expect(
+          finalizeInterruptedSubagentRun.mock.calls.every(
+            ([params]) => params.expectedEntry === entry,
+          ),
+        ).toBe(true);
+      });
+    },
+  );
 
   registerSubagentSweepCompletionRecoveryTests(() =>
     recoverRow.mockResolvedValue({ status: "ignored" }),
@@ -316,22 +325,15 @@ describe("subagent registry recovery scheduling", () => {
     async (change) => {
       const runtime = { current: createMockGatewayRecoveryRuntime() };
       const { entry, runs, callGateway, sweeper, warn } = createHarness(runtime, archivedRun());
-      const entered = createDeferred();
-      const release = createDeferred();
+      const gate = createSweepGate();
       const deleteSession = vi.fn();
       callGateway.mockImplementationOnce(async (request) => {
-        entered.resolve();
-        await release.promise;
+        await gate.wait();
         request.assertDispatchCurrent();
         deleteSession();
         return {};
       });
-      const pending = sweeper.sweepOnce().then(
-        () => undefined,
-        (error: unknown) => error,
-      );
-      try {
-        await entered.promise;
+      await gate.check(sweeper, async (finish) => {
         let retained = entry;
         if (change === "replacement" || change === "publication") {
           retained = { ...entry, label: "current row" };
@@ -344,9 +346,7 @@ describe("subagent registry recovery scheduling", () => {
         } else {
           runtime.current = createMockGatewayRecoveryRuntime();
         }
-        release.resolve();
-        const error = await pending;
-        expect(error).toBeUndefined();
+        expect(await finish()).toBeUndefined();
         expect(deleteSession).not.toHaveBeenCalled();
         expect(runs.get(entry.runId)).toBe(retained);
         expect(warn).toHaveBeenCalledWith(
@@ -360,11 +360,7 @@ describe("subagent registry recovery scheduling", () => {
             ),
           }),
         );
-      } finally {
-        release.resolve();
-        await pending;
-        await sweeper.reset();
-      }
+      });
     },
   );
 
@@ -482,29 +478,6 @@ describe("subagent registry recovery scheduling", () => {
     },
   );
 
-  it("drops a stale terminal retry when a newer generation wins during finalization", async () => {
-    const runtime = { current: createMockGatewayRecoveryRuntime() };
-    recoverRow.mockResolvedValue({ status: "terminal", error: "interrupted" });
-    const { entry, runs, finalizeInterruptedSubagentRun, sweeper } = createHarness(runtime);
-    const finalization = createDeferred<number>();
-    finalizeInterruptedSubagentRun.mockReturnValueOnce(finalization.promise);
-
-    const pending = sweeper.sweepOnce();
-    try {
-      await vi.waitFor(() => expect(finalizeInterruptedSubagentRun).toHaveBeenCalledOnce());
-      const newer = run();
-      newer.runId = "newer-recovery-run";
-      newer.generation = (entry.generation ?? 0) + 1;
-      runs.set(newer.runId, newer);
-    } finally {
-      finalization.resolve(0);
-      await pending;
-    }
-    await vi.advanceTimersByTimeAsync(5_000);
-
-    expect(finalizeInterruptedSubagentRun).toHaveBeenCalledOnce();
-  });
-
   it("coalesces duplicate schedules before the owner pass starts", async () => {
     const runtime = { current: createMockGatewayRecoveryRuntime() };
     recoverRow.mockResolvedValue({ status: "ignored" });
@@ -515,6 +488,21 @@ describe("subagent registry recovery scheduling", () => {
     await vi.advanceTimersByTimeAsync(1);
 
     expect(recoverRow).toHaveBeenCalledOnce();
+  });
+
+  it("reports an admitted registry sweep failure even when restart drain has started", async () => {
+    recoverRow.mockImplementationOnce(async () => {
+      markGatewayRestartDraining();
+      throw new Error("unexpected recovery failure");
+    });
+    const { sweeper, warn } = createHarness({});
+
+    sweeper.schedule({ delayMs: 1 });
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(warn).toHaveBeenCalledExactlyOnceWith(
+      "subagent run sweep failed: unexpected recovery failure",
+    );
   });
 
   it("rechecks deferred ownership at its next bounded retry when the runtime becomes available", async () => {
@@ -793,21 +781,6 @@ describe("subagent registry recovery scheduling", () => {
       expect(notifyContextEngineSubagentEnded).not.toHaveBeenCalled();
     },
   );
-
-  it("reports an admitted registry sweep failure even when restart drain has started", async () => {
-    recoverRow.mockImplementationOnce(async () => {
-      markGatewayRestartDraining();
-      throw new Error("unexpected recovery failure");
-    });
-    const { sweeper, warn } = createHarness({});
-
-    sweeper.schedule({ delayMs: 1 });
-    await vi.advanceTimersByTimeAsync(1);
-
-    expect(warn).toHaveBeenCalledExactlyOnceWith(
-      "subagent run sweep failed: unexpected recovery failure",
-    );
-  });
 });
 
 describe("superseded subagent retirement", () => {
@@ -838,17 +811,10 @@ describe("superseded subagent retirement", () => {
         }
         const successor = { ...run(), runId: "successor", generation: (entry.generation ?? 0) + 1 };
         const runs = new Map<string, SubagentRunRecord>();
-        await mutateSubagentRuns(
-          [entry.runId, successor.runId],
-          () => ({
-            value: undefined,
-            postimages: new Map([
-              [entry.runId, entry],
-              [successor.runId, successor],
-            ]),
-          }),
-          { runs },
-        );
+        await persistRuns(runs, [
+          [entry.runId, entry],
+          [successor.runId, successor],
+        ]);
         const clearPendingLifecycleError = vi.fn();
         const worker = probe.command(stateWorker, async (command, executeOptions, scope) => {
           if (
@@ -870,11 +836,7 @@ describe("superseded subagent retirement", () => {
           if (retireSuccessor) {
             try {
               await cleanupEntered.promise;
-              await mutateSubagentRuns(
-                [successor.runId],
-                () => ({ value: undefined, postimages: new Map([[successor.runId, null]]) }),
-                { runs },
-              );
+              await persistRuns(runs, [[successor.runId, null]]);
             } finally {
               releaseCleanup.resolve();
             }
@@ -884,19 +846,10 @@ describe("superseded subagent retirement", () => {
           } else {
             await deletion;
           }
-          const persisted = await executeExistingOpenClawStateRead(
-            { env: state.env },
-            {
-              type: "subagents.runs",
-              scope: { kind: "ids", runIds: [entry.runId, successor.runId] },
-            },
-          );
-          if (!persisted?.ok || persisted.type !== "subagents.runs" || persisted.projection) {
-            throw new Error("Retirement fixture could not read durable rows");
-          }
+          const persisted = await readPersistedRuns(state.env, [entry.runId, successor.runId]);
           expect(runs.has(entry.runId)).toBe(refused);
-          expect(persisted.runs.has(entry.runId)).toBe(refused);
-          expect(persisted.runs.has(successor.runId)).toBe(!retireSuccessor);
+          expect(persisted.has(entry.runId)).toBe(refused);
+          expect(persisted.has(successor.runId)).toBe(!retireSuccessor);
           if (refused) {
             expect(clearPendingLifecycleError).not.toHaveBeenCalled();
           } else {

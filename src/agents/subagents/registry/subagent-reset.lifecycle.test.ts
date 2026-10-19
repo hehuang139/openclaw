@@ -86,14 +86,11 @@ function resetChat() {
   return initSessionState({
     ctx: finalizeInboundContext({
       Body: "/reset",
-      RawBody: "/reset",
-      CommandBody: "/reset",
       From: "telegram:123",
       To: "telegram:123",
       ChatType: "direct",
       SessionKey: parentKey,
       Provider: "telegram",
-      Surface: "telegram",
     }),
     cfg: getRuntimeConfig(),
     commandAuthorized: true,

@@ -30,10 +30,65 @@ import {
   createSubagentSweeperHarness as createHarness,
   createSubagentSweeperRun as run,
 } from "./subagent-registry-sweeper.test-support.js";
+import type { SubagentRunRecord } from "./subagent-registry.types.js";
 import {
   loadSubagentSessionEntry,
   resolveSubagentRunOrphanReason,
 } from "./subagent-session-reconciliation.js";
+
+export function persistRuns(
+  runs: Map<string, SubagentRunRecord>,
+  rows: [string, SubagentRunRecord | null][],
+) {
+  return mutateSubagentRuns(
+    rows.map(([id]) => id),
+    () => ({ value: undefined, postimages: new Map(rows) }),
+    { runs },
+  );
+}
+
+export async function readPersistedRuns(env: NodeJS.ProcessEnv, runIds: string[]) {
+  const result = await executeExistingOpenClawStateRead(
+    { env },
+    { type: "subagents.runs", scope: { kind: "ids", runIds } },
+  );
+  if (!result?.ok || result.type !== "subagents.runs" || result.projection) {
+    throw new Error("Fixture could not read durable runs");
+  }
+  return result.runs;
+}
+
+export function createSweepGate() {
+  const entered = createDeferred();
+  const release = createDeferred();
+  return {
+    wait: () => {
+      entered.resolve();
+      return release.promise;
+    },
+    async check(
+      sweeper: ReturnType<typeof createHarness>["sweeper"],
+      check: (finish: () => Promise<void>) => Promise<void>,
+    ) {
+      const pending = sweeper.sweepOnce();
+      const finish = async () => {
+        release.resolve();
+        await pending;
+      };
+      try {
+        await awaitGateBeforeSettlement(
+          entered.promise,
+          pending,
+          "Sweep skipped its held operation",
+        );
+        await check(finish);
+      } finally {
+        await finish();
+        await sweeper.reset();
+      }
+    },
+  };
+}
 
 export function withSweeperSessionState(check: (state: OpenClawTestState) => Promise<void>) {
   return withOpenClawTestState({ scenario: "minimal" }, async (state) => {
@@ -139,11 +194,7 @@ export function registerSubagentSweepRetainedAuthorityTests(
         const harness = createHarness({}, entry);
         vi.mocked(stateWorker.runOpenClawStateWorkerOperation).mockRestore();
         harness.runs.clear();
-        await mutateSubagentRuns(
-          [entry.runId],
-          () => ({ value: undefined, postimages: new Map([[entry.runId, entry]]) }),
-          { runs: harness.runs },
-        );
+        await persistRuns(harness.runs, [[entry.runId, entry]]);
         const attachmentRoot = resolveSubagentSessionAttachmentRootDir({
           agentId: "main",
           childSessionKey: entry.childSessionKey,
@@ -154,16 +205,8 @@ export function registerSubagentSweepRetainedAuthorityTests(
         await fs.mkdir(attachmentDir, { recursive: true });
         await fs.mkdir(siblingDir, { recursive: true });
         await fs.writeFile(path.join(attachmentDir, "artifact.txt"), "retained child artifact");
-        const readPersisted = async () => {
-          const result = await executeExistingOpenClawStateRead(
-            { env: state.env },
-            { type: "subagents.runs", scope: { kind: "ids", runIds: [entry.runId] } },
-          );
-          if (!result?.ok || result.type !== "subagents.runs" || result.projection) {
-            throw new Error("Cleanup fixture could not read its durable row");
-          }
-          return result.runs.get(entry.runId);
-        };
+        const readPersisted = async () =>
+          (await readPersistedRuns(state.env, [entry.runId])).get(entry.runId);
         const before = await readPersisted();
         expect(before).toMatchObject({ runId: entry.runId, attachmentId });
         const shouldRetire = missing !== "owner";
@@ -242,8 +285,7 @@ export function registerSubagentSweeperSessionReadTests(ignoreRecovery: () => vo
         { agentId: "main", sessionKey: "agent:main:read-source", env: state.env },
         { sessionId: "read-source", updatedAt: Date.now() },
       );
-      const readStarted = createDeferred();
-      const release = createDeferred();
+      const gate = createSweepGate();
       const readEntry = sessionEntryReads.readSessionEntryReadOnlyInWorker;
       let held = false;
       using read = vi.spyOn(sessionEntryReads, "readSessionEntryReadOnlyInWorker");
@@ -252,18 +294,11 @@ export function registerSubagentSweeperSessionReadTests(ignoreRecovery: () => vo
         if (!held && args[0].sessionKey === entry.childSessionKey) {
           held = true;
           expect(snapshot).toBeUndefined();
-          readStarted.resolve();
-          await release.promise;
+          await gate.wait();
         }
         return snapshot;
       });
-      const pending = sweeper.sweepOnce();
-      try {
-        await awaitGateBeforeSettlement(
-          readStarted.promise,
-          pending,
-          "Sweep did not read the missing child",
-        );
+      await gate.check(sweeper, async (finish) => {
         replaceSessionEntrySync(
           { agentId: "main", sessionKey: entry.childSessionKey, env: state.env },
           {
@@ -274,8 +309,7 @@ export function registerSubagentSweeperSessionReadTests(ignoreRecovery: () => vo
             status: "done",
           },
         );
-        release.resolve();
-        await pending;
+        await finish();
         expect(completeSubagentRunWithRecovery).toHaveBeenCalledExactlyOnceWith(
           expect.objectContaining({
             runId: entry.runId,
@@ -291,11 +325,7 @@ export function registerSubagentSweeperSessionReadTests(ignoreRecovery: () => vo
             env: state.env,
           })?.sessionId,
         ).toBe("rewritten-session");
-      } finally {
-        release.resolve();
-        await pending;
-        await sweeper.reset();
-      }
+      });
     });
   });
 
@@ -338,11 +368,9 @@ export function registerSubagentSweepCompletionRecoveryTests(ignoreRecovery: () 
           ignoreRecovery();
           const gateway = { current: createMockGatewayRecoveryRuntime() };
           const h = createHarness(gateway);
-          const entered = createDeferred();
-          const release = createDeferred();
+          const gate = createSweepGate();
           const attempt = vi.fn(async () => {
-            entered.resolve();
-            await release.promise;
+            await gate.wait();
             throw new Error("completion rejected during Gateway retirement");
           });
           const scheduleSweep = vi.fn();
@@ -359,30 +387,19 @@ export function registerSubagentSweepCompletionRecoveryTests(ignoreRecovery: () 
           h.completeSubagentRunWithRecovery.mockImplementation(
             completion.completeSubagentRunWithRecovery,
           );
-          const pending = h.sweeper.sweepOnce();
-          try {
-            await awaitGateBeforeSettlement(
-              entered.promise,
-              pending,
-              "Sweep skipped completion recovery",
-            );
+          await gate.check(h.sweeper, async (finish) => {
             if (change === "lifecycle") {
               rotateAgentEventLifecycleGeneration();
             } else {
               gateway.current = createMockGatewayRecoveryRuntime();
             }
-            release.resolve();
-            await pending;
+            await finish();
             expect(attempt).toHaveBeenCalledOnce();
             expect(scheduleSweep).not.toHaveBeenCalled();
             expect(resumeRun).not.toHaveBeenCalled();
             expect(h.runs.get(h.entry.runId)).toBe(h.entry);
             expect(h.entry.execution.endedAt).toBeUndefined();
-          } finally {
-            release.resolve();
-            await pending;
-            await h.sweeper.reset();
-          }
+          });
         },
       );
     },

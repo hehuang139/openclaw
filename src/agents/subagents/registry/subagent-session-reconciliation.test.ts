@@ -24,31 +24,29 @@ const terminalSession: SessionEntry = {
 };
 
 async function expectCompletion(target: Parameters<typeof loadEntry>[0], sessionId: string) {
-  expect({
-    sessionId: (await loadEntry(target))?.sessionId,
-    completion: await readCompletion({ ...target, fallbackEndedAt: 3_000 }),
-    startedAt: await readStartedAt(target),
-  }).toMatchObject({
-    sessionId,
-    completion: { endedAt: 2_000, outcome: { status: "ok" } },
-    startedAt: 1_000,
+  expect((await loadEntry(target))?.sessionId).toBe(sessionId);
+  expect(await readCompletion({ ...target, fallbackEndedAt: 3_000 })).toMatchObject({
+    endedAt: 2_000,
+    outcome: { status: "ok" },
   });
+  expect(await readStartedAt(target)).toBe(1_000);
 }
 
-async function resolveCompletion(
-  childSessionKey: string,
-  storedSessionKey: string,
-  entry: SessionEntry = terminalSession,
-) {
+async function completionFor(childKey: string, storedKey: string, entry = terminalSession) {
   return withOpenClawTestState({ scenario: "minimal" }, async (state) => {
-    replaceSessionEntrySync({ sessionKey: storedSessionKey, env: state.env }, entry);
-    return readCompletion({ childSessionKey, fallbackEndedAt: 3_000, notBeforeMs: 0, cfg: {} });
+    replaceSessionEntrySync({ sessionKey: storedKey, env: state.env }, entry);
+    return readCompletion({
+      childSessionKey: childKey,
+      fallbackEndedAt: 3_000,
+      notBeforeMs: 0,
+      cfg: {},
+    });
   });
 }
 
 it("matches case-insensitive structural session-key segments", async () => {
   expect(
-    await resolveCompletion("Agent:MAIN:telegram:group:ROOM", "agent:main:telegram:group:room"),
+    await completionFor("Agent:MAIN:telegram:group:ROOM", "agent:main:telegram:group:room"),
   ).toMatchObject({ endedAt: 2_000, outcome: { status: "ok" } });
 });
 
@@ -58,7 +56,7 @@ it.each([
 ])(
   "does not match a case-distinct %s opaque peer",
   async (_channel, childSessionKey, storedSessionKey) => {
-    expect(await resolveCompletion(childSessionKey, storedSessionKey)).toBeNull();
+    expect(await completionFor(childSessionKey, storedSessionKey)).toBeNull();
   },
 );
 
@@ -71,9 +69,9 @@ it.each([
     const key = "agent:main:subagent:failed-diagnostic";
     const lastRunError = "The synthetic fixture could not load its assigned document.";
     expect(
-      await resolveCompletion(key, key, { ...terminalSession, status, lastRunError }),
+      await completionFor(key, key, { ...terminalSession, status, lastRunError }),
     ).toMatchObject({ endedAt: 2_000, outcome: { status: outcome, error: lastRunError } });
-    expect(await resolveCompletion(key, key, { ...terminalSession, status })).toMatchObject({
+    expect(await completionFor(key, key, { ...terminalSession, status })).toMatchObject({
       outcome:
         status === "failed"
           ? { status: "error", error: "session completed before registry settled" }
@@ -84,9 +82,7 @@ it.each([
 
 it("does not turn an interrupted outcome with an end timestamp into registry completion", async () => {
   const key = "agent:main:subagent:interrupted";
-  expect(
-    await resolveCompletion(key, key, { ...terminalSession, status: "interrupted" }),
-  ).toBeNull();
+  expect(await completionFor(key, key, { ...terminalSession, status: "interrupted" })).toBeNull();
 });
 
 it.each([undefined, "sessions.json", "custom-sessions.json", "shared.sqlite"])(
