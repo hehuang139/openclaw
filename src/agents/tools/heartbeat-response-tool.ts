@@ -89,7 +89,10 @@ function createHeartbeatResponseTool(options: { acceptsResponses?: boolean } = {
     parameters: HeartbeatResponseToolSchema,
     execute: async (_toolCallId, args) => {
       if (options.acceptsResponses === false) {
-        throw new ToolInputError("heartbeat_respond is only accepted during a heartbeat run");
+        // Offered for tool-list stability; automatic-reply heartbeats deliver plain text.
+        throw new ToolInputError(
+          "heartbeat_respond is not accepted in this run; reply with plain text instead",
+        );
       }
       if (!isRecord(args)) {
         throw new ToolInputError("Heartbeat response arguments required");
