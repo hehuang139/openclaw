@@ -139,6 +139,8 @@ describe("completion source-reply authority", () => {
       tool.execute("restricted", {
         message: "completion",
         media: "https://example.com/photo.png",
+        filename: "photo.png",
+        contentType: "image/png",
         ...args,
       }),
     ).rejects.toThrow(/Completion source replies/);
@@ -189,6 +191,8 @@ describe("completion source-reply authority", () => {
       for (const args of [
         { media: url, message: "Replacement photo" },
         { media: url, caption: "Replacement photo" },
+        { media: url, filename: "photo.png", contentType: "image/png" },
+        { media: url, mimeType: "image/png" },
         { attachments: [{ media: url, name: "photo.png" }] },
         { message: `MEDIA:${url}` },
         { message: `![Replacement photo](${url})` },
@@ -230,7 +234,12 @@ describe("completion source-reply authority", () => {
           { message: `completion\\nMEDIA:${directivePath}` },
           { message: `completion\nMEciteDIA:${directivePath}` },
         ]) {
-          const result = await tool.execute("outside-roots", { action: "send", ...args });
+          const result = await tool.execute("outside-roots", {
+            action: "send",
+            filename: "photo.png",
+            contentType: "image/png",
+            ...args,
+          });
           expect(result.details).toMatchObject({
             deliveryStatus: "failed",
             error: expect.stringMatching(/not under an allowed directory/),
