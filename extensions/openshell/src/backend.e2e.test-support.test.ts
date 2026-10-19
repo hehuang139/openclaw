@@ -10,31 +10,29 @@ import {
   runCommand,
 } from "./backend.e2e.test-support.js";
 
-describe("OpenShell host policy", () => {
-  const defaults = ["10.0.0.0/8", "172.0.0.0/8", "192.168.0.0/16", "fc00::/7"];
-  it.each([
-    { name: "blank override", hostIp: "  ", allowedIps: defaults },
-    { name: "custom IPv4 override", hostIp: " 198.51.100.42 ", allowedIps: ["198.51.100.42/32"] },
-  ])("preserves $name without changing the endpoint or binary", ({ hostIp, allowedIps }) => {
-    const params = { port: 17680, binaryPath: "/usr/bin/curl", hostIp };
-    const policy: unknown = parse(buildOpenShellPolicyYaml(params));
-    expect(policy).toMatchObject({
-      network_policies: {
-        host_echo: {
-          endpoints: [
-            {
-              host: "host.openshell.internal",
-              port: 17680,
-              protocol: "rest",
-              enforcement: "enforce",
-              access: "full",
-              allowed_ips: allowedIps,
-            },
-          ],
-          binaries: [{ path: "/usr/bin/curl" }],
-        },
+it.each<[string, string[]]>([
+  ["  ", ["10.0.0.0/8", "172.0.0.0/8", "192.168.0.0/16", "fc00::/7"]],
+  [" 198.51.100.42 ", ["198.51.100.42/32"]],
+])("host policy preserves IP override %j, endpoint and binary", (hostIp, allowedIps) => {
+  const policy: unknown = parse(
+    buildOpenShellPolicyYaml({ port: 17680, binaryPath: "/usr/bin/curl", hostIp }),
+  );
+  expect(policy).toMatchObject({
+    network_policies: {
+      host_echo: {
+        endpoints: [
+          {
+            host: "host.openshell.internal",
+            port: 17680,
+            protocol: "rest",
+            enforcement: "enforce",
+            access: "full",
+            allowed_ips: allowedIps,
+          },
+        ],
+        binaries: [{ path: "/usr/bin/curl" }],
       },
-    });
+    },
   });
 });
 
@@ -124,6 +122,15 @@ if (state.mode === "stuck" && state.observations > 0) {
   };
 }
 
+async function expectAggregateFailure(operation: Promise<void>, message: string, exact = true) {
+  const errors = [expect.objectContaining({ message: expect.stringContaining(message) })];
+  await expect(operation).rejects.toBeInstanceOf(AggregateError);
+  await expect(operation).rejects.toHaveProperty(
+    "errors",
+    exact ? errors : expect.arrayContaining(errors),
+  );
+}
+
 describe.runIf(process.platform !== "win32")("OpenShell workspace cleanup", () => {
   it.each([
     ["non-JSON", "not json"],
@@ -139,53 +146,27 @@ describe.runIf(process.platform !== "win32")("OpenShell workspace cleanup", () =
   });
 
   it.each([
-    ["read-failure", "database is locked", 2],
-    ["delete-failure", "delete failed", 1],
-  ])(
-    "retains %s while attempting remaining owned deletes once",
-    async (mode, message, listCalls) => {
-      const fixture = await createCleanupFixture({ mode });
-      const failure = await fixture.cleanup().catch((error: unknown) => error);
-      expect(failure).toBeInstanceOf(AggregateError);
-      expect((failure as AggregateError).errors).toEqual([
-        expect.objectContaining({ message: expect.stringContaining(message) }),
-      ]);
-      expect(await fixture.read()).toMatchObject({
-        listCalls,
-        deletes: ["first", "second"],
-        workspaceDeletes: 0,
-      });
-    },
-  );
-
-  it("bounds stuck deletion by the original cleanup deadline", async () => {
-    const fixture = await createCleanupFixture({ mode: "stuck" });
-    const startedAt = Date.now();
-    // Advance at the real child operation boundary, not a wall-clock poll that
-    // can expire before a loaded host starts the command.
-    vi.spyOn(Date, "now").mockImplementation(
-      () => startedAt + (fixture.deadlineExpired() ? 120_000 : 0),
-    );
-    const failure = await fixture.cleanup().catch((error: unknown) => error);
-    expect(failure).toBeInstanceOf(AggregateError);
-    expect((failure as AggregateError).errors).toContainEqual(
-      expect.objectContaining({ message: expect.stringContaining("120 seconds") }),
-    );
+    ["read-failure", "database is locked", { listCalls: 2, deletes: ["first", "second"] }],
+    ["delete-failure", "delete failed", { listCalls: 1, deletes: ["first", "second"] }],
+    ["stuck", "120 seconds", { listCalls: 2, deletes: ["first"], observations: 1 }],
+    ["workspace-failure", "workspace cleanup failed", { names: [], deletes: ["first", "second"] }],
+  ] as const)("reports %s with durable deletion state", async (mode, message, state) => {
+    const fixture = await createCleanupFixture({ mode });
+    if (mode === "stuck") {
+      const startedAt = Date.now();
+      // Expire only after the child operation starts, even on a loaded host.
+      vi.spyOn(Date, "now").mockImplementation(
+        () => startedAt + (fixture.deadlineExpired() ? 120_000 : 0),
+      );
+    }
+    if (mode === "workspace-failure") {
+      await expect(fixture.cleanup()).rejects.toThrow(message);
+    } else {
+      await expectAggregateFailure(fixture.cleanup(), message, mode !== "stuck");
+    }
     expect(await fixture.read()).toMatchObject({
-      listCalls: 2,
-      deletes: ["first"],
-      observations: 1,
-      workspaceDeletes: 0,
-    });
-  });
-
-  it("waits for durable sandbox absence and reports workspace deletion failure", async () => {
-    const fixture = await createCleanupFixture({ mode: "workspace-failure" });
-    await expect(fixture.cleanup()).rejects.toThrow("workspace cleanup failed");
-    expect(await fixture.read()).toMatchObject({
-      names: [],
-      deletes: ["first", "second"],
-      workspaceDeletes: 1,
+      ...state,
+      workspaceDeletes: mode === "workspace-failure" ? 1 : 0,
     });
   });
 });

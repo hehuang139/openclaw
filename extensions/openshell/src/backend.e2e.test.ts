@@ -1,14 +1,12 @@
+import { once } from "node:events";
 import fs from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
+import { promisify } from "node:util";
 import { expectDefined } from "@openclaw/normalization-core";
 import type { CreateSandboxBackendParams, SandboxBackendHandle } from "openclaw/plugin-sdk/sandbox";
-import {
-  createSandboxTestContext,
-  createSandboxBrowserConfig,
-  createSandboxPruneConfig,
-  createSandboxSshConfig,
-} from "openclaw/plugin-sdk/test-fixtures";
+import { createSandboxTestContext } from "openclaw/plugin-sdk/test-fixtures";
 import { describe, expect, it, vi } from "vitest";
 import {
   buildOpenShellPolicyYaml,
@@ -24,6 +22,10 @@ import {
   createOpenShellSandboxBackendManager,
 } from "./backend.js";
 import { resolveOpenShellPluginConfig } from "./config.js";
+import {
+  createOpenShellBackendSandboxConfig,
+  createOpenShellRuntimeEntryFixture,
+} from "./openshell.test-support.js";
 
 const OPENCLAW_OPENSHELL_E2E = process.env.OPENCLAW_E2E_OPENSHELL === "1";
 const OPENCLAW_OPENSHELL_E2E_TIMEOUT_MS = 12 * 60_000;
@@ -77,26 +79,19 @@ function parseActiveLocalOpenShellGateway(stdout: string): string | null {
   } catch {
     return null;
   }
-  if (!Array.isArray(gateways)) {
-    return null;
-  }
-  for (const gateway of gateways) {
-    if (
-      typeof gateway !== "object" ||
-      gateway === null ||
-      gateway.active !== true ||
-      typeof gateway.name !== "string" ||
-      typeof gateway.endpoint !== "string"
-    ) {
-      continue;
-    }
-    if (
-      /^(?:https?:\/\/)?(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?(?:\/|$)/u.test(gateway.endpoint)
-    ) {
-      return gateway.name;
-    }
-  }
-  return null;
+  return Array.isArray(gateways)
+    ? (gateways.find(
+        (gateway) =>
+          gateway !== null &&
+          typeof gateway === "object" &&
+          gateway.active === true &&
+          typeof gateway.name === "string" &&
+          typeof gateway.endpoint === "string" &&
+          /^(?:https?:\/\/)?(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?(?:\/|$)/u.test(
+            gateway.endpoint,
+          ),
+      )?.name ?? null)
+    : null;
 }
 
 async function activeOpenShellGateway(
@@ -127,36 +122,24 @@ async function activeOpenShellGateway(
 }
 
 async function allocatePort(): Promise<number> {
-  return await new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.on("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      if (!address || typeof address === "string") {
-        server.close(() => reject(new Error("failed to allocate local port")));
-        return;
-      }
-      const { port } = address;
-      server.close((error) => {
-        if (error) {
-          reject(error);
-          return;
-        }
-        resolve(port);
-      });
-    });
-  });
+  const server = net.createServer().listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  await closeServer(server);
+  if (!address || typeof address === "string") {
+    throw new Error("failed to allocate local port");
+  }
+  return address.port;
 }
 
+const closeServer = (server: net.Server) => promisify(server.close.bind(server))();
+
 function openshellEnv(rootDir: string): NodeJS.ProcessEnv {
-  const homeDir = path.join(rootDir, "home");
-  const xdgDir = path.join(rootDir, "xdg");
-  const cacheDir = path.join(rootDir, "xdg-cache");
   return {
     ...process.env,
-    HOME: homeDir,
-    XDG_CONFIG_HOME: xdgDir,
-    XDG_CACHE_HOME: cacheDir,
+    HOME: path.join(rootDir, "home"),
+    XDG_CONFIG_HOME: path.join(rootDir, "xdg"),
+    XDG_CACHE_HOME: path.join(rootDir, "xdg-cache"),
   };
 }
 
@@ -165,12 +148,8 @@ function createBridge(backend: SandboxBackendHandle, workspaceDir: string) {
     backend.createFsBridge?.({
       sandbox: createSandboxTestContext({
         overrides: {
-          backendId: "openshell",
           workspaceDir,
           agentWorkspaceDir: workspaceDir,
-          runtimeId: backend.runtimeId,
-          runtimeLabel: backend.runtimeLabel,
-          containerName: backend.runtimeId,
           containerWorkdir: backend.workdir,
           backend,
         },
@@ -181,6 +160,8 @@ function createBridge(backend: SandboxBackendHandle, workspaceDir: string) {
 }
 
 const readFile = (root: string, file: string) => fs.readFile(path.join(root, file), "utf8");
+const writeFile = (root: string, file: string, data: string) =>
+  fs.writeFile(path.join(root, file), data, "utf8");
 
 async function startHostPolicyServer(gatewayName: string): Promise<HostPolicyServer> {
   const port = await allocatePort();
@@ -202,11 +183,7 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0"))
         if length:
             self.rfile.read(length)
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(BODY)))
-        self.end_headers()
-        self.wfile.write(BODY)
+        self.do_GET()
 
     def log_message(self, _format, *_args):
         pass
@@ -263,9 +240,7 @@ HTTPServer(("0.0.0.0", 8000), Handler).serve_forever()
         },
       };
     }
-    await new Promise((resolve) => {
-      setTimeout(resolve, 500);
-    });
+    await delay(500);
   }
 
   await runCommand({
@@ -277,41 +252,20 @@ HTTPServer(("0.0.0.0", 8000), Handler).serve_forever()
   throw new Error("docker-backed host policy server did not become ready");
 }
 
-describe("OpenShell gateway discovery", () => {
-  it("selects the active local gateway from structured output", () => {
-    expect(
-      parseActiveLocalOpenShellGateway(
-        JSON.stringify([
-          {
-            name: "remote",
-            endpoint: "https://gateway.example.com",
-            active: false,
-          },
-          {
-            name: "openshell",
-            endpoint: "https://127.0.0.1:17670",
-            active: true,
-          },
-        ]),
-      ),
-    ).toBe("openshell");
-  });
-
-  it.each([
-    ["malformed output", "not json"],
-    [
-      "active remote gateway",
-      JSON.stringify([
-        {
-          name: "remote",
-          endpoint: "https://gateway.example.com",
-          active: true,
-        },
-      ]),
-    ],
-  ])("rejects %s", (_name, output) => {
-    expect(parseActiveLocalOpenShellGateway(output)).toBeNull();
-  });
+const gateway = (name: string, endpoint: string, active: boolean) => ({ name, endpoint, active });
+it.each<[string, string, string | null]>([
+  [
+    "active local",
+    JSON.stringify([
+      gateway("remote", "https://gateway.example.com", false),
+      gateway("openshell", "https://127.0.0.1:17670", true),
+    ]),
+    "openshell",
+  ],
+  ["malformed output", "not json", null],
+  ["active remote", JSON.stringify([gateway("remote", "https://gateway.example.com", true)]), null],
+])("discovers OpenShell gateways: %s", (_name, output, expected) => {
+  expect(parseActiveLocalOpenShellGateway(output)).toBe(expected);
 });
 
 describe("openshell sandbox backend e2e", () => {
@@ -360,27 +314,17 @@ describe("openshell sandbox backend e2e", () => {
       let hostPolicyServer: HostPolicyServer | null | undefined;
       let mirrorSocketServer: net.Server | undefined;
       let workspaceCreated = false;
+      const defaults = createOpenShellBackendSandboxConfig();
       const sandboxCfg = {
-        mode: "all" as const,
-        backend: "openshell" as const,
-        scope: "session" as const,
-        workspaceAccess: "rw" as const,
+        ...defaults,
         workspaceRoot: path.join(rootDir, "sandboxes"),
-        dockerTmpfsSource: "configured" as const,
         docker: {
-          image: "openclaw-sandbox:bookworm-slim",
-          containerPrefix: "openclaw-sbx-",
-          workdir: "/workspace",
+          ...defaults.docker,
           readOnlyRoot: true,
           tmpfs: ["/tmp"],
-          network: "none",
           capDrop: ["ALL"],
-          env: {},
         },
-        ssh: createSandboxSshConfig("/tmp/openclaw-sandboxes"),
-        browser: createSandboxBrowserConfig(),
         tools: { allow: [], deny: [] },
-        prune: createSandboxPruneConfig(),
       };
 
       const pluginConfig = resolveOpenShellPluginConfig({
@@ -437,14 +381,15 @@ describe("openshell sandbox backend e2e", () => {
           vi.stubEnv(key, env[key]);
         }
         hostPolicyServer = await startHostPolicyServer(gatewayName);
-        if (!hostPolicyServer) {
-          throw new Error("failed to start host policy server");
+        for (const directory of [
+          workspaceDir,
+          mirrorWorkspaceDir,
+          overlapWorkspaceDir,
+          overlapAgentWorkspaceDir,
+          dockerfileDir,
+        ]) {
+          await fs.mkdir(directory, { recursive: true });
         }
-        await fs.mkdir(workspaceDir, { recursive: true });
-        await fs.mkdir(mirrorWorkspaceDir, { recursive: true });
-        await fs.mkdir(overlapWorkspaceDir, { recursive: true });
-        await fs.mkdir(overlapAgentWorkspaceDir, { recursive: true });
-        await fs.mkdir(dockerfileDir, { recursive: true });
         const isolatedConfigHome = env.XDG_CONFIG_HOME;
         if (!isolatedConfigHome) {
           throw new Error("OpenShell E2E could not create an isolated XDG config home");
@@ -462,20 +407,10 @@ describe("openshell sandbox backend e2e", () => {
           timeoutMs: 30_000,
         });
         workspaceCreated = true;
-        await fs.writeFile(path.join(workspaceDir, "seed.txt"), "seed-from-local\n", "utf8");
-        await fs.writeFile(
-          path.join(mirrorWorkspaceDir, "mirror-seed.txt"),
-          "mirror-from-local\n",
-          "utf8",
-        );
-        await fs.writeFile(
-          path.join(overlapWorkspaceDir, "primary-only.txt"),
-          "primary-preserved\n",
-        );
-        await fs.writeFile(
-          path.join(overlapAgentWorkspaceDir, "agent-only.txt"),
-          "agent-preserved\n",
-        );
+        await writeFile(workspaceDir, "seed.txt", "seed-from-local\n");
+        await writeFile(mirrorWorkspaceDir, "mirror-seed.txt", "mirror-from-local\n");
+        await writeFile(overlapWorkspaceDir, "primary-only.txt", "primary-preserved\n");
+        await writeFile(overlapAgentWorkspaceDir, "agent-only.txt", "agent-preserved\n");
         for (const protectedDirectory of [".git", "hooks", "git-hooks"]) {
           const protectedPath = path.join(mirrorWorkspaceDir, protectedDirectory);
           await fs.mkdir(protectedPath, { recursive: true });
@@ -506,29 +441,21 @@ describe("openshell sandbox backend e2e", () => {
         const socketServer = net.createServer();
         mirrorSocketServer = socketServer;
         socketServer.listen(mirrorSocketPath);
-        await new Promise<void>((resolve, reject) => {
-          socketServer.once("listening", resolve);
-          socketServer.once("error", reject);
-        });
+        await once(socketServer, "listening");
         await fs.writeFile(dockerfilePath, CUSTOM_IMAGE_DOCKERFILE, "utf8");
-        await fs.writeFile(
-          denyPolicyPath,
-          buildOpenShellPolicyYaml({
-            port: hostPolicyServer.port,
-            binaryPath: "/usr/bin/false",
-            hostIp: OPENCLAW_OPENSHELL_HOST_IP,
-          }),
-          "utf8",
-        );
-        await fs.writeFile(
-          allowPolicyPath,
-          buildOpenShellPolicyYaml({
-            port: hostPolicyServer.port,
-            binaryPath: "/usr/bin/curl",
-            hostIp: OPENCLAW_OPENSHELL_HOST_IP,
-          }),
-          "utf8",
-        );
+        const policyPort = hostPolicyServer.port;
+        const writePolicy = (file: string, binaryPath: string) =>
+          fs.writeFile(
+            file,
+            buildOpenShellPolicyYaml({
+              port: policyPort,
+              binaryPath,
+              hostIp: OPENCLAW_OPENSHELL_HOST_IP,
+            }),
+            "utf8",
+          );
+        await writePolicy(denyPolicyPath, "/usr/bin/false");
+        await writePolicy(allowPolicyPath, "/usr/bin/curl");
         const execResult = await runBackendExec({
           backend,
           command: "pwd && cat /opt/openshell-e2e-marker.txt && cat seed.txt",
@@ -542,16 +469,10 @@ describe("openshell sandbox backend e2e", () => {
         expect(stdout).toContain("seed-from-local");
 
         const manager = createOpenShellSandboxBackendManager({ pluginConfig });
-        const registryEntry = {
-          containerName: backend.runtimeId,
-          backendId: "openshell",
-          runtimeLabel: backend.runtimeLabel,
-          sessionKey: scopeKey,
-          createdAtMs: Date.now(),
-          lastUsedAtMs: Date.now(),
-          image: pluginConfig.from,
-          configLabelKind: "Source",
-        };
+        const registryEntry = createOpenShellRuntimeEntryFixture(
+          backend.runtimeId,
+          pluginConfig.from,
+        );
         await expect(
           manager.describeRuntime({ entry: registryEntry, config: {} }),
         ).resolves.toMatchObject({
@@ -562,14 +483,9 @@ describe("openshell sandbox backend e2e", () => {
         const bridge = createBridge(backend, workspaceDir);
 
         await bridge.writeFile({ filePath: "nested/remote-only.txt", data: "hello-remote\n" });
-        const hostReadError = await fs
-          .readFile(path.join(workspaceDir, "nested", "remote-only.txt"), "utf8")
-          .then(
-            () => undefined,
-            (error: unknown) => error,
-          );
-        expect(hostReadError).toBeInstanceOf(Error);
-        expect((hostReadError as NodeJS.ErrnoException).code).toBe("ENOENT");
+        const hostRead = readFile(workspaceDir, "nested/remote-only.txt");
+        await expect(hostRead).rejects.toBeInstanceOf(Error);
+        await expect(hostRead).rejects.toMatchObject({ code: "ENOENT" });
         await expect(bridge.readFile({ filePath: "nested/remote-only.txt" })).resolves.toEqual(
           Buffer.from("hello-remote\n"),
         );
@@ -788,46 +704,35 @@ describe("openshell sandbox backend e2e", () => {
       } catch (error) {
         failures.push(error);
       } finally {
-        try {
-          if (workspaceCreated) {
-            await cleanupOpenShellWorkspace({
-              command: OPENCLAW_OPENSHELL_COMMAND,
-              env,
-              workspace: openShellWorkspace,
-              sandboxNames: [
-                backend.runtimeId,
-                mirrorBackend.runtimeId,
-                overlapBackend.runtimeId,
-                allowBackend.runtimeId,
-              ],
-            });
-          }
-        } catch (error) {
-          failures.push(error);
-        } finally {
-          try {
-            const socketServer = mirrorSocketServer;
-            if (socketServer) {
-              await new Promise<void>((resolve, reject) => {
-                socketServer.close((error) => (error ? reject(error) : resolve()));
+        for (const cleanup of [
+          async () => {
+            if (workspaceCreated) {
+              await cleanupOpenShellWorkspace({
+                command: OPENCLAW_OPENSHELL_COMMAND,
+                env,
+                workspace: openShellWorkspace,
+                sandboxNames: [backend, mirrorBackend, overlapBackend, allowBackend].map(
+                  (b) => b.runtimeId,
+                ),
               });
             }
-          } catch (error) {
-            failures.push(error);
-          }
+          },
+          async () => {
+            const socketServer = mirrorSocketServer;
+            if (socketServer) {
+              await closeServer(socketServer);
+            }
+          },
+          () => hostPolicyServer?.close(),
+          () => fs.rm(rootDir, { recursive: true, force: true }),
+        ]) {
           try {
-            await hostPolicyServer?.close();
+            await cleanup();
           } catch (error) {
             failures.push(error);
-          }
-          try {
-            await fs.rm(rootDir, { recursive: true, force: true });
-          } catch (error) {
-            failures.push(error);
-          } finally {
-            vi.unstubAllEnvs();
           }
         }
+        vi.unstubAllEnvs();
       }
       if (failures.length > 0) {
         throw new AggregateError(failures, "OpenShell E2E or cleanup failed");

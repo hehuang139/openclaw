@@ -44,12 +44,8 @@ filesystem_policy:
   read_only: [/usr, /lib, /proc, /dev/urandom, /app, /etc, /var/log, /opt]
   read_write: [/sandbox, /tmp, /dev/null]
 
-landlock:
-  compatibility: best_effort
-
-process:
-  run_as_user: sandbox
-  run_as_group: sandbox
+landlock: {compatibility: best_effort}
+process: {run_as_user: sandbox, run_as_group: sandbox}
 
 network_policies:
 ${networkPolicies}
@@ -243,8 +239,10 @@ export async function verifyRemoteExecOverlap(params: {
   bridge: SandboxFsBridge;
 }): Promise<void> {
   const probeDir = "exec-overlap";
+  const exec = (backend: SandboxBackendHandle, command: string) =>
+    runBackendExec({ backend, command, timeoutMs: 60_000 });
   await params.bridge.mkdirp({ filePath: probeDir });
-  await runBackendExec({ backend: params.twin, command: "true", timeoutMs: 60_000 });
+  await exec(params.twin, "true");
   const waitingScript = `import pathlib,time
 root=pathlib.Path("exec-overlap")
 root.joinpath("ready").write_text("ready")
@@ -266,18 +264,10 @@ while not root.joinpath("ready").exists():
 root.joinpath("command-release").write_text("command-release")`;
   // A process that waits for the next turn's write must not retain the runtime lease.
   // Observe rejection immediately, but join it in finally even if the writer fails.
-  const waiting = runBackendExec({
-    backend: params.backend,
-    command: `python3 -c '${waitingScript}'`,
-    timeoutMs: 60_000,
-  });
+  const waiting = exec(params.backend, `python3 -c '${waitingScript}'`);
   const settled = Promise.allSettled([waiting]);
   try {
-    await runBackendExec({
-      backend: params.twin,
-      command: `python3 -c '${releaseScript}'`,
-      timeoutMs: 60_000,
-    });
+    await exec(params.twin, `python3 -c '${releaseScript}'`);
     await params.bridge.writeFile({
       filePath: `${probeDir}/file-release`,
       data: "file-release",
@@ -293,12 +283,22 @@ root.joinpath("command-release").write_text("command-release")`;
 }
 
 export async function stressBackend(params: {
-  backends: Array<Parameters<typeof runBackendExec>[0]["backend"]>;
+  backends: SandboxBackendHandle[];
   bridge: SandboxFsBridge;
   mode: "mirror" | "remote";
   workspaceDir: string;
 }): Promise<void> {
+  const { backends, bridge, mode, workspaceDir } = params;
   const startedAt = Date.now();
+  const log = (probe: string, details: Record<string, number | undefined>) =>
+    console.log(
+      JSON.stringify({
+        probe,
+        mode,
+        ...details,
+        elapsedMs: Date.now() - startedAt,
+      }),
+    );
   const expectedIds: string[] = [];
   const latencies: number[] = [];
   const waves = 8;
@@ -309,12 +309,12 @@ export async function stressBackend(params: {
       Array.from({ length: concurrency }, async (_, slot) => {
         const id = `${wave}-${slot}`;
         const started = Date.now();
-        const backend = params.backends[(wave + Math.floor(slot / 2)) % params.backends.length]!;
+        const backend = backends[(wave + Math.floor(slot / 2)) % backends.length]!;
         if (slot % 2 === 0) {
           expectedIds.push(id);
           const exitCode = slot === 0 ? 23 : 0;
           const serialMutation =
-            params.mode === "mirror"
+            mode === "mirror"
               ? `n=$(cat stress/count 2>/dev/null || echo 0); sleep 0.02; printf '%s\\n' "$((n + 1))" > stress/count; printf '%s\\n' '${id}' >> stress/ledger; `
               : "";
           const result = await runBackendExec({
@@ -327,26 +327,26 @@ export async function stressBackend(params: {
           expect(result.code).toBe(exitCode);
         } else {
           const filePath = `stress/@file-${id}`;
-          await params.bridge.writeFile({ filePath, data: id, mkdir: true });
+          await bridge.writeFile({ filePath, data: id, mkdir: true });
           const temporaryPath = `stress/tmp-${id}`;
           switch (slot) {
             case 1:
               await expect(
-                params.bridge.createFileExclusive?.({ filePath, data: "overwrite" }),
+                bridge.createFileExclusive?.({ filePath, data: "overwrite" }),
               ).resolves.toBe("exists");
               break;
             case 3:
               await expect(
-                params.bridge.createFileExclusive?.({ filePath: temporaryPath, data: id }),
+                bridge.createFileExclusive?.({ filePath: temporaryPath, data: id }),
               ).resolves.toBe("created");
-              await params.bridge.rename({ from: temporaryPath, to: `stress/@renamed-${id}` });
+              await bridge.rename({ from: temporaryPath, to: `stress/@renamed-${id}` });
               break;
             case 5:
-              await params.bridge.mkdirp({ filePath: temporaryPath });
-              await params.bridge.remove({ filePath: temporaryPath, recursive: true });
+              await bridge.mkdirp({ filePath: temporaryPath });
+              await bridge.remove({ filePath: temporaryPath, recursive: true });
               break;
             case 7:
-              await expect(params.bridge.stat({ filePath })).resolves.toMatchObject({
+              await expect(bridge.stat({ filePath })).resolves.toMatchObject({
                 type: "file",
                 size: Buffer.byteLength(id),
               });
@@ -363,26 +363,19 @@ export async function stressBackend(params: {
         "OpenShell stress wave failed",
       );
     }
-    await expect(params.bridge.readFile({ filePath: `stress/@file-${wave}-1` })).resolves.toEqual(
+    await expect(bridge.readFile({ filePath: `stress/@file-${wave}-1` })).resolves.toEqual(
       Buffer.from(`${wave}-1`),
     );
-    console.log(
-      JSON.stringify({
-        probe: "openshell-stress-progress",
-        mode: params.mode,
-        completedWorkflows: (wave + 1) * concurrency,
-        elapsedMs: Date.now() - startedAt,
-      }),
-    );
+    log("openshell-stress-progress", { completedWorkflows: (wave + 1) * concurrency });
   }
   // Read the remote tree without exec preparation: a fresh mirror upload could hide divergence.
-  const inventory = await params.backends[0]!.runShellCommand({
+  const inventory = await backends[0]!.runShellCommand({
     script: `python3 -c 'import json,pathlib,sys; root=pathlib.Path(sys.argv[1]); print(json.dumps({str(p.relative_to(root)):p.read_text() for p in root.rglob("*") if p.is_file()}))' "$1"`,
-    args: [`${params.backends[0]!.workdir}/stress`],
+    args: [`${backends[0]!.workdir}/stress`],
   });
   const remoteFiles = JSON.parse(inventory.stdout.toString("utf8")) as Record<string, string>;
   const expectedFiles: Record<string, string> = {};
-  if (params.mode === "mirror") {
+  if (mode === "mirror") {
     const ledger = expectDefined(remoteFiles.ledger, "OpenShell mirror command ledger");
     expect(ledger.trim().split("\n").toSorted()).toEqual(expectedIds.toSorted());
     expectedFiles.ledger = ledger;
@@ -391,43 +384,37 @@ export async function stressBackend(params: {
   for (let wave = 0; wave < waves; wave++) {
     for (let slot = 0; slot < concurrency; slot++) {
       const id = `${wave}-${slot}`;
-      const filePath = `stress/@${slot % 2 === 0 ? "exec" : "file"}-${id}`;
-      const expected = slot % 2 === 0 ? `value-${id}` : id;
-      expectedFiles[path.posix.basename(filePath)] = expected;
+      expectedFiles[`@${slot % 2 === 0 ? "exec" : "file"}-${id}`] =
+        slot % 2 === 0 ? `value-${id}` : id;
       if (slot === 3) {
         expectedFiles[`@renamed-${id}`] = id;
       }
     }
   }
   expect(remoteFiles).toEqual(expectedFiles);
-  if (params.mode === "mirror") {
-    expect((await fs.readdir(path.join(params.workspaceDir, "stress"))).toSorted()).toEqual(
+  if (mode === "mirror") {
+    expect((await fs.readdir(path.join(workspaceDir, "stress"))).toSorted()).toEqual(
       Object.keys(expectedFiles).toSorted(),
     );
     for (const [file, expected] of Object.entries(expectedFiles)) {
-      await expect(params.bridge.readFile({ filePath: `stress/${file}` })).resolves.toEqual(
+      await expect(bridge.readFile({ filePath: `stress/${file}` })).resolves.toEqual(
         Buffer.from(expected),
       );
     }
   }
-  if (params.mode === "remote") {
-    await expect(fs.stat(path.join(params.workspaceDir, "stress"))).rejects.toMatchObject({
+  if (mode === "remote") {
+    await expect(fs.stat(path.join(workspaceDir, "stress"))).rejects.toMatchObject({
       code: "ENOENT",
     });
   }
   const orderedLatencies = latencies.toSorted((a, b) => a - b);
-  console.log(
-    JSON.stringify({
-      probe: "openshell-stress",
-      mode: params.mode,
-      workflows: waves * concurrency,
-      concurrency,
-      commands: expectedIds.length,
-      intentionalCommandFailures: waves,
-      elapsedMs: Date.now() - startedAt,
-      p50Ms: orderedLatencies[Math.floor(latencies.length / 2)],
-      p95Ms: orderedLatencies[Math.floor(latencies.length * 0.95)],
-      verifiedFiles: Object.keys(expectedFiles).length,
-    }),
-  );
+  log("openshell-stress", {
+    workflows: waves * concurrency,
+    concurrency,
+    commands: expectedIds.length,
+    intentionalCommandFailures: waves,
+    p50Ms: orderedLatencies[Math.floor(latencies.length / 2)],
+    p95Ms: orderedLatencies[Math.floor(latencies.length * 0.95)],
+    verifiedFiles: Object.keys(expectedFiles).length,
+  });
 }
