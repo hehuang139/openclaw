@@ -31,7 +31,6 @@ import {
 import { executeExistingOpenClawStateRead } from "../../../state/openclaw-state-db-readonly.js";
 import * as stateWorker from "../../../state/openclaw-state-worker-store.js";
 import { observeMainThreadSql } from "../../../test-utils/main-thread-sql-spies.test-support.js";
-import { withOpenClawTestState } from "../../../test-utils/openclaw-test-state.js";
 import { createEmbeddedRunHandle } from "../../embedded-agent-runner/runs.test-support.js";
 import { createSubagentRunRecord } from "../../subagent-test-fixtures.test-helpers.js";
 import {
@@ -47,6 +46,8 @@ import {
   registerSubagentSweeperSessionReadTests,
   registerSubagentSweepCompletionRecoveryTests,
   registerSubagentSweepRetainedAuthorityTests,
+  withRealSessionReads,
+  withSweeperSessionState,
 } from "./subagent-registry-sweeper-session-read.test-support.js";
 import {
   createArchivedSubagentSweeperRun as archivedRun,
@@ -206,75 +207,65 @@ describe("subagent registry recovery scheduling", () => {
   });
 
   it("observes a sibling completion committed while another completion is awaiting", async () => {
-    const actual = await vi.importActual<typeof import("./subagent-session-reconciliation.js")>(
-      "./subagent-session-reconciliation.js",
-    );
-    await vi
-      .mocked(loadSubagentSessionEntry)
-      .withImplementation(actual.loadSubagentSessionEntry, async () => {
-        await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
-          setRuntimeConfigSnapshot({
-            session: { store: state.statePath("agents/{agentId}/sessions/sessions.json") },
-          });
-          recoverRow.mockResolvedValue({ status: "ignored" });
-          const { entry, runs, completeSubagentRunWithRecovery, sweeper } = createHarness({
-            current: createMockGatewayRecoveryRuntime(),
-          });
-          const sibling = {
-            ...run(),
-            runId: "sibling-run",
-            childSessionKey: "agent:main:subagent:sibling",
-          };
-          runs.set(sibling.runId, sibling);
-          const sessionEntry = {
-            sessionId: "child-session",
-            startedAt: entry.execution.startedAt,
-            updatedAt: Date.now(),
-          };
-          replaceSessionEntrySync(
-            { sessionKey: entry.childSessionKey, env: state.env },
-            { ...sessionEntry, status: "done", endedAt: Date.now() },
-          );
-          replaceSessionEntrySync(
-            { sessionKey: sibling.childSessionKey, env: state.env },
-            { ...sessionEntry, sessionId: "sibling-session", status: undefined },
-          );
-          const completion = createDeferred();
-          const completionStarted = createDeferred();
-          completeSubagentRunWithRecovery.mockImplementationOnce(() => {
-            completionStarted.resolve();
-            return completion.promise;
-          });
-          const pending = sweeper.sweepOnce();
-          try {
-            await awaitGateBeforeSettlement(
-              completionStarted.promise,
-              pending,
-              "Sweep settled before entering the held completion",
-            );
-            expect(completeSubagentRunWithRecovery).toHaveBeenCalledOnce();
-            replaceSessionEntrySync(
-              { sessionKey: sibling.childSessionKey, env: state.env },
-              {
-                ...sessionEntry,
-                sessionId: "sibling-session",
-                status: "done",
-                endedAt: Date.now(),
-              },
-            );
-            completion.resolve();
-            await pending;
-            expect(completeSubagentRunWithRecovery).toHaveBeenLastCalledWith(
-              expect.objectContaining({ runId: sibling.runId, outcome: { status: "ok" } }),
-              "sweeper-session-completion",
-            );
-          } finally {
-            completion.resolve();
-            await pending;
-            await sweeper.reset();
-          }
-        });
+    await withRealSessionReads(async (state) => {
+      recoverRow.mockResolvedValue({ status: "ignored" });
+      const { entry, runs, completeSubagentRunWithRecovery, sweeper } = createHarness({
+        current: createMockGatewayRecoveryRuntime(),
       });
+      const sibling = {
+        ...run(),
+        runId: "sibling-run",
+        childSessionKey: "agent:main:subagent:sibling",
+      };
+      runs.set(sibling.runId, sibling);
+      const sessionEntry = {
+        sessionId: "child-session",
+        startedAt: entry.execution.startedAt,
+        updatedAt: Date.now(),
+      };
+      replaceSessionEntrySync(
+        { sessionKey: entry.childSessionKey, env: state.env },
+        { ...sessionEntry, status: "done", endedAt: Date.now() },
+      );
+      replaceSessionEntrySync(
+        { sessionKey: sibling.childSessionKey, env: state.env },
+        { ...sessionEntry, sessionId: "sibling-session", status: undefined },
+      );
+      const completion = createDeferred();
+      const completionStarted = createDeferred();
+      completeSubagentRunWithRecovery.mockImplementationOnce(() => {
+        completionStarted.resolve();
+        return completion.promise;
+      });
+      const pending = sweeper.sweepOnce();
+      try {
+        await awaitGateBeforeSettlement(
+          completionStarted.promise,
+          pending,
+          "Sweep settled before entering the held completion",
+        );
+        expect(completeSubagentRunWithRecovery).toHaveBeenCalledOnce();
+        replaceSessionEntrySync(
+          { sessionKey: sibling.childSessionKey, env: state.env },
+          {
+            ...sessionEntry,
+            sessionId: "sibling-session",
+            status: "done",
+            endedAt: Date.now(),
+          },
+        );
+        completion.resolve();
+        await pending;
+        expect(completeSubagentRunWithRecovery).toHaveBeenLastCalledWith(
+          expect.objectContaining({ runId: sibling.runId, outcome: { status: "ok" } }),
+          "sweeper-session-completion",
+        );
+      } finally {
+        completion.resolve();
+        await pending;
+        await sweeper.reset();
+      }
+    });
   });
 
   registerSubagentSweeperSessionReadTests(() =>
@@ -382,92 +373,78 @@ describe("subagent registry recovery scheduling", () => {
   it.each(["ordinary", "collector group", "collector launch"])(
     "preserves a reset sibling during an earlier await in %s cleanup",
     async (kind) => {
-      const actual = await vi.importActual<typeof import("./subagent-session-reconciliation.js")>(
-        "./subagent-session-reconciliation.js",
-      );
-      await vi
-        .mocked(loadSubagentSessionEntry)
-        .withImplementation(actual.loadSubagentSessionEntry, async () => {
-          await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
-            setRuntimeConfigSnapshot({
-              session: { store: state.statePath("agents/{agentId}/sessions/sessions.json") },
-            });
-            const { entry, runs, callGateway, sweeper } = createHarness({}, archivedRun());
-            const sibling = archivedRun({
-              runId: "sibling-run",
-              childSessionKey: "agent:main:subagent:sibling",
-              ...(kind !== "ordinary"
-                ? { collect: true, groupId: "group", collectorCompletion: { status: "done" } }
-                : {}),
-              collectorLaunchCleanupPending: kind === "collector launch",
-            });
-            runs.set(sibling.runId, sibling);
-            const storePath = resolveSessionStorePathCore(undefined, { agentId: "main" });
-            for (const child of [entry, sibling]) {
-              child.childSessionIdentity = {
-                sessionId: child.runId,
-                lifecycleRevision: "original-revision",
-              };
-              replaceSessionEntrySync(
-                { sessionKey: child.childSessionKey, env: state.env },
-                {
-                  sessionId: child.runId,
-                  lifecycleRevision: "original-revision",
-                  updatedAt: Date.now(),
-                },
-              );
-            }
-            callGateway.mockImplementation(async ({ params: request }) => {
-              if (request.key === entry.childSessionKey) {
-                await resetSessionEntryLifecycle({
-                  agentId: "main",
-                  storePath,
-                  target: {
-                    canonicalKey: sibling.childSessionKey,
-                    storeKeys: [sibling.childSessionKey],
-                  },
-                  buildNextEntry: ({ currentEntry }) => ({
-                    ...currentEntry,
-                    sessionId: sibling.runId,
-                    lifecycleRevision: "reset-revision",
-                    updatedAt: Date.now(),
-                  }),
-                });
-              }
-              const deleted = await deleteSessionEntryLifecycle({
-                agentId: "main",
-                storePath,
-                target: { canonicalKey: request.key, storeKeys: [request.key] },
-                expectedSessionId: request.expectedSessionId,
-                expectedLifecycleRevision: request.expectedLifecycleRevision,
-                archiveTranscript: false,
-                deleteTranscriptWithoutArchive: true,
-              });
-              if (deleted.expectedEntryMismatch) {
-                throw Object.assign(new Error("session changed"), {
-                  name: "GatewayClientRequestError",
-                  gatewayCode: "INVALID_REQUEST",
-                  details: { reason: "session-changed" },
-                });
-              }
-              return deleted;
-            });
-            try {
-              await sweeper.sweepOnce();
-              expect(
-                loadSessionEntryReadOnly({ sessionKey: entry.childSessionKey }),
-              ).toBeUndefined();
-              expect(
-                loadSessionEntryReadOnly({ sessionKey: sibling.childSessionKey }),
-              ).toMatchObject({
+      await withRealSessionReads(async (state) => {
+        const { entry, runs, callGateway, sweeper } = createHarness({}, archivedRun());
+        const sibling = archivedRun({
+          runId: "sibling-run",
+          childSessionKey: "agent:main:subagent:sibling",
+          ...(kind !== "ordinary"
+            ? { collect: true, groupId: "group", collectorCompletion: { status: "done" } }
+            : {}),
+          collectorLaunchCleanupPending: kind === "collector launch",
+        });
+        runs.set(sibling.runId, sibling);
+        const storePath = resolveSessionStorePathCore(undefined, { agentId: "main" });
+        for (const child of [entry, sibling]) {
+          child.childSessionIdentity = {
+            sessionId: child.runId,
+            lifecycleRevision: "original-revision",
+          };
+          replaceSessionEntrySync(
+            { sessionKey: child.childSessionKey, env: state.env },
+            {
+              sessionId: child.runId,
+              lifecycleRevision: "original-revision",
+              updatedAt: Date.now(),
+            },
+          );
+        }
+        callGateway.mockImplementation(async ({ params: request }) => {
+          if (request.key === entry.childSessionKey) {
+            await resetSessionEntryLifecycle({
+              agentId: "main",
+              storePath,
+              target: {
+                canonicalKey: sibling.childSessionKey,
+                storeKeys: [sibling.childSessionKey],
+              },
+              buildNextEntry: ({ currentEntry }) => ({
+                ...currentEntry,
                 sessionId: sibling.runId,
                 lifecycleRevision: "reset-revision",
-              });
-            } finally {
-              await sweeper.reset();
-            }
+                updatedAt: Date.now(),
+              }),
+            });
+          }
+          const deleted = await deleteSessionEntryLifecycle({
+            agentId: "main",
+            storePath,
+            target: { canonicalKey: request.key, storeKeys: [request.key] },
+            expectedSessionId: request.expectedSessionId,
+            expectedLifecycleRevision: request.expectedLifecycleRevision,
+            archiveTranscript: false,
+            deleteTranscriptWithoutArchive: true,
           });
+          if (deleted.expectedEntryMismatch) {
+            throw Object.assign(new Error("session changed"), {
+              name: "GatewayClientRequestError",
+              gatewayCode: "INVALID_REQUEST",
+              details: { reason: "session-changed" },
+            });
+          }
+          return deleted;
         });
+        try {
+          await sweeper.sweepOnce();
+          expect(loadSessionEntryReadOnly({ sessionKey: entry.childSessionKey })).toBeUndefined();
+          expect(loadSessionEntryReadOnly({ sessionKey: sibling.childSessionKey })).toMatchObject({
+            sessionId: sibling.runId,
+            lifecycleRevision: "reset-revision",
+          });
+        } finally {
+          await sweeper.reset();
+        }
+      });
     },
   );
 
@@ -660,10 +637,7 @@ describe("subagent registry recovery scheduling", () => {
     await vi
       .mocked(prepareSubagentKillSession)
       .withImplementation(actual.prepareSubagentKillSession, async () => {
-        await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
-          setRuntimeConfigSnapshot({
-            session: { store: state.statePath("agents/{agentId}/sessions/sessions.json") },
-          });
+        await withSweeperSessionState(async (state) => {
           const { entry, runs, completeSubagentRunWithRecovery } = createHarness({});
           entry.childSessionKey = "global";
           entry.childAgentId = "research";
@@ -880,10 +854,7 @@ describe("superseded subagent retirement", () => {
   ])(
     "publishes retirement after durable deletion (refused: $refused, successor retires during cleanup: $retireSuccessor)",
     async ({ refused, retireSuccessor }) => {
-      await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
-        setRuntimeConfigSnapshot({
-          session: { store: state.statePath("agents/{agentId}/sessions/sessions.json") },
-        });
+      await withSweeperSessionState(async (state) => {
         const entry = run();
         if (retireSuccessor) {
           entry.execution.transcriptTarget = {

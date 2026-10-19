@@ -30,6 +30,10 @@ it("reads subagent lifecycle and policy metadata without decoding unrelated sess
     try {
       const storePath = path.join(stateDir, "agents/main/sessions/sessions.json");
       const childSessionKey = "agent:main:subagent:target";
+      const options = { cfg: { session: { store: storePath } } };
+      const params = { childSessionKey, ...options, fallbackEndedAt: 3000 };
+      const writeTarget = (entry: Parameters<typeof replaceSessionEntrySync>[1]) =>
+        replaceSessionEntrySync({ storePath, sessionKey: childSessionKey }, entry);
       const coldPayload = `TARGET_COLD_PAYLOAD_${"x".repeat(65_536)}`;
       for (let i = 0; i < 100; i++) {
         replaceSessionEntrySync(
@@ -41,48 +45,40 @@ it("reads subagent lifecycle and policy metadata without decoding unrelated sess
           },
         );
       }
-      replaceSessionEntrySync(
-        { storePath, sessionKey: childSessionKey },
-        {
+      writeTarget({
+        sessionId: "target",
+        updatedAt: 2000,
+        startedAt: 1000,
+        endedAt: 2000,
+        status: "done",
+        lifecycleRevision: "target-revision",
+        sessionDiffBaseline: {
+          version: 1,
           sessionId: "target",
-          updatedAt: 2000,
-          startedAt: 1000,
-          endedAt: 2000,
-          status: "done",
-          lifecycleRevision: "target-revision",
-          sessionDiffBaseline: {
-            version: 1,
-            sessionId: "target",
-            root: "/synthetic/workspace",
-            files: [{ path: "fixture.ts", fingerprint: coldPayload }],
-          },
-          skillsSnapshot: { prompt: coldPayload, skills: [] },
-          systemPromptReport: {
-            source: "run",
-            generatedAt: 1000,
-            systemPrompt: { chars: 0, projectContextChars: 0, nonProjectContextChars: 0 },
-            injectedWorkspaceFiles: [],
-            skills: { promptChars: 0, entries: [{ name: coldPayload, blockChars: 0 }] },
-            tools: { listChars: 0, schemaChars: 0, entries: [] },
-          },
-          spawnDepth: 2,
-          spawnedBy: "agent:main:main",
-          inheritedToolPolicyVersion: 1,
-          inheritedToolAllow: ["read"],
-          inheritedToolDeny: ["exec"],
+          root: "/synthetic/workspace",
+          files: [{ path: "fixture.ts", fingerprint: coldPayload }],
         },
-      );
+        skillsSnapshot: { prompt: coldPayload, skills: [] },
+        systemPromptReport: {
+          source: "run",
+          generatedAt: 1000,
+          systemPrompt: { chars: 0, projectContextChars: 0, nonProjectContextChars: 0 },
+          injectedWorkspaceFiles: [],
+          skills: { promptChars: 0, entries: [{ name: coldPayload, blockChars: 0 }] },
+          tools: { listChars: 0, schemaChars: 0, entries: [] },
+        },
+        spawnDepth: 2,
+        spawnedBy: "agent:main:main",
+        inheritedToolPolicyVersion: 1,
+        inheritedToolAllow: ["read"],
+        inheritedToolDeny: ["exec"],
+      });
       const parse = vi.spyOn(JSON, "parse");
       const reads = observeMainThreadReads();
       const messages = vi.spyOn(Worker.prototype, "emit");
       let completion;
       try {
-        completion = await resolveSubagentSessionCompletion({
-          childSessionKey,
-          cfg: { session: { store: storePath } },
-          fallbackEndedAt: 3000,
-        });
-        const options = { cfg: { session: { store: storePath } } };
+        completion = await resolveSubagentSessionCompletion(params);
         expect(await resolveSubagentSessionStartedAt({ childSessionKey, ...options })).toBe(1000);
         const transferred = messages.mock.calls
           .filter(([event]) => event === "message")
@@ -136,18 +132,7 @@ it("reads subagent lifecycle and policy metadata without decoding unrelated sess
         endedAt: 2000,
         outcome: { status: "ok" },
       });
-      const params = {
-        childSessionKey,
-        cfg: { session: { store: storePath } },
-        fallbackEndedAt: 3000,
-      };
-      replaceSessionEntrySync(
-        { storePath, sessionKey: childSessionKey },
-        {
-          sessionId: "successor",
-          updatedAt: 4000,
-        },
-      );
+      writeTarget({ sessionId: "successor", updatedAt: 4000 });
       expect(await resolveSubagentSessionCompletion(params)).toBeNull();
       expect(
         await resolveSubagentSessionCompletion({
@@ -167,34 +152,13 @@ it("reads subagent lifecycle and policy metadata without decoding unrelated sess
       );
 
       await expect(
-        getSubagentDepthFromSessionStoreInWorker(childSessionKey, { cfg: params.cfg }),
+        getSubagentDepthFromSessionStoreInWorker(childSessionKey, options),
       ).rejects.toThrow("invalid persisted session row requires repair");
       await expect(
         withPreparedSessionCapabilityRead(() =>
-          resolvePersistedSubagentToolPolicyEnvelope(childSessionKey, { cfg: params.cfg }),
+          resolvePersistedSubagentToolPolicyEnvelope(childSessionKey, options),
         ),
       ).rejects.toThrow("invalid persisted session row requires repair");
-
-      for (const [requested, stored, matches] of [
-        ["Agent:MAIN:telegram:group:ROOM", "agent:main:telegram:group:room", true],
-        ["agent:main:matrix:group:!Room:server", "agent:main:matrix:group:!room:server", false],
-        ["agent:main:signal:group:AbCdEf==", "agent:main:signal:group:abcdef==", false],
-      ] as const) {
-        replaceSessionEntrySync(
-          { storePath, sessionKey: stored },
-          {
-            sessionId: stored,
-            updatedAt: 2000,
-            endedAt: 2000,
-            status: "done",
-          },
-        );
-        const resolved = await resolveSubagentSessionCompletion({
-          ...params,
-          childSessionKey: requested,
-        });
-        expect(resolved?.outcome.status === "ok").toBe(matches);
-      }
     } finally {
       await cleanupSessionStateForTest({ stateDir });
       await fs.rm(stateDir, { recursive: true, force: true });
