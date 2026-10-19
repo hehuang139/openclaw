@@ -55,7 +55,15 @@ import {
   withPluginRuntimeGatewayRequestScope,
 } from "../../plugins/runtime/gateway-request-scope.js";
 import { getPluginToolMeta } from "../../plugins/tool-metadata.js";
-import { isSessionControllerWorkActive } from "../../sessions/session-controller.lifecycle.js";
+import {
+  getCurrentSessionControllerOwner,
+  isSessionControllerWorkActive,
+} from "../../sessions/session-controller.lifecycle.js";
+import {
+  beginReplyMessageInjectionTarget,
+  captureReplyMessageInjectionTarget,
+} from "../../sessions/session-controller.message-injection.js";
+import { createUserTurnTranscriptRecorder } from "../../sessions/user-turn-transcript.js";
 import { createDeferredCore } from "../../shared/deferred.js";
 import { setCanonicalUserProfileRole } from "../../state/user-profile-writes.js";
 import { ensureProfileForEmail } from "../../state/user-profiles.js";
@@ -115,6 +123,7 @@ describe("same-conversation scheduled operator continuation", () => {
     "paused force run",
     "restart",
     "restart with prior operator source",
+    "restart with prior operator source and steering",
     "guest",
     "legacy attribution",
     "foreign target",
@@ -123,7 +132,7 @@ describe("same-conversation scheduled operator continuation", () => {
     "role revoked during merge",
     "session replaced",
   ] as const)("preserves the %s boundary", async (scenario) => {
-    const restarting = scenario === "restart" || scenario === "restart with prior operator source";
+    const restarting = scenario.startsWith("restart");
     const agentDir = path.join(stateDir, "agents", "main", "agent");
     const config: OpenClawConfig = {
       ...cfg,
@@ -293,7 +302,7 @@ describe("same-conversation scheduled operator continuation", () => {
       await creatorCron.waitForIdle();
     }
     if (scenario === "restart") {
-      // The other restart case retains the fixture's earlier operator source.
+      // The other restart cases retain the fixture's earlier operator source.
       const entry = { ...recovery.entry };
       delete entry.restartRecoveryDeliveryRunId;
       delete entry.restartRecoveryDeliverySourceRunId;
@@ -432,6 +441,62 @@ describe("same-conversation scheduled operator continuation", () => {
             data: { phase: "start" },
           },
         });
+        if (scenario === "restart with prior operator source and steering") {
+          const steeringAuthority = expectDefined(
+            await captureGatewayOperatorRunAuthority({
+              client: recovery.client,
+              context,
+              sourceAuthority: null,
+            }),
+            "fresh authenticated steering source",
+          );
+          try {
+            const steering = createUserTurnTranscriptRecorder({
+              input: { text: "Continue the scheduled task", provenance: { kind: "external_user" } },
+              target: () => ({
+                ...recovery.target,
+                sessionEntry: accessor.loadSessionEntry(recovery.target),
+                config,
+              }),
+              assertOriginalInputCommit: steeringAuthority.authority.assertCurrent,
+            });
+            const operation = expectDefined(getCurrentSessionControllerOwner(), "cron owner");
+            operation.setPhase("running");
+            operation.attachBackend({
+              kind: "embedded",
+              runId: params.runId,
+              toolAuthorityFingerprint: "scheduled-tools",
+              cancel() {},
+              messageInjectionV2: {
+                version: 2,
+                isAvailable: () => true,
+                queueMessage: async (_text, options, assertCurrent) => {
+                  assertCurrent();
+                  expect(
+                    await options?.userTurnTranscriptRecorder?.persistApproved(),
+                  ).toBeDefined();
+                },
+              },
+            });
+            const attempt = await beginReplyMessageInjectionTarget(
+              expectDefined(captureReplyMessageInjectionTarget(operation), "running cron target"),
+              "Continue the scheduled task",
+              {
+                isInboundUserMessage: true,
+                toolAuthorityFingerprint: "scheduled-tools",
+                assertCurrent: steeringAuthority.authority.assertCurrent,
+                waitForTranscriptCommit: true,
+                userTurnTranscriptRecorder: steering,
+              },
+            );
+            expect(await attempt.outcome).toEqual({ status: "accepted" });
+            expect(steering.getPersistedMessage?.()?.["__openclaw"]?.steerTargetRunId).toBe(
+              params.runId,
+            );
+          } finally {
+            steeringAuthority.release();
+          }
+        }
         restartEntered.resolve();
         await restartContinue.promise;
         throw createAgentRunRestartAbortError();
