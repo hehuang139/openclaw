@@ -1,4 +1,3 @@
-// Detects approval-not-found errors across gateway response shapes.
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 
 const INVALID_REQUEST = "INVALID_REQUEST";

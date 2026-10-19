@@ -1,4 +1,3 @@
-// Filesystem policy for SQLite creation and journaling.
 import fs from "node:fs";
 import path from "node:path";
 import { probeTreeClone } from "@openclaw/fs-safe/copy";

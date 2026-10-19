@@ -1,4 +1,3 @@
-// Configures SQLite WAL and related pragmas for local stores.
 import fs from "node:fs";
 import { performance } from "node:perf_hooks";
 import type { DatabaseSync } from "node:sqlite";

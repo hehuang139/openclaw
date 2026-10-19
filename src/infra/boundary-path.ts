@@ -1,4 +1,3 @@
-// Exposes boundary path resolution helpers with fs-safe defaults.
 import { AsyncLocalStorage } from "node:async_hooks";
 import fs from "node:fs";
 import path from "node:path";

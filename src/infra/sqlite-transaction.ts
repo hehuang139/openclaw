@@ -1,4 +1,3 @@
-// Provides SQLite transaction helpers with nested savepoints.
 import type { DatabaseSync } from "node:sqlite";
 import { setTimeout as sleep } from "node:timers/promises";
 import { isMainThread, threadId } from "node:worker_threads";

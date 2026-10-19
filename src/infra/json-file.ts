@@ -1,4 +1,3 @@
-// Loads and saves JSON files with symlink backup handling.
 import fs from "node:fs";
 import path from "node:path";
 import { resolvePathPrefixSync } from "@openclaw/fs-safe/advanced";

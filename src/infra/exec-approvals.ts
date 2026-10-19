@@ -1,4 +1,3 @@
-// Manages exec approval policy, allowlist entries, and host targeting.
 import {
   resolveExecApprovalsDisplayPath,
   resolveExecApprovalsSocketPath,

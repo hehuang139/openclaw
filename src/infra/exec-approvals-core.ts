@@ -1,4 +1,3 @@
-// Shared exec approval types and mode normalization.
 import { normalizeOptionalLowercaseString } from "@openclaw/normalization-core/string-coerce";
 import type { SchemaContract } from "../../packages/gateway-protocol/src/schema-contract.js";
 import type { ApprovalScope } from "../../packages/gateway-protocol/src/schema/approvals.js";

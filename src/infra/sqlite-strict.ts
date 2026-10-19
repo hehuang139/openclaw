@@ -1,4 +1,3 @@
-// Migrates OpenClaw-owned SQLite tables to canonical STRICT schemas.
 import type { DatabaseSync } from "node:sqlite";
 import { isPromiseLike } from "@openclaw/normalization-core/promise-like";
 import {

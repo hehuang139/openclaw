@@ -1,4 +1,3 @@
-// Installs package directories under canonical plugin roots.
 import { randomUUID } from "node:crypto";
 import fsSync from "node:fs";
 import fs from "node:fs/promises";

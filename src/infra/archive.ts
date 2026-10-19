@@ -1,4 +1,3 @@
-// Exposes archive extraction helpers after applying fs-safe defaults.
 import {
   extractArchive as extractArchiveWithFsSafe,
   type ExtractArchiveOptions,
