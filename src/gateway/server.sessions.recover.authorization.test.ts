@@ -16,13 +16,9 @@ import { prepareGatewayRecipientProfile } from "./expected-profile.js";
 import type { retainGatewayOperatorRun } from "./operator-run-cancellation.js";
 import { createDirectChatContext } from "./server-chat.agent-events.test-helpers.js";
 import { handleGatewayRequest } from "./server-methods.js";
+import { seedExhaustedRecovery } from "./server.sessions.recovery.test-support.js";
 import { roleClient, rolePolicyConfig } from "./session-sharing.test-utils.js";
-import { writeSessionStore } from "./test-helpers.js";
-import {
-  seedSessionTranscript,
-  sessionStoreEntry,
-  setupGatewaySessionsHandlerTestHarness,
-} from "./test/server-sessions.test-helpers.js";
+import { setupGatewaySessionsHandlerTestHarness } from "./test/server-sessions.test-helpers.js";
 
 const { createSessionStoreDir } = setupGatewaySessionsHandlerTestHarness();
 type Request = Parameters<typeof handleGatewayRequest>[0];
@@ -72,28 +68,10 @@ async function recoveryFixture(name: string, withWriter = false) {
     prepareGatewayRecipientProfile(client);
   }
   const cfg = getRuntimeConfig();
-  await writeSessionStore({
-    entries: {
-      [sourceKey]: sessionStoreEntry(sourceSessionId, {
-        status: "failed",
-        abortedLastRun: true,
-        mainRestartRecovery: {
-          cycleId: `cycle-${sourceSessionId}`,
-          revision: 1,
-          chargedAttempts: 3,
-          tombstone: { reason: "automatic recovery exhausted" },
-        },
-        createdActor: humanActor(owner),
-      }),
-    },
-  });
-  await seedSessionTranscript({
-    agentId: "main",
-    sessionId: sourceSessionId,
-    sessionKey: sourceKey,
-    storePath,
-    messages: [{ role: "user", content: "finish the interrupted work" }],
-  });
+  await seedExhaustedRecovery(
+    { sessionKey: sourceKey, sessionId: sourceSessionId, storePath },
+    humanActor(owner),
+  );
   return {
     owner,
     writer,
