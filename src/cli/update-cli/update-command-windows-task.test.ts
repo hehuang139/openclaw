@@ -4,8 +4,8 @@ import { afterEach, expect, it, vi } from "vitest";
 import { createDeferred } from "../../../test/helpers/promise.js";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
 import {
-  resumeScheduledTaskAutoStartAfterUpdate,
-  suspendScheduledTaskAutoStartForUpdate,
+  resumeScheduledTaskAutoStartAfterUpdate as resumeAutoStart,
+  suspendScheduledTaskAutoStartForUpdate as suspendAutoStart,
 } from "../../daemon/schtasks.js";
 import * as openClawTmp from "../../infra/tmp-openclaw-dir.js";
 import { createManagedHandoffLeaseStore } from "../../infra/update-managed-service-handoff-lease.js";
@@ -16,6 +16,7 @@ import {
   type CliHarnessCleanup,
 } from "../runtime-cleanup-scope.js";
 import { waitForCliSignalExit } from "../signal-exit-barrier.js";
+import { expectNoCalls } from "./update-boundary.test-support.js";
 import { withUpdateCommandExecutor } from "./update-command-executor.js";
 import { createWindowsTaskAutoStartRecovery } from "./update-command-windows-task.js";
 
@@ -32,17 +33,20 @@ function recovery(
   return createWindowsTaskAutoStartRecovery({ alreadySuspended: true, ...options });
 }
 
-function mockEnable(afterDispatch: () => void | Promise<void> = () => {}) {
-  vi.mocked(resumeScheduledTaskAutoStartAfterUpdate).mockImplementationOnce(
-    async (_env, options) => {
-      await options?.beforeMutation?.();
-      const pending = afterDispatch();
-      if (pending) {
-        await pending;
-      }
-      return true;
-    },
-  );
+function mockMutation(
+  command: typeof suspendAutoStart,
+  afterDispatch: () => void | Promise<void> = () => {},
+  inspect?: (options: Parameters<typeof suspendAutoStart>[1]) => void,
+) {
+  vi.mocked(command).mockImplementationOnce(async (_env, options) => {
+    inspect?.(options);
+    await options?.beforeMutation?.();
+    const pending = afterDispatch();
+    if (pending) {
+      await pending;
+    }
+    return true;
+  });
 }
 
 function isolatedRoot(prefix: string) {
@@ -69,7 +73,7 @@ it("revokes restoration while its ownership inspection is pending", async () => 
   const inspected = createDeferred();
   const releaseInspection = createDeferred();
   const dispatched: string[] = [];
-  mockEnable(() => {
+  mockMutation(resumeAutoStart, () => {
     dispatched.push("enable");
   });
   const task = recovery({
@@ -88,24 +92,25 @@ it("revokes restoration while its ownership inspection is pending", async () => 
   await task.restore(true);
   expect(() => task.assertRecoveryCurrent()).toThrow("authority has closed or transferred");
   expect(dispatched).toEqual([]);
-  expect(suspendScheduledTaskAutoStartForUpdate).not.toHaveBeenCalled();
+  expectNoCalls(suspendAutoStart);
 });
 
 it("drains a dispatched enable before compensating failed verification", async () => {
   const dispatched = createDeferred();
   const finishEnable = createDeferred();
   const actions: string[] = [];
-  mockEnable(async () => {
+  mockMutation(resumeAutoStart, async () => {
     actions.push("enable");
     dispatched.resolve();
     await finishEnable.promise;
   });
-  vi.mocked(suspendScheduledTaskAutoStartForUpdate).mockImplementationOnce(
-    async (_env, options) => {
-      expect(options?.restoreOnFailure).toBe(false);
-      await options?.beforeMutation?.();
+  mockMutation(
+    suspendAutoStart,
+    () => {
       actions.push("disable");
-      return true;
+    },
+    (options) => {
+      expect(options?.restoreOnFailure).toBe(false);
     },
   );
   const task = recovery();
@@ -128,7 +133,7 @@ afterEach(() => {
 });
 
 it("refuses caller recovery after transferring native task ownership", async () => {
-  vi.mocked(suspendScheduledTaskAutoStartForUpdate).mockClear();
+  vi.mocked(suspendAutoStart).mockClear();
   const task = recovery();
   try {
     task.assertRecoveryCurrent();
@@ -137,23 +142,19 @@ it("refuses caller recovery after transferring native task ownership", async () 
   } finally {
     await task.complete(true);
   }
-  expect(suspendScheduledTaskAutoStartForUpdate).not.toHaveBeenCalled();
+  expectNoCalls(suspendAutoStart);
 });
 
 it("refuses native compensation after its original live executor changes during inspection", async () => {
   const root = isolatedRoot("windows-compensation-owner-");
   const actions: string[] = [];
   const store = createManagedHandoffLeaseStore();
-  mockEnable(() => {
+  mockMutation(resumeAutoStart, () => {
     actions.push("enable");
   });
-  vi.mocked(suspendScheduledTaskAutoStartForUpdate).mockImplementationOnce(
-    async (_env, options) => {
-      await options?.beforeMutation?.();
-      actions.push("disable");
-      return true;
-    },
-  );
+  mockMutation(suspendAutoStart, () => {
+    actions.push("disable");
+  });
   let failure: unknown;
   await expect(
     withUpdateCommandExecutor(randomUUID(), async (executor) => {
@@ -196,14 +197,11 @@ it("retains the native failure when interrupted cleanup also loses its executor"
   const run = createUpdateRun({ trigger: "cli" }, { env });
   const store = createManagedHandoffLeaseStore();
   const nativeFailure = new Error("native disable failed after dispatch");
-  mockEnable();
-  vi.mocked(suspendScheduledTaskAutoStartForUpdate).mockImplementationOnce(
-    async (_env, options) => {
-      await options?.beforeMutation?.();
-      await rebindExecutor(store, root);
-      throw nativeFailure;
-    },
-  );
+  mockMutation(resumeAutoStart);
+  mockMutation(suspendAutoStart, async () => {
+    await rebindExecutor(store, root);
+    throw nativeFailure;
+  });
   let failure: unknown;
   let resources: CliHarnessCleanup["pluginResources"];
   await expect(

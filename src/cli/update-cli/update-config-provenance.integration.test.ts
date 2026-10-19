@@ -6,7 +6,7 @@ import { withTempHome } from "openclaw/plugin-sdk/test-env";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAccountListHelpers } from "../../channels/plugins/account-helpers.js";
 import * as legacyBindingRepair from "../../commands/doctor/shared/legacy-config-binding-repair.runtime.js";
-import type { runPostCorePluginConvergence } from "../../commands/doctor/shared/post-core-plugin-convergence.js";
+import type { runPostCorePluginConvergence as Converge } from "../../commands/doctor/shared/post-core-plugin-convergence.js";
 import { replaceConfigFile } from "../../config/config.js";
 import {
   createConfigIO,
@@ -24,6 +24,8 @@ import {
   createChannelTestPluginBase,
   createTestRegistry,
 } from "../../test-utils/channel-plugins.js";
+import { postCoreConvergenceResult } from "./update-cli-config.test-support.js";
+import { resultFixture } from "./update-command-fixtures.test-support.js";
 
 const controls = vi.hoisted(() => ({ root: "" }));
 function manifest() {
@@ -67,17 +69,9 @@ vi.mock("../../plugins/update-cohort.js", () => ({
 vi.mock("../../commands/doctor/shared/post-core-plugin-convergence.js", () => ({
   runPostCorePluginConvergence: async ({
     cfg,
-  }: Parameters<typeof runPostCorePluginConvergence>[0]): ReturnType<
-    typeof runPostCorePluginConvergence
-  > => ({
+  }: Parameters<typeof Converge>[0]): ReturnType<typeof Converge> => ({
     config: cfg,
-    configChanges: [],
-    installedPluginIdRecovery: new Map(),
-    changes: [],
-    warnings: [],
-    installRecords: {},
-    smokeFailures: [],
-    errored: false,
+    ...postCoreConvergenceResult(),
   }),
 }));
 vi.mock("../../plugins/registry-refresh.js", () => ({
@@ -291,15 +285,11 @@ describe("update config provenance", () => {
         } else if (flow === "converge") {
           await convergeUpdatePlugins({
             candidateRuntime: true,
-            result: {
-              status: "ok",
+            result: resultFixture(home, {
               mode: "git",
-              root: home,
               before: { sha: "same", version: "2026.9.2" },
               after: { sha: "same", version: "2026.9.2" },
-              steps: [],
-              durationMs: 0,
-            },
+            }),
             root: home,
             installKindChanged: false,
             configSnapshot: prepared.snapshot,
@@ -331,17 +321,11 @@ describe("update config provenance", () => {
           });
         }
         const saved = JSON.parse(await fs.readFile(configPath, "utf8")) as OpenClawConfig;
-        expect(saved.gateway?.auth?.token).toBe("${UPDATE_PROVENANCE_TOKEN}");
-        if (flow !== "legacy") {
-          expect(saved.gateway?.port).toBe(19001);
-        } else {
-          expect(saved.gateway?.bind).toBe("loopback");
-        }
-        if (requestedChannel) {
-          expect(saved.update?.channel).toBe(requestedChannel);
-        } else {
-          expect(saved.update?.channel).toBeUndefined();
-        }
+        expect(saved.gateway).toMatchObject({
+          auth: { token: "${UPDATE_PROVENANCE_TOKEN}" },
+          ...(flow === "legacy" ? { bind: "loopback" } : { port: 19001 }),
+        });
+        expect(saved.update?.channel).toBe(requestedChannel);
         const after = await readConfigFileSnapshot();
         expect(after.sourceConfig.gateway?.auth?.token).toBe("synthetic-after");
       });

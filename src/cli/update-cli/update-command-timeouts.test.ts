@@ -46,7 +46,8 @@ function prepareTimedUpdate(trigger: "cli" | "campaign" = "cli") {
   return record;
 }
 
-const updateOptions = { admission: "installed", yes: true, json: true } as const;
+const runUpdate = (options: Parameters<typeof updateCommand>[0]) =>
+  updateCommand({ admission: "installed", yes: true, json: true, tag: "2026.9.4", ...options });
 
 it.each([
   { trigger: "cli", timeout: undefined },
@@ -63,12 +64,7 @@ it.each([
         return null;
       });
 
-    await updateCommand({
-      ...updateOptions,
-      tag: "2026.9.4",
-      restart: false,
-      timeout,
-    });
+    await runUpdate({ restart: false, timeout });
 
     const stepTimeoutMs =
       timeout === undefined ? (trigger === "campaign" ? 45 : 30) * 60_000 : 3_600_000;
@@ -100,16 +96,17 @@ it("forwards an inherited activation budget for already-current updates without 
     (runId, operation, options) =>
       withExecutor(
         runId,
-        (executor) =>
-          operation({
-            async enter(root, enterOptions) {
-              const fence = await executor.enter(root, enterOptions);
-              if (enterOptions && "activationTimeoutMs" in enterOptions) {
-                budgets.push(enterOptions.activationTimeoutMs);
-              }
-              return fence;
-            },
-          }),
+        (executor) => {
+          const enter = executor.enter;
+          vi.spyOn(executor, "enter").mockImplementation(async (root, opts) => {
+            const fence = await enter(root, opts);
+            if (opts && "activationTimeoutMs" in opts) {
+              budgets.push(opts.activationTimeoutMs);
+            }
+            return fence;
+          });
+          return operation(executor);
+        },
         options,
       ),
   );
@@ -122,11 +119,7 @@ it("forwards an inherited activation budget for already-current updates without 
     fence.assertCurrent();
     finishUpdateRun(run.runId, { status: "skipped", reason: "already-current" }, { env: run.env });
   });
-  await updateCommand({
-    ...updateOptions,
-    tag: "2026.9.3",
-    restart: false,
-  });
+  await runUpdate({ tag: "2026.9.3", restart: false });
   expect(budgets).toEqual([60_000]);
 });
 
@@ -166,21 +159,14 @@ it("ends an unsettled candidate and unready predecessor within one --timeout bud
   });
   vi.useFakeTimers({ toFake: ["Date", "performance", "setTimeout", "clearTimeout"] });
   const output = vi.mocked(defaultRuntime.writeJson);
-  const running = updateCommand({
-    ...updateOptions,
-    tag: "2026.9.4",
-    timeout: "60",
-  }).catch((error: unknown) => error);
+  const running = runUpdate({ timeout: "60" }).catch((error: unknown) => error);
   await observing.promise;
   await vi.advanceTimersByTimeAsync(59_999);
   expect(output).not.toHaveBeenCalled();
   await vi.advanceTimersByTimeAsync(1);
   await running;
   expect(output).toHaveBeenCalledWith(
-    expect.objectContaining({
-      status: "error",
-      reason: "update-activation-timeout",
-    }),
+    expect.objectContaining({ status: "error", reason: "update-activation-timeout" }),
   );
   expect(health).toHaveBeenCalledTimes(1);
 });
