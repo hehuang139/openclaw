@@ -1,10 +1,12 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { afterEach, beforeEach, expect, vi } from "vitest";
+import { afterEach, beforeEach, expect, onTestFinished, vi } from "vitest";
 import { getGatewayPluginMetadataSnapshot } from "../plugins/current-plugin-metadata-state.js";
 import { getPluginInstance } from "../plugins/plugin-instance-scope.js";
 import { getActivePluginRegistry } from "../plugins/runtime.js";
 import type { PluginRuntime } from "../plugins/runtime/types.js";
+import { createDeferredCore } from "../shared/deferred.js";
+import { acquireTestPortBlock } from "../test-utils/port-claims.js";
 import {
   INSTANCE_BINDING_PROBE_METHOD,
   installInstanceBindingProbeCoordinator,
@@ -15,7 +17,72 @@ import {
   type ChannelBindingProof,
   type InstanceBindingProbeResult,
 } from "./server-plugins.lifecycle.test-fixtures.js";
-import { type connectWebchatClient, rpcReq } from "./test-helpers.server.js";
+import {
+  type connectWebchatClient,
+  rpcReq,
+  startTestGatewayServer,
+} from "./test-helpers.server.js";
+
+export function configurePluginGateway(bundledRoot: string, channels = false) {
+  Object.assign(process.env, {
+    OPENCLAW_TEST_MINIMAL_GATEWAY: "0",
+    OPENCLAW_BUNDLED_PLUGINS_DIR: bundledRoot,
+    OPENCLAW_TEST_TRUST_BUNDLED_PLUGINS_DIR: "1",
+    OPENCLAW_SKIP_CRON: "1",
+  });
+  delete process.env.OPENCLAW_DISABLE_BUNDLED_PLUGINS;
+  if (channels) {
+    delete process.env.OPENCLAW_SKIP_CHANNELS;
+    delete process.env.OPENCLAW_SKIP_PROVIDERS;
+  } else {
+    process.env.OPENCLAW_SKIP_CHANNELS = "1";
+  }
+  const configPath = process.env.OPENCLAW_CONFIG_PATH;
+  if (!configPath) {
+    throw new Error("gateway test hooks did not install OPENCLAW_CONFIG_PATH");
+  }
+  return configPath;
+}
+
+export async function startPluginGateway(options: Parameters<typeof startTestGatewayServer>[1]) {
+  const claim = await acquireTestPortBlock({ offsets: [0, 1, 2, 3, 4] });
+  const server = await startTestGatewayServer(claim, {
+    auth: { mode: "none" },
+    controlUiEnabled: false,
+    sidecarStartup: "start",
+    ...options,
+  });
+  return { server, port: claim.port };
+}
+
+// Manual reloads must wait for post-ready maintenance to release the lifecycle lease.
+export async function observePostReadyStartupMaintenance() {
+  const startupPlugins = await import("./server-startup-plugins.js");
+  const run = startupPlugins.runGatewayPostReadyStartupMaintenance;
+  const settled = createDeferredCore();
+  const observer = vi
+    .spyOn(startupPlugins, "runGatewayPostReadyStartupMaintenance")
+    .mockImplementation((params) => {
+      const maintenance = run(params);
+      maintenance.then(settled.resolve, settled.resolve);
+      return maintenance;
+    });
+  onTestFinished(() => observer.mockRestore());
+  return { settled: settled.promise };
+}
+
+export function closePluginSocket(
+  socket: Awaited<ReturnType<typeof connectWebchatClient>> | undefined,
+) {
+  const closed =
+    !socket || socket.readyState === socket.CLOSED
+      ? Promise.resolve()
+      : new Promise<void>((resolve) => {
+          socket.once("close", () => resolve());
+        });
+  socket?.close();
+  return closed;
+}
 
 export async function prepareInstanceBindingFixture(
   bundledRoot: string,
@@ -30,27 +97,16 @@ export async function prepareInstanceBindingFixture(
   if (options?.channels) {
     await writeChannelBindingProbePlugin(bundledRoot, coordinator.channelName, options.channelIds);
   }
-  process.env.OPENCLAW_TEST_MINIMAL_GATEWAY = "0";
-  delete process.env.OPENCLAW_DISABLE_BUNDLED_PLUGINS;
-  process.env.OPENCLAW_BUNDLED_PLUGINS_DIR = bundledRoot;
-  process.env.OPENCLAW_TEST_TRUST_BUNDLED_PLUGINS_DIR = "1";
-  process.env.OPENCLAW_SKIP_CHANNELS = "1";
-  process.env.OPENCLAW_SKIP_CRON = "1";
-  const configPath = process.env.OPENCLAW_CONFIG_PATH;
-  if (!configPath) {
-    throw new Error("gateway test hooks did not install OPENCLAW_CONFIG_PATH");
-  }
+  const configPath = configurePluginGateway(bundledRoot);
+  const pluginIds = [
+    "instance-binding-probe",
+    ...(options?.channels ? ["instance-binding-channels"] : []),
+  ];
   const config = {
     plugins: {
       enabled: true,
-      allow: [
-        "instance-binding-probe",
-        ...(options?.channels ? ["instance-binding-channels"] : []),
-      ],
-      entries: {
-        "instance-binding-probe": { enabled: true },
-        ...(options?.channels ? { "instance-binding-channels": { enabled: true } } : {}),
-      },
+      allow: pluginIds,
+      entries: Object.fromEntries(pluginIds.map((id) => [id, { enabled: true }])),
     },
   };
   const { loadPluginLookUpTable } = await import("../plugins/plugin-lookup-table.js");
@@ -228,12 +284,9 @@ export async function reloadInstanceBindingAfterServiceDeadline({
         }),
       async () => {
         expect(reloadSettled).toBe(false);
-        expect(coordinator.serviceStops).toBe(1);
-        expect(coordinator.serviceStarts).toBe(1);
+        expect(coordinator).toMatchObject({ serviceStops: 1, serviceStarts: 1, gatewayStops: [] });
         expect(coordinator.runtimes).toHaveLength(initialRegistrationCount);
-        expect(coordinator.gatewayStops).toEqual([]);
-        expect(initialInstance?.disposing).toBe(false);
-        expect(initialInstance?.acceptingCalls).toBe(false);
+        expect(initialInstance).toMatchObject({ disposing: false, acceptingCalls: false });
         expect(getGatewayPluginMetadataSnapshot()).toBe(initialMetadata);
         expect(getActivePluginRegistry()).toBe(initialRegistry);
         const pendingConfig = await rpcReq(socket, "config.get", {});

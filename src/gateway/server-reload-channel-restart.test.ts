@@ -29,6 +29,7 @@ async function reloadChannels(
   channels: Set<ChannelKind>,
   logChannels: Parameters<typeof restartGatewayChannels>[0]["params"]["logChannels"],
   scheduleRecoveryRestart: Parameters<typeof restartGatewayChannels>[0]["scheduleRecoveryRestart"],
+  restartChannelAccounts = new Map<ChannelKind, Set<string>>(),
 ) {
   await restartGatewayChannels({
     params: {
@@ -40,13 +41,29 @@ async function reloadChannels(
     },
     nextConfig: {},
     channelsToRestart: channels,
-    restartChannelAccounts: new Map(),
+    restartChannelAccounts,
     activePluginChannelsAfterReload: null,
     shouldSkipChannelRestart: false,
     isLifecycleReloadAborted: () => false,
     getChannelAutostartSuppression: () => null,
     channelReloadTargets: () => channels,
     scheduleRecoveryRestart,
+  });
+}
+
+function channelManager(getPluginRegistry = requireActivePluginChannelRegistry) {
+  return createChannelManager({
+    scheduler: createTestGatewayScheduler(),
+    getRuntimeConfig: () => ({}),
+    getPluginRegistry,
+    channelLogs: {},
+    channelRuntimeEnvs: {},
+  });
+}
+
+function untilAborted(signal: AbortSignal) {
+  return new Promise<void>((resolve) => {
+    signal.addEventListener("abort", () => resolve(), { once: true });
   });
 }
 
@@ -85,9 +102,7 @@ it("the config watcher restarts a channel that can save provider settings after 
       ...createChannelTestPluginBase({ id: "telegram" }),
       gateway: {
         startAccount: async ({ abortSignal }) => {
-          const stopped = new Promise<void>((resolve) => {
-            abortSignal.addEventListener("abort", () => resolve(), { once: true });
-          });
+          const stopped = untilAborted(abortSignal);
           if (++starts === 2) {
             restarted.resolve();
             await login.promise;
@@ -211,9 +226,7 @@ it("retries failed teardown before admitting a replacement", async () => {
   const retryStarted = createDeferred();
   const finishTeardown = createDeferred();
   const startAccount = vi.fn(async ({ abortSignal }: { abortSignal: AbortSignal }) => {
-    await new Promise<void>((resolve) => {
-      abortSignal.addEventListener("abort", () => resolve(), { once: true });
-    });
+    await untilAborted(abortSignal);
   });
   const stopAccount = vi
     .fn()
@@ -231,19 +244,10 @@ it("retries failed teardown before admitting a replacement", async () => {
         resolveAccount: (_cfg, accountId) => ({ accountId }),
       },
     }),
-    gateway: {
-      startAccount,
-      stopAccount,
-    },
+    gateway: { startAccount, stopAccount },
   };
   setActivePluginRegistry(createTestRegistry([{ pluginId: "discord", plugin, source: "test" }]));
-  manager = createChannelManager({
-    scheduler: createTestGatewayScheduler(),
-    getRuntimeConfig: () => ({}),
-    getPluginRegistry: requireActivePluginChannelRegistry,
-    channelLogs: {},
-    channelRuntimeEnvs: {},
-  });
+  manager = channelManager();
   await manager.startChannel("discord");
   await expect(manager.stopChannel("discord", undefined, { manual: false })).rejects.toThrow(
     "teardown failed",
@@ -306,20 +310,12 @@ it.each(
       gateway: {
         startAccount: async ({ accountId, abortSignal }) => {
           starts.push(accountId);
-          await new Promise<void>((resolve) => {
-            abortSignal.addEventListener("abort", () => resolve(), { once: true });
-          });
+          await untilAborted(abortSignal);
         },
       },
     };
     setActivePluginRegistry(createTestRegistry([{ pluginId: "discord", plugin, source: "test" }]));
-    manager = createChannelManager({
-      scheduler: createTestGatewayScheduler(),
-      getRuntimeConfig: () => ({}),
-      getPluginRegistry: requireActivePluginChannelRegistry,
-      channelLogs: {},
-      channelRuntimeEnvs: {},
-    });
+    manager = channelManager();
     if (state === "stopped") {
       await manager.startChannel("discord", "manual");
       expect(starts).toEqual(["manual"]);
@@ -333,24 +329,14 @@ it.each(
     );
     const logChannels = { info: vi.fn(), error: vi.fn() };
     const scheduleRecoveryRestart = vi.fn();
-    const reload = restartGatewayChannels({
-      params: {
-        startChannel: manager.startChannel,
-        stopChannel: manager.stopChannel,
-        getPluginRegistry: requireActivePluginChannelRegistry,
-        releaseChannelRouteHandoffs: manager.releaseChannelRouteHandoffs,
-        logChannels,
-      },
-      nextConfig: {},
-      channelsToRestart: channels,
-      restartChannelAccounts: accounts,
-      activePluginChannelsAfterReload: null,
-      shouldSkipChannelRestart: false,
-      isLifecycleReloadAborted: () => false,
-      getChannelAutostartSuppression: () => null,
-      channelReloadTargets: () => channels,
+    const reload = reloadChannels(
+      manager,
+      requireActivePluginChannelRegistry,
+      channels,
+      logChannels,
       scheduleRecoveryRestart,
-    });
+      accounts,
+    );
     if (state === "racing") {
       await configuring.promise;
       await manager.stopChannel("discord", "manual");
@@ -387,9 +373,7 @@ it("channel reload uses the attached registry instead of the process lookup", as
             startAccount: async ({ abortSignal }) => {
               const monitor = { owner, channelId: id, abortSignal, joined: false };
               monitors.push(monitor);
-              await new Promise<void>((resolve) => {
-                abortSignal.addEventListener("abort", () => resolve(), { once: true });
-              });
+              await untilAborted(abortSignal);
               monitor.joined = true;
             },
             stopAccount: async () => {
@@ -405,20 +389,8 @@ it("channel reload uses the attached registry instead of the process lookup", as
   const current = createRegistry("A-current", ownedIds);
   const foreign = createRegistry("B", ["collision", "foreign-only"]);
   const registryOwnerA = createPluginRegistryOwner(attached);
-  const ownerA = createChannelManager({
-    scheduler: createTestGatewayScheduler(),
-    getRuntimeConfig: () => ({}),
-    getPluginRegistry: () => attached,
-    channelLogs: {},
-    channelRuntimeEnvs: {},
-  });
-  const ownerB = createChannelManager({
-    scheduler: createTestGatewayScheduler(),
-    getRuntimeConfig: () => ({}),
-    getPluginRegistry: () => foreign,
-    channelLogs: {},
-    channelRuntimeEnvs: {},
-  });
+  const ownerA = channelManager(() => attached);
+  const ownerB = channelManager(() => foreign);
   const stopOwnedChannels = async () => {
     for (const id of ownedIds) {
       await ownerA.stopChannel(id, undefined, { manual: false });

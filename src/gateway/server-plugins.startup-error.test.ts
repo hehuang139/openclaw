@@ -6,20 +6,19 @@ import { afterEach, expect, it, onTestFinished, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import { getPluginInstance } from "../plugins/plugin-instance-scope.js";
 import { getActivePluginRegistry } from "../plugins/runtime.js";
-import { acquireTestPortBlock } from "../test-utils/port-claims.js";
 import {
   clearInstanceBindingProbeCoordinators,
   installInstanceBindingProbeCoordinator,
   INSTANCE_BINDING_PROBE_METHOD,
   writeInstanceBindingProbePlugin,
 } from "./server-plugins.lifecycle.test-fixtures.js";
-import { installInstanceBindingConfigIo } from "./server-plugins.lifecycle.test-support.js";
 import {
-  connectWebchatClient,
-  installGatewayTestHooks,
-  rpcReq,
-  startTestGatewayServer,
-} from "./test-helpers.server.js";
+  closePluginSocket,
+  configurePluginGateway,
+  installInstanceBindingConfigIo,
+  startPluginGateway,
+} from "./server-plugins.lifecycle.test-support.js";
+import { connectWebchatClient, installGatewayTestHooks, rpcReq } from "./test-helpers.server.js";
 
 // Keep hosted catalog transport outside this loader lifecycle proof.
 vi.mock("../plugins/official-external-plugin-catalog.js", async (importOriginal) => ({
@@ -101,14 +100,7 @@ it.each(["module-load", "entry-open"] as const)(
       });
       onTestFinished(() => entryOpen.mockRestore());
     }
-    process.env.OPENCLAW_TEST_MINIMAL_GATEWAY = "0";
-    delete process.env.OPENCLAW_DISABLE_BUNDLED_PLUGINS;
-    process.env.OPENCLAW_BUNDLED_PLUGINS_DIR = bundledRoot;
-    process.env.OPENCLAW_TEST_TRUST_BUNDLED_PLUGINS_DIR = "1";
-    process.env.OPENCLAW_SKIP_CHANNELS = "1";
-    process.env.OPENCLAW_SKIP_CRON = "1";
-    const configPath = process.env.OPENCLAW_CONFIG_PATH;
-    assert(configPath);
+    const configPath = configurePluginGateway(bundledRoot);
     await fs.writeFile(
       configPath,
       JSON.stringify({
@@ -123,14 +115,7 @@ it.each(["module-load", "entry-open"] as const)(
       }),
     );
     const recovery = vi.fn(() => ({ status: "emitted" as const }));
-    const portClaim = await acquireTestPortBlock({ offsets: [0, 1, 2, 3, 4] });
-    const port = portClaim.port;
-    const server = await startTestGatewayServer(portClaim, {
-      auth: { mode: "none" },
-      controlUiEnabled: false,
-      sidecarStartup: "start",
-      hotReloadRecovery: recovery,
-    });
+    const { server, port } = await startPluginGateway({ hotReloadRecovery: recovery });
     let socket: Awaited<ReturnType<typeof connectWebchatClient>> | undefined;
     try {
       await server.startupSettled;
@@ -161,6 +146,13 @@ it.each(["module-load", "entry-open"] as const)(
         (entry) => entry.pluginId === "startup-broken",
       );
       expect(diagnostics.length).toBeGreaterThan(0);
+      const expectBrokenRetained = () => {
+        const registry = getActivePluginRegistry();
+        expect(registry?.plugins.find((record) => record.id === "startup-broken")).toBe(broken);
+        expect(
+          registry?.diagnostics.filter((entry) => entry.pluginId === "startup-broken"),
+        ).toEqual(diagnostics);
+      };
       const before = await rpcReq(socket, INSTANCE_BINDING_PROBE_METHOD, {});
       expect(before.ok, before.error?.message).toBe(true);
       const reload = await rpcReq(socket, "plugins.reload", {
@@ -173,10 +165,7 @@ it.each(["module-load", "entry-open"] as const)(
       const current = getActivePluginRegistry();
       assert(current);
       expect(current).not.toBe(initial);
-      expect(current.plugins.find((record) => record.id === "startup-broken")).toBe(broken);
-      expect(current.diagnostics.filter((entry) => entry.pluginId === "startup-broken")).toEqual(
-        diagnostics,
-      );
+      expectBrokenRetained();
       const after = await rpcReq(socket, INSTANCE_BINDING_PROBE_METHOD, {});
       expect(after.ok, after.error?.message).toBe(true);
       expect(after.payload?.registryId).not.toBe(before.payload?.registryId);
@@ -200,7 +189,7 @@ it.each(["module-load", "entry-open"] as const)(
       expect(rejected.error?.message).not.toContain("startup-broken");
       const recovered = getActivePluginRegistry();
       expect(recovered).not.toBe(current);
-      expect(recovered?.plugins.find((record) => record.id === "startup-broken")).toBe(broken);
+      expectBrokenRetained();
       const retained = await rpcReq(socket, INSTANCE_BINDING_PROBE_METHOD, {});
       expect(retained.ok, retained.error?.message).toBe(true);
       expect(retained.payload?.registryId).not.toBe(after.payload?.registryId);
@@ -252,14 +241,7 @@ it.each(["module-load", "entry-open"] as const)(
       expect(getActivePluginRegistry()?.gatewayHandlers[INSTANCE_BINDING_PROBE_METHOD]).toBe(
         recovered?.gatewayHandlers[INSTANCE_BINDING_PROBE_METHOD],
       );
-      expect(
-        getActivePluginRegistry()?.plugins.find((record) => record.id === "startup-broken"),
-      ).toBe(broken);
-      expect(
-        getActivePluginRegistry()?.diagnostics.filter(
-          (entry) => entry.pluginId === "startup-broken",
-        ),
-      ).toEqual(diagnostics);
+      expectBrokenRetained();
 
       await waitForReloadSettlement();
       const disabled = await rpcReq(socket, "plugins.setEnabled", {
@@ -273,19 +255,10 @@ it.each(["module-load", "entry-open"] as const)(
       expect(
         getActivePluginRegistry()?.gatewayHandlers[INSTANCE_BINDING_PROBE_METHOD],
       ).toBeUndefined();
-      expect(
-        getActivePluginRegistry()?.plugins.find((record) => record.id === "startup-broken"),
-      ).toBe(broken);
+      expectBrokenRetained();
       expect(recovery).not.toHaveBeenCalled();
     } finally {
-      const closing = socket;
-      const closed =
-        !closing || closing.readyState === closing.CLOSED
-          ? Promise.resolve()
-          : new Promise<void>((resolve) => {
-              closing.once("close", () => resolve());
-            });
-      closing?.close();
+      const closed = closePluginSocket(socket);
       try {
         await server.close({ reason: "startup-error lifecycle cleanup" });
         await closed;

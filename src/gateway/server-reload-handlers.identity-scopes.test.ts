@@ -279,6 +279,12 @@ it.each(revocations)("preserves proxy runs until %s ends", async (revocation) =>
         context,
       });
       assert(delegated);
+      const expectLive = (...runs: (typeof original)[]) => {
+        for (const { authority } of runs) {
+          expect(authority.signal?.aborted).toBe(false);
+          expect(authority.assertCurrent).not.toThrow();
+        }
+      };
       const prepareEffect = async (name: string, authority: typeof original.authority) => {
         const entered = createDeferred();
         const resume = createDeferred();
@@ -332,6 +338,13 @@ it.each(revocations)("preserves proxy runs until %s ends", async (revocation) =>
         await expect(fs.readFile(marker)).rejects.toMatchObject({ code: "ENOENT" });
         return { marker, outcome, release: () => resume.resolve() };
       };
+      const expectAccepted = async (effect: Awaited<ReturnType<typeof prepareEffect>>) => {
+        effect.release();
+        await expect(effect.outcome).resolves.toMatchObject({
+          value: { status: "completed", exitCode: 0 },
+        });
+        expect(await fs.readFile(effect.marker, "utf8")).toBe("accepted effect");
+      };
       let revision = 0;
       const write = async (candidate: OpenClawConfig) => {
         const listener = fixture.ref.current;
@@ -354,14 +367,8 @@ it.each(revocations)("preserves proxy runs until %s ends", async (revocation) =>
       const unrelated = structuredClone(initialConfig);
       unrelated.gateway!.auth!.identityScopes!["other@example.test"] = ["operator.admin"];
       await write(unrelated);
-      allowedEffect.release();
-      await expect(allowedEffect.outcome).resolves.toMatchObject({
-        value: { status: "completed", exitCode: 0 },
-      });
-      expect(await fs.readFile(allowedEffect.marker, "utf8")).toBe("accepted effect");
-      expect(original.authority.signal?.aborted).toBe(false);
-      expect(delegated.authority.signal?.aborted).toBe(false);
-      expect(original.authority.assertCurrent).not.toThrow();
+      await expectAccepted(allowedEffect);
+      expectLive(original, delegated);
       for (const guard of guards) {
         expect(guard.family).toBe("worker");
         if (guard.family === "worker") {
@@ -376,7 +383,7 @@ it.each(revocations)("preserves proxy runs until %s ends", async (revocation) =>
         "operator.read",
       ];
       await write(reordered);
-      expect(original.authority.assertCurrent).not.toThrow();
+      expectLive(original);
       await capture(); // The original connection must also admit subsequent requests.
       expect(captures).toHaveLength(2);
       const transportEffect = await prepareEffect("transport.txt", original.authority);
@@ -388,31 +395,18 @@ it.each(revocations)("preserves proxy runs until %s ends", async (revocation) =>
       };
       await write(oidc);
       expect(connection.signal.aborted).toBe(true);
-      expect(original.authority.signal?.aborted).toBe(false);
-      expect(original.authority.assertCurrent).not.toThrow();
+      expectLive(original);
       expect(clients.size).toBe(0);
       expect([...dispatch.clients.authorityClients]).toEqual([client]);
       const otherOriginRemoved = structuredClone(oidc);
       otherOriginRemoved.gateway!.controlUi!.allowedOrigins = [browserOrigin.origin];
       await write(otherOriginRemoved);
-      expect(original.authority.signal?.aborted).toBe(false);
-      expect(original.authority.assertCurrent).not.toThrow();
+      expectLive(original);
       const headers = structuredClone(otherOriginRemoved);
       headers.gateway!.auth!.trustedProxy!.requiredHeaders = ["x-forwarded-proto"];
       await write(headers);
-      expect(original.authority.signal?.aborted).toBe(false);
-      expect(delegated.authority.signal?.aborted).toBe(false);
-      expect(original.authority.assertCurrent).not.toThrow();
-      transportEffect.release();
-      await expect(transportEffect.outcome).resolves.toMatchObject({
-        value: { status: "completed", exitCode: 0 },
-      });
-      expect(await fs.readFile(transportEffect.marker, "utf8")).toBe("accepted effect");
-      if (revocation === "origin") {
-        console.info(
-          `[origin-grant] marker=<test-state>/${path.basename(transportEffect.marker)} outcome=accepted (exitCode=0, marker written)`,
-        );
-      }
+      expectLive(original, delegated);
+      await expectAccepted(transportEffect);
       const revokedEffect = await prepareEffect("revoked.txt", delegated.authority);
       const removed = structuredClone(headers);
       if (revocation === "scopes") {
@@ -434,15 +428,10 @@ it.each(revocations)("preserves proxy runs until %s ends", async (revocation) =>
         expect(String(denied.error)).toMatch(/authority is no longer active/);
       }
       await expect(fs.readFile(revokedEffect.marker)).rejects.toMatchObject({ code: "ENOENT" });
-      if (revocation === "origin") {
-        console.info(
-          `[origin-grant] marker=<test-state>/${path.basename(revokedEffect.marker)} outcome=denied (authority revoked, marker absent)`,
-        );
+      for (const { authority } of [original, delegated]) {
+        expect(authority.signal?.aborted).toBe(true);
+        expect(authority.assertCurrent).toThrow(/authority is no longer active/);
       }
-      expect(original.authority.signal?.aborted).toBe(true);
-      expect(delegated.authority.signal?.aborted).toBe(true);
-      expect(original.authority.assertCurrent).toThrow(/authority is no longer active/);
-      expect(delegated.authority.assertCurrent).toThrow(/authority is no longer active/);
       expect(close).toHaveBeenCalledWith(4001, "gateway policy changed");
       expect(requestRecoveryRestart).not.toHaveBeenCalled();
     } finally {

@@ -84,6 +84,8 @@ it.each(["in-process", "bound"] as const)(
         const lookup = async (login = " Visitor ", signal?: AbortSignal) =>
           await withPluginRuntimeGatewayRequestScope(scope, () => resolve({ login, signal }));
         const fetcher = vi.fn<typeof fetch>();
+        const respond = (body: unknown, init?: ResponseInit) =>
+          fetcher.mockClear().mockResolvedValue(Response.json(body, init));
         vi.stubGlobal("fetch", fetcher);
         try {
           await expect(
@@ -92,9 +94,7 @@ it.each(["in-process", "bound"] as const)(
             ),
           ).rejects.toThrow(/trusted official/);
           expect(fetcher).not.toHaveBeenCalled();
-          fetcher.mockResolvedValue(
-            Response.json({ id: 42, login: "Current-Visitor", email: "unused@example.test" }),
-          );
+          respond({ id: 42, login: "Current-Visitor", email: "unused@example.test" });
           await expect(lookup()).resolves.toEqual({ accountId: 42, login: "Current-Visitor" });
           expect(fetcher).toHaveBeenCalledTimes(1);
           expect(fetcher.mock.calls[0]?.[0]).toBe("https://api.github.com/users/Visitor");
@@ -111,9 +111,7 @@ it.each(["in-process", "bound"] as const)(
             [403, 403],
             [401, 401],
           ] as const) {
-            fetcher
-              .mockClear()
-              .mockResolvedValue(Response.json({ message: "private upstream body" }, { status }));
+            respond({ message: "private upstream body" }, { status });
             await expect(lookup()).resolves.toMatchObject({
               error: { statusCode, credentialConfigured: true },
             });
@@ -124,7 +122,7 @@ it.each(["in-process", "bound"] as const)(
             { id: Number.MAX_SAFE_INTEGER + 1, login: "visitor" },
             { id: 42, login: "invalid/login" },
           ]) {
-            fetcher.mockClear().mockResolvedValue(Response.json(body));
+            respond(body);
             await expect(lookup()).resolves.toMatchObject({ error: { statusCode: 502 } });
           }
           fetcher.mockClear().mockRejectedValue(new Error("private network detail"));
@@ -134,20 +132,17 @@ it.each(["in-process", "bound"] as const)(
 
           for (const credentialConfigured of [true, false]) {
             setRuntimeConfigSnapshot(credentialConfigured ? cfg : fixture.cfg);
-            const quotaFetch = vi.fn<typeof fetch>().mockResolvedValue(
-              Response.json(
-                { message: "private quota body" },
-                {
-                  status: credentialConfigured ? 403 : 429,
-                  headers: { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "2000000000" },
-                },
-              ),
+            respond(
+              { message: "private quota body" },
+              {
+                status: credentialConfigured ? 403 : 429,
+                headers: { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "2000000000" },
+              },
             );
-            vi.stubGlobal("fetch", quotaFetch);
             await expect(lookup()).resolves.toMatchObject({
               error: { statusCode: 429, retryAtMs: 2_000_000_000_000, credentialConfigured },
             });
-            expect(quotaFetch).toHaveBeenCalledTimes(1);
+            expect(fetcher).toHaveBeenCalledTimes(1);
           }
           setRuntimeConfigSnapshot(cfg);
           const entered = createDeferredCore<AbortSignal>();

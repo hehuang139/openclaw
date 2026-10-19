@@ -16,7 +16,6 @@ import { getActivePluginRegistry } from "../plugins/runtime.js";
 import { getPluginRuntimeGatewayRequestScope } from "../plugins/runtime/gateway-request-scope.js";
 import { createDeferredCore } from "../shared/deferred.js";
 import { createChannelTestPluginBase } from "../test-utils/channel-plugins.js";
-import { acquireTestPortBlock } from "../test-utils/port-claims.js";
 import { createWatcherMock } from "./config-reload.watcher.test-support.js";
 import {
   clearInstanceBindingProbeCoordinators,
@@ -25,8 +24,12 @@ import {
 } from "./server-plugins.lifecycle.test-fixtures.js";
 import {
   installInstanceBindingConfigIo,
+  closePluginSocket,
+  configurePluginGateway,
+  observePostReadyStartupMaintenance,
   requireBoundRuntime,
   requestSettledInstanceBindingProbe,
+  startPluginGateway,
 } from "./server-plugins.lifecycle.test-support.js";
 import { loadGatewayTestConfig } from "./test-helpers.config-runtime.js";
 import {
@@ -35,23 +38,6 @@ import {
   rpcReq,
   startTestGatewayServer,
 } from "./test-helpers.server.js";
-
-// Post-ready maintenance refreshes the derived registry under the plugin lifecycle lease, and
-// plugins.reload refuses a busy lease instead of queueing. Tests await that refresh first.
-async function observePostReadyStartupMaintenance(): Promise<{ settled: Promise<void> }> {
-  const startupPlugins = await import("./server-startup-plugins.js");
-  const runMaintenance = startupPlugins.runGatewayPostReadyStartupMaintenance;
-  const settled = createDeferredCore();
-  const observer = vi
-    .spyOn(startupPlugins, "runGatewayPostReadyStartupMaintenance")
-    .mockImplementation((params) => {
-      const maintenance = runMaintenance(params);
-      maintenance.then(settled.resolve, settled.resolve);
-      return maintenance;
-    });
-  onTestFinished(() => observer.mockRestore());
-  return { settled: settled.promise };
-}
 
 // Fixtures must register real plugins after the shared helpers install their mocks.
 vi.doUnmock("../plugins/loader.js");
@@ -78,7 +64,6 @@ async function useGatewayGraphPluginRuntime(): Promise<void> {
   onTestFinished(() => runtimeLoader.mockRestore());
 }
 
-// A real plugin registry replacement must own accounts before their first route exists.
 describe("Gateway plugin replacement channel ownership", () => {
   const channelId = "reload-webhook";
   let server: Awaited<ReturnType<typeof startTestGatewayServer>> | undefined;
@@ -87,14 +72,7 @@ describe("Gateway plugin replacement channel ownership", () => {
 
   afterEach(async () => {
     releasePending.resolve();
-    const closingSocket = socket;
-    const socketClosed =
-      !closingSocket || closingSocket.readyState === closingSocket.CLOSED
-        ? Promise.resolve()
-        : new Promise<void>((resolve) => {
-            closingSocket.once("close", () => resolve());
-          });
-    closingSocket?.close();
+    const socketClosed = closePluginSocket(socket);
     try {
       const results = await Promise.allSettled([
         server?.close({ reason: "webhook reload cleanup" }),
@@ -180,17 +158,7 @@ module.exports = { id: ${JSON.stringify(id)}, register(api) {
 } };`,
         );
       }
-      process.env.OPENCLAW_TEST_MINIMAL_GATEWAY = "0";
-      delete process.env.OPENCLAW_DISABLE_BUNDLED_PLUGINS;
-      process.env.OPENCLAW_BUNDLED_PLUGINS_DIR = bundledRoot;
-      process.env.OPENCLAW_TEST_TRUST_BUNDLED_PLUGINS_DIR = "1";
-      process.env.OPENCLAW_SKIP_CRON = "1";
-      delete process.env.OPENCLAW_SKIP_CHANNELS;
-      delete process.env.OPENCLAW_SKIP_PROVIDERS;
-      const configPath = process.env.OPENCLAW_CONFIG_PATH;
-      if (!configPath) {
-        throw new Error("Gateway fixture did not set config path");
-      }
+      const configPath = configurePluginGateway(bundledRoot, true);
       const config = loadGatewayTestConfig();
       config.plugins = {
         enabled: true,
@@ -205,8 +173,6 @@ module.exports = { id: ${JSON.stringify(id)}, register(api) {
       await fs.writeFile(configPath, JSON.stringify(config));
       const hotReloadRecovery = vi.fn(() => ({ status: "emitted" as const }));
       await useGatewayGraphPluginRuntime();
-      const portClaim = await acquireTestPortBlock({ offsets: [0, 1, 2, 3, 4] });
-      const port = portClaim.port;
       const createConfigFileAdapter = configFileSource.createConfigFileAdapter;
       let configWatcher: ReturnType<typeof createWatcherMock> | undefined;
       const watchSpy = vi
@@ -228,14 +194,10 @@ module.exports = { id: ${JSON.stringify(id)}, register(api) {
           };
         });
       onTestFinished(() => watchSpy.mockRestore());
-      server = await startTestGatewayServer(portClaim, {
-        auth: { mode: "none" },
-        controlUiEnabled: false,
-        sidecarStartup: "start",
-        hotReloadRecovery,
-      });
+      const started = await startPluginGateway({ hotReloadRecovery });
+      server = started.server;
       await server.startupSettled;
-      socket = await connectWebchatClient({ port, scopes: ["operator.admin"] });
+      socket = await connectWebchatClient({ port: started.port, scopes: ["operator.admin"] });
       const connected = socket;
       type Probe = {
         instance: string;
@@ -423,17 +385,7 @@ module.exports = { id: ${JSON.stringify(id)}, register(api) {
     coordinator.channel = channelPlugin;
     const bundledRoot = tempDirs.make("openclaw-instance-binding-");
     await writeInstanceBindingProbePlugin(bundledRoot, coordinator.channelName, channelId);
-    process.env.OPENCLAW_TEST_MINIMAL_GATEWAY = "0";
-    delete process.env.OPENCLAW_DISABLE_BUNDLED_PLUGINS;
-    process.env.OPENCLAW_BUNDLED_PLUGINS_DIR = bundledRoot;
-    process.env.OPENCLAW_TEST_TRUST_BUNDLED_PLUGINS_DIR = "1";
-    process.env.OPENCLAW_SKIP_CRON = "1";
-    delete process.env.OPENCLAW_SKIP_CHANNELS;
-    delete process.env.OPENCLAW_SKIP_PROVIDERS;
-    const configPath = process.env.OPENCLAW_CONFIG_PATH;
-    if (!configPath) {
-      throw new Error("Gateway fixture did not set config path");
-    }
+    const configPath = configurePluginGateway(bundledRoot, true);
     const config = loadGatewayTestConfig();
     config.plugins = {
       ...config.plugins,
@@ -445,19 +397,12 @@ module.exports = { id: ${JSON.stringify(id)}, register(api) {
       },
     };
     await fs.writeFile(configPath, JSON.stringify(config));
-    const hotReloadRecovery = vi.fn(() => ({
-      status: "emitted" as const,
-    }));
+    const hotReloadRecovery = vi.fn(() => ({ status: "emitted" as const }));
     await useGatewayGraphPluginRuntime();
-    const portClaim = await acquireTestPortBlock({ offsets: [0, 1, 2, 3, 4] });
-    const port = portClaim.port;
     const maintenance = await observePostReadyStartupMaintenance();
-    server = await startTestGatewayServer(portClaim, {
-      auth: { mode: "none" },
-      controlUiEnabled: false,
-      sidecarStartup: "start",
-      hotReloadRecovery,
-    });
+    const started = await startPluginGateway({ hotReloadRecovery });
+    server = started.server;
+    const port = started.port;
     await server.startupSettled;
     await maintenance.settled;
     const probe = async (accountId: string) => {
@@ -473,11 +418,7 @@ module.exports = { id: ${JSON.stringify(id)}, register(api) {
     await expect
       .poll(() => [...starts.keys()].toSorted(), { timeout: 30_000 })
       .toEqual(["active", "parked", "pending"]);
-    expect(await probe("active")).toEqual({
-      status: 200,
-      body: "active:1",
-      registry: "current",
-    });
+    expect(await probe("active")).toEqual({ status: 200, body: "active:1", registry: "current" });
     expect((await probe("pending")).status).toBe(404);
     socket = await connectWebchatClient({ port, scopes: ["operator.admin"] });
     const stopped = await rpcReq(socket, "channels.stop", {
@@ -499,8 +440,7 @@ module.exports = { id: ${JSON.stringify(id)}, register(api) {
         error: { details: { runtime: { committed: false, phase: "drain" } } },
       });
       expect(reload.error?.message).toContain("instance-binding service cleanup rejected");
-      expect(coordinator.serviceStops).toBe(1);
-      expect(coordinator.serviceStarts).toBe(1);
+      expect(coordinator).toMatchObject({ serviceStops: 1, serviceStarts: 1 });
       expect(getActivePluginRegistry()).toBe(initialRegistry);
       releasePending.resolve();
       for (const accountId of ["active", "pending", "parked"]) {
@@ -534,11 +474,7 @@ module.exports = { id: ${JSON.stringify(id)}, register(api) {
       .poll(() => probe("pending"), { timeout: 30_000 })
       .toEqual({ status: 200, body: "pending:2", registry: "current" });
     releasePending.resolve();
-    expect(await probe("pending")).toEqual({
-      status: 200,
-      body: "pending:2",
-      registry: "current",
-    });
+    expect(await probe("pending")).toEqual({ status: 200, body: "pending:2", registry: "current" });
     expect((await probe("parked")).status).toBe(404);
     expect(starts.get("parked")).toBe(1);
     expect(hotReloadRecovery).not.toHaveBeenCalled();

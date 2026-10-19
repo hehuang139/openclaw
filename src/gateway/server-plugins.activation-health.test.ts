@@ -1,5 +1,5 @@
 import { setImmediate } from "node:timers/promises";
-import { afterEach, expect, it, onTestFinished, vi } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { createDeferred } from "../../test/helpers/promise.js";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import { recordPersistedContextEngineQuarantine } from "../context-engine/quarantine-health.js";
@@ -7,7 +7,6 @@ import { requireNodeSqlite } from "../infra/node-sqlite.js";
 import * as pluginStateWorker from "../plugin-state/plugin-state-worker-client.js";
 import * as pluginRuntime from "../plugins/runtime.js";
 import { resolveOpenClawStateSqlitePath } from "../state/openclaw-state-db.paths.js";
-import { acquireTestPortBlock } from "../test-utils/port-claims.js";
 import {
   clearInstanceBindingProbeCoordinators,
   INSTANCE_BINDING_PROBE_METHOD,
@@ -15,7 +14,9 @@ import {
 } from "./server-plugins.lifecycle.test-fixtures.js";
 import {
   installInstanceBindingConfigIo,
+  observePostReadyStartupMaintenance,
   prepareInstanceBindingFixture,
+  startPluginGateway,
 } from "./server-plugins.lifecycle.test-support.js";
 import {
   connectWebchatClient,
@@ -28,23 +29,6 @@ vi.doUnmock("../plugins/loader.js");
 installGatewayTestHooks({ scope: "suite" });
 installInstanceBindingConfigIo();
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
-
-// Post-ready maintenance refreshes the derived registry under the plugin lifecycle lease, and
-// plugins.reload refuses a busy lease instead of queueing. Tests await that refresh first.
-async function observePostReadyStartupMaintenance(): Promise<{ settled: Promise<void> }> {
-  const startupPlugins = await import("./server-startup-plugins.js");
-  const runMaintenance = startupPlugins.runGatewayPostReadyStartupMaintenance;
-  const settled = createDeferred();
-  const observer = vi
-    .spyOn(startupPlugins, "runGatewayPostReadyStartupMaintenance")
-    .mockImplementation((params) => {
-      const maintenance = runMaintenance(params);
-      maintenance.then(settled.resolve, settled.resolve);
-      return maintenance;
-    });
-  onTestFinished(() => observer.mockRestore());
-  return { settled: settled.promise };
-}
 
 function readPersistedCount(databasePath: string, engineId: string) {
   const { DatabaseSync } = requireNodeSqlite();
@@ -64,6 +48,32 @@ function readPersistedCount(databasePath: string, engineId: string) {
   }
 }
 
+function quarantine(engineId: string) {
+  return recordPersistedContextEngineQuarantine({
+    engineId,
+    operation: "resolve",
+    reason: "previous failure",
+    failedAt: new Date(123),
+  });
+}
+
+function holdHealthCleanup(
+  engineId: string,
+  reached: ReturnType<typeof createDeferred<void>>,
+  release: ReturnType<typeof createDeferred<void>>,
+) {
+  const clear = pluginStateWorker.clearRuntimeHealthInWorker;
+  return vi
+    .spyOn(pluginStateWorker, "clearRuntimeHealthInWorker")
+    .mockImplementation(async (params) => {
+      await clear(params);
+      if (params.selection.kind === "context-engine" && params.selection.engineId === engineId) {
+        reached.resolve();
+        await release.promise;
+      }
+    });
+}
+
 it.each([false, true])(
   "joins accepted activation cleanup through Gateway close (publication throws=%s)",
   { timeout: 600_000 },
@@ -73,26 +83,12 @@ it.each([false, true])(
     );
     const engineId = "gateway-activation-health";
     coordinator.contextEngineId = engineId;
-    await recordPersistedContextEngineQuarantine({
-      engineId,
-      operation: "resolve",
-      reason: "previous failure",
-      failedAt: new Date(123),
-    });
+    await quarantine(engineId);
     const databasePath = resolveOpenClawStateSqlitePath();
     expect(readPersistedCount(databasePath, engineId)).toEqual({ count: 1 });
     const reached = createDeferred();
     const release = createDeferred();
-    const clear = pluginStateWorker.clearRuntimeHealthInWorker;
-    const observer = vi
-      .spyOn(pluginStateWorker, "clearRuntimeHealthInWorker")
-      .mockImplementation(async (params) => {
-        await clear(params);
-        if (params.selection.kind === "context-engine" && params.selection.engineId === engineId) {
-          reached.resolve();
-          await release.promise;
-        }
-      });
+    const observer = holdHealthCleanup(engineId, reached, release);
     const kernelModule = await import("./server-kernel.js");
     const createKernel = kernelModule.createGatewayKernel;
     const publicationFailure = new Error("fixture publication failure after activation");
@@ -120,12 +116,7 @@ it.each([false, true])(
     let server: Awaited<ReturnType<typeof startTestGatewayServer>> | undefined;
     let closing: Promise<void> | undefined;
     try {
-      const claim = await acquireTestPortBlock({ offsets: [0, 1, 2, 3, 4] });
-      server = await startTestGatewayServer(claim, {
-        auth: { mode: "none" },
-        controlUiEnabled: false,
-        sidecarStartup: "defer",
-      });
+      ({ server } = await startPluginGateway({ sidecarStartup: "defer" }));
       let startupSettled = false;
       const startup = server.startupSettled.then(
         () => {
@@ -184,21 +175,12 @@ it.each([false, true])(
     let commit: { mockRestore: () => void } | undefined;
     try {
       const maintenance = await observePostReadyStartupMaintenance();
-      const claim = await acquireTestPortBlock({ offsets: [0, 1, 2, 3, 4] });
-      server = await startTestGatewayServer(claim, {
-        auth: { mode: "none" },
-        controlUiEnabled: false,
-        sidecarStartup: "start",
-      });
+      const started = await startPluginGateway({});
+      server = started.server;
       await server.startupSettled;
       await maintenance.settled;
-      socket = await connectWebchatClient({ port: claim.port, scopes: ["operator.admin"] });
-      await recordPersistedContextEngineQuarantine({
-        engineId,
-        operation: "resolve",
-        reason: "previous failure",
-        failedAt: new Date(123),
-      });
+      socket = await connectWebchatClient({ port: started.port, scopes: ["operator.admin"] });
+      await quarantine(engineId);
       const databasePath = resolveOpenClawStateSqlitePath();
       expect(readPersistedCount(databasePath, engineId)).toEqual({ count: 1 });
       if (publicationRefuses) {
@@ -209,18 +191,7 @@ it.each([false, true])(
           });
       }
       const reached = createDeferred();
-      const clear = pluginStateWorker.clearRuntimeHealthInWorker;
-      observer = vi
-        .spyOn(pluginStateWorker, "clearRuntimeHealthInWorker")
-        .mockImplementation(async (params) => {
-          const selected =
-            params.selection.kind === "context-engine" && params.selection.engineId === engineId;
-          await clear(params);
-          if (selected) {
-            reached.resolve();
-            await release.promise;
-          }
-        });
+      observer = holdHealthCleanup(engineId, reached, release);
       let reloadSettled = false;
       reload = rpcReq(socket, "plugins.reload", {
         plugins: [{ pluginId: "instance-binding-probe" }],
