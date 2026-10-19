@@ -17,13 +17,12 @@ import {
   observePostReadyStartupMaintenance,
   prepareInstanceBindingFixture,
   startPluginGateway,
+  closePluginGateway,
+  reloadPlugin,
+  type PluginServer,
+  type PluginSocket,
 } from "./server-plugins.lifecycle.test-support.js";
-import {
-  connectWebchatClient,
-  installGatewayTestHooks,
-  rpcReq,
-  startTestGatewayServer,
-} from "./test-helpers.server.js";
+import { connectWebchatClient, installGatewayTestHooks, rpcReq } from "./test-helpers.server.js";
 
 vi.doUnmock("../plugins/loader.js");
 installGatewayTestHooks({ scope: "suite" });
@@ -78,7 +77,7 @@ it.each([false, true])(
   "joins accepted activation cleanup through Gateway close (publication throws=%s)",
   { timeout: 600_000 },
   async (publicationThrows) => {
-    const { coordinator, restoreChannelRuntimeLoader } = await prepareInstanceBindingFixture(
+    const { coordinator } = await prepareInstanceBindingFixture(
       tempDirs.make("openclaw-activation-health-"),
     );
     const engineId = "gateway-activation-health";
@@ -113,21 +112,16 @@ it.each([false, true])(
           },
         };
       });
-    let server: Awaited<ReturnType<typeof startTestGatewayServer>> | undefined;
+    let server: PluginServer | undefined;
     let closing: Promise<void> | undefined;
     try {
       ({ server } = await startPluginGateway({ sidecarStartup: "defer" }));
       let startupSettled = false;
-      const startup = server.startupSettled.then(
-        () => {
+      const startup = server.startupSettled
+        .catch((error: unknown) => error)
+        .finally(() => {
           startupSettled = true;
-          return undefined;
-        },
-        (error: unknown) => {
-          startupSettled = true;
-          return error;
-        },
-      );
+        });
       expect(
         await Promise.race([reached.promise.then(() => "worker"), startup.then(() => "settled")]),
       ).toBe("worker");
@@ -149,7 +143,6 @@ it.each([false, true])(
       } finally {
         observer.mockRestore();
         kernelSpy.mockRestore();
-        restoreChannelRuntimeLoader?.();
         clearInstanceBindingProbeCoordinators();
         delete process.env.OPENCLAW_TEST_TRUST_BUNDLED_PLUGINS_DIR;
       }
@@ -161,14 +154,14 @@ it.each([false, true])(
   "joins plugin reload activation and recovery before its RPC result (publication refuses=%s)",
   { timeout: 600_000 },
   async (publicationRefuses) => {
-    const { coordinator, restoreChannelRuntimeLoader } = await prepareInstanceBindingFixture(
+    const { coordinator } = await prepareInstanceBindingFixture(
       tempDirs.make("openclaw-reload-health-"),
     );
     const engineId = "gateway-reload-health";
     coordinator.contextEngineId = engineId;
     coordinator.reportReloadSettlement = true;
-    let server: Awaited<ReturnType<typeof startTestGatewayServer>> | undefined;
-    let socket: Awaited<ReturnType<typeof connectWebchatClient>> | undefined;
+    let server: PluginServer | undefined;
+    let socket: PluginSocket | undefined;
     let reload: ReturnType<typeof rpcReq> | undefined;
     const release = createDeferred();
     let observer: { mockRestore: () => void } | undefined;
@@ -193,9 +186,7 @@ it.each([false, true])(
       const reached = createDeferred();
       observer = holdHealthCleanup(engineId, reached, release);
       let reloadSettled = false;
-      reload = rpcReq(socket, "plugins.reload", {
-        plugins: [{ pluginId: "instance-binding-probe" }],
-      }).then((result) => {
+      reload = reloadPlugin(socket).then((result) => {
         reloadSettled = true;
         return result;
       });
@@ -223,14 +214,10 @@ it.each([false, true])(
       release.resolve();
       try {
         await Promise.allSettled(reload ? [reload] : []);
-        socket?.close();
-        await server?.close({ reason: "reload health cleanup" });
+        await closePluginGateway(server, socket);
       } finally {
         observer?.mockRestore();
         commit?.mockRestore();
-        restoreChannelRuntimeLoader?.();
-        clearInstanceBindingProbeCoordinators();
-        delete process.env.OPENCLAW_TEST_TRUST_BUNDLED_PLUGINS_DIR;
       }
     }
   },

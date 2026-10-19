@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { afterEach, expect, it, vi } from "vitest";
 import { setRuntimeConfigSnapshot } from "../config/runtime-snapshot.js";
 import * as pluginLoader from "../plugins/loader.js";
@@ -105,25 +106,23 @@ it.each(["in-process", "bound"] as const)(
           await expect(lookup("../invalid")).resolves.toMatchObject({ error: { statusCode: 400 } });
           expect(fetcher).not.toHaveBeenCalled();
 
-          for (const [status, statusCode] of [
-            [404, 404],
-            [503, 502],
-            [403, 403],
-            [401, 401],
-          ] as const) {
-            respond({ message: "private upstream body" }, { status });
+          const errors: Array<[Response, number]> = [
+            ...[404, 503, 403, 401].map((status): [Response, number] => [
+              Response.json({ message: "private upstream body" }, { status }),
+              status === 503 ? 502 : status,
+            ]),
+            ...[
+              { id: 0, login: "visitor" },
+              { id: Number.MAX_SAFE_INTEGER + 1, login: "visitor" },
+              { id: 42, login: "invalid/login" },
+            ].map((body): [Response, number] => [Response.json(body), 502]),
+          ];
+          for (const [response, statusCode] of errors) {
+            fetcher.mockClear().mockResolvedValue(response);
             await expect(lookup()).resolves.toMatchObject({
               error: { statusCode, credentialConfigured: true },
             });
             expect(fetcher).toHaveBeenCalledTimes(1);
-          }
-          for (const body of [
-            { id: 0, login: "visitor" },
-            { id: Number.MAX_SAFE_INTEGER + 1, login: "visitor" },
-            { id: 42, login: "invalid/login" },
-          ]) {
-            respond(body);
-            await expect(lookup()).resolves.toMatchObject({ error: { statusCode: 502 } });
           }
           fetcher.mockClear().mockRejectedValue(new Error("private network detail"));
           await expect(lookup()).resolves.toMatchObject({
@@ -146,21 +145,16 @@ it.each(["in-process", "bound"] as const)(
           }
           setRuntimeConfigSnapshot(cfg);
           const entered = createDeferredCore<AbortSignal>();
-          vi.stubGlobal(
-            "fetch",
-            vi.fn<typeof fetch>(
-              (_url, init) =>
-                new Promise((_resolve, reject) => {
-                  const signal = init?.signal;
-                  if (!signal) {
-                    throw new Error("Expected lookup cancellation signal");
-                  }
-                  signal.addEventListener("abort", () => reject(new Error("Request aborted")), {
-                    once: true,
-                  });
-                  entered.resolve(signal);
-                }),
-            ),
+          fetcher.mockImplementation(
+            (_url, init) =>
+              new Promise((_resolve, reject) => {
+                const signal = init?.signal;
+                assert(signal, "Expected lookup cancellation signal");
+                signal.addEventListener("abort", () => reject(new Error("Request aborted")), {
+                  once: true,
+                });
+                entered.resolve(signal);
+              }),
           );
           const cancellation = new AbortController();
           const pending = lookup("visitor", cancellation.signal);
@@ -172,13 +166,10 @@ it.each(["in-process", "bound"] as const)(
 
           const returning = createDeferredCore();
           const response = createDeferredCore<Response>();
-          vi.stubGlobal(
-            "fetch",
-            vi.fn<typeof fetch>(async () => {
-              returning.resolve();
-              return await response.promise;
-            }),
-          );
+          fetcher.mockImplementation(async () => {
+            returning.resolve();
+            return await response.promise;
+          });
           const retiring = expect(lookup()).rejects.toThrow();
           await returning.promise;
           if (retireGateway) {

@@ -9,6 +9,7 @@ import { createDeferredCore } from "../shared/deferred.js";
 import { acquireTestPortBlock } from "../test-utils/port-claims.js";
 import {
   INSTANCE_BINDING_PROBE_METHOD,
+  clearInstanceBindingProbeCoordinators,
   installInstanceBindingProbeCoordinator,
   writeChannelBindingProbePlugin,
   writeInstanceBindingProbePlugin,
@@ -22,6 +23,17 @@ import {
   rpcReq,
   startTestGatewayServer,
 } from "./test-helpers.server.js";
+
+export type PluginSocket = Awaited<ReturnType<typeof connectWebchatClient>>;
+export type PluginServer = Awaited<ReturnType<typeof startTestGatewayServer>>;
+export const writeJson = (file: string, value: unknown) =>
+  fs.writeFile(file, JSON.stringify(value));
+
+export const reloadPlugin = (
+  socket: PluginSocket,
+  pluginId = "instance-binding-probe",
+  timeoutMs?: number,
+) => rpcReq(socket, "plugins.reload", { plugins: [{ pluginId }] }, timeoutMs);
 
 export function configurePluginGateway(bundledRoot: string, channels = false) {
   Object.assign(process.env, {
@@ -71,9 +83,7 @@ export async function observePostReadyStartupMaintenance() {
   return { settled: settled.promise };
 }
 
-export function closePluginSocket(
-  socket: Awaited<ReturnType<typeof connectWebchatClient>> | undefined,
-) {
+export async function closePluginGateway(server: PluginServer | undefined, socket?: PluginSocket) {
   const closed =
     !socket || socket.readyState === socket.CLOSED
       ? Promise.resolve()
@@ -81,7 +91,21 @@ export function closePluginSocket(
           socket.once("close", () => resolve());
         });
   socket?.close();
-  return closed;
+  try {
+    const results = await Promise.allSettled([
+      server?.close({ reason: "plugin fixture cleanup" }),
+      closed,
+    ]);
+    const failures = results.flatMap((result) =>
+      result.status === "rejected" ? [result.reason] : [],
+    );
+    if (failures.length) {
+      throw new AggregateError(failures, "Plugin lifecycle fixture shutdown failed");
+    }
+  } finally {
+    clearInstanceBindingProbeCoordinators();
+    delete process.env.OPENCLAW_TEST_TRUST_BUNDLED_PLUGINS_DIR;
+  }
 }
 
 export async function prepareInstanceBindingFixture(
@@ -165,9 +189,7 @@ async function installChannelBindingRuntimeLoader(proof: ChannelBindingProof) {
   };
 }
 
-export async function patchInstanceBindingTestConfig(
-  socket: Awaited<ReturnType<typeof connectWebchatClient>>,
-) {
+export async function patchInstanceBindingTestConfig(socket: PluginSocket) {
   const current = await rpcReq<{ hash?: string }>(socket, "config.get", {});
   expect(current.ok).toBe(true);
   expect(current.payload?.hash).toBeTypeOf("string");
@@ -187,25 +209,21 @@ export function installInstanceBindingConfigIo() {
   const configIoRestorers: Array<{ mockRestore: () => void }> = [];
 
   beforeEach(async () => {
-    const actualIo = await vi.importActual<typeof import("../config/io.js")>("../config/io.js");
+    const real = await vi.importActual<typeof import("../config/io.js")>("../config/io.js");
     const facades = await Promise.all([import("../config/io.js"), import("../config/config.js")]);
     // Cached mutation importers retain the shared mocks; delegate those same exports to real IO
     // so config receipts, preflight, source snapshots, and runtime defaults keep their real owner.
     for (const facade of facades) {
-      configIoRestorers.push(
-        vi.spyOn(facade, "createConfigIO").mockImplementation(actualIo.createConfigIO),
-        vi.spyOn(facade, "getRuntimeConfig").mockImplementation(actualIo.getRuntimeConfig),
-        vi
-          .spyOn(facade, "readConfigFileSnapshot")
-          .mockImplementation(actualIo.readConfigFileSnapshot),
-        vi
-          .spyOn(facade, "readConfigFileSnapshotWithPluginMetadata")
-          .mockImplementation(actualIo.readConfigFileSnapshotWithPluginMetadata),
-        vi
-          .spyOn(facade, "readConfigFileSnapshotForWrite")
-          .mockImplementation(actualIo.readConfigFileSnapshotForWrite),
-        vi.spyOn(facade, "writeConfigFile").mockImplementation(actualIo.writeConfigFile),
-      );
+      for (const name of [
+        "createConfigIO",
+        "getRuntimeConfig",
+        "readConfigFileSnapshot",
+        "readConfigFileSnapshotWithPluginMetadata",
+        "readConfigFileSnapshotForWrite",
+        "writeConfigFile",
+      ] as const) {
+        configIoRestorers.push(vi.spyOn(facade, name).mockImplementation(real[name]));
+      }
     }
   });
 
@@ -260,7 +278,7 @@ export async function reloadInstanceBindingAfterServiceDeadline({
 }: {
   coordinator: InstanceBindingProbeCoordinator;
   bundledRoot: string;
-  socket: Awaited<ReturnType<typeof connectWebchatClient>>;
+  socket: PluginSocket;
   currentConfig: Awaited<ReturnType<typeof rpcReq>>;
 }) {
   const initialRegistry = getActivePluginRegistry();
@@ -276,9 +294,7 @@ export async function reloadInstanceBindingAfterServiceDeadline({
     return await withPluginServiceStopDeadline(
       coordinator,
       () =>
-        rpcReq(socket, "plugins.reload", {
-          plugins: [{ pluginId: "instance-binding-probe" }],
-        }).then((result) => {
+        reloadPlugin(socket).then((result) => {
           reloadSettled = true;
           return result;
         }),

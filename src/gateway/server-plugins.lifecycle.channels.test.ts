@@ -18,26 +18,24 @@ import { createDeferredCore } from "../shared/deferred.js";
 import { createChannelTestPluginBase } from "../test-utils/channel-plugins.js";
 import { createWatcherMock } from "./config-reload.watcher.test-support.js";
 import {
-  clearInstanceBindingProbeCoordinators,
   installInstanceBindingProbeCoordinator,
   writeInstanceBindingProbePlugin,
 } from "./server-plugins.lifecycle.test-fixtures.js";
 import {
   installInstanceBindingConfigIo,
-  closePluginSocket,
+  closePluginGateway,
   configurePluginGateway,
   observePostReadyStartupMaintenance,
   requireBoundRuntime,
   requestSettledInstanceBindingProbe,
   startPluginGateway,
+  reloadPlugin,
+  writeJson,
+  type PluginServer,
+  type PluginSocket,
 } from "./server-plugins.lifecycle.test-support.js";
 import { loadGatewayTestConfig } from "./test-helpers.config-runtime.js";
-import {
-  connectWebchatClient,
-  installGatewayTestHooks,
-  rpcReq,
-  startTestGatewayServer,
-} from "./test-helpers.server.js";
+import { connectWebchatClient, installGatewayTestHooks, rpcReq } from "./test-helpers.server.js";
 
 // Fixtures must register real plugins after the shared helpers install their mocks.
 vi.doUnmock("../plugins/loader.js");
@@ -66,27 +64,15 @@ async function useGatewayGraphPluginRuntime(): Promise<void> {
 
 describe("Gateway plugin replacement channel ownership", () => {
   const channelId = "reload-webhook";
-  let server: Awaited<ReturnType<typeof startTestGatewayServer>> | undefined;
-  let socket: Awaited<ReturnType<typeof connectWebchatClient>> | undefined;
+  let server: PluginServer | undefined;
+  let socket: PluginSocket | undefined;
   let releasePending = createDeferredCore();
 
   afterEach(async () => {
     releasePending.resolve();
-    const socketClosed = closePluginSocket(socket);
     try {
-      const results = await Promise.allSettled([
-        server?.close({ reason: "webhook reload cleanup" }),
-        socketClosed,
-      ]);
-      const failures = results.flatMap((result) =>
-        result.status === "rejected" ? [result.reason] : [],
-      );
-      if (failures.length > 0) {
-        throw new AggregateError(failures, "Webhook lifecycle fixture shutdown failed");
-      }
+      await closePluginGateway(server, socket);
     } finally {
-      clearInstanceBindingProbeCoordinators();
-      delete process.env.OPENCLAW_TEST_TRUST_BUNDLED_PLUGINS_DIR;
       server = undefined;
       socket = undefined;
     }
@@ -101,34 +87,28 @@ describe("Gateway plugin replacement channel ownership", () => {
         const id = `${channel}-owner`;
         const pluginDir = path.join(bundledRoot, id);
         await fs.mkdir(pluginDir, { recursive: true });
-        await fs.writeFile(
-          path.join(pluginDir, "package.json"),
-          JSON.stringify({
-            name: id,
-            type: "commonjs",
-            main: "index.js",
-            openclaw: { extensions: ["./index.js"], runtimeExtensions: ["./index.js"] },
-            peerDependencies: { openclaw: ">=2026.1.1" },
-          }),
-        );
-        await fs.writeFile(
-          path.join(pluginDir, "openclaw.plugin.json"),
-          JSON.stringify({
-            id,
-            channels: [channel],
-            activation: { onStartup: true },
-            channelConfigs: {
-              [channel]: {
-                schema: {
-                  type: "object",
-                  additionalProperties: false,
-                  properties: { enabled: { type: "boolean" }, label: { type: "string" } },
-                },
+        await writeJson(path.join(pluginDir, "package.json"), {
+          name: id,
+          type: "commonjs",
+          main: "index.js",
+          openclaw: { extensions: ["./index.js"], runtimeExtensions: ["./index.js"] },
+          peerDependencies: { openclaw: ">=2026.1.1" },
+        });
+        await writeJson(path.join(pluginDir, "openclaw.plugin.json"), {
+          id,
+          channels: [channel],
+          activation: { onStartup: true },
+          channelConfigs: {
+            [channel]: {
+              schema: {
+                type: "object",
+                additionalProperties: false,
+                properties: { enabled: { type: "boolean" }, label: { type: "string" } },
               },
             },
-            configSchema: { type: "object", additionalProperties: false, properties: {} },
-          }),
-        );
+          },
+          configSchema: { type: "object", additionalProperties: false, properties: {} },
+        });
         await fs.writeFile(
           path.join(pluginDir, "index.js"),
           `
@@ -170,7 +150,7 @@ module.exports = { id: ${JSON.stringify(id)}, register(api) {
         },
       };
       config.channels = { "sibling-chat": { enabled: true, label: "retained" } };
-      await fs.writeFile(configPath, JSON.stringify(config));
+      await writeJson(configPath, config);
       const hotReloadRecovery = vi.fn(() => ({ status: "emitted" as const }));
       await useGatewayGraphPluginRuntime();
       const createConfigFileAdapter = configFileSource.createConfigFileAdapter;
@@ -250,13 +230,10 @@ module.exports = { id: ${JSON.stringify(id)}, register(api) {
       // Reordering an unchanged sibling's package keys must not stop its live account.
       const siblingPackagePath = path.join(bundledRoot, "sibling-chat-owner", "package.json");
       const siblingPackage = JSON.parse(await fs.readFile(siblingPackagePath, "utf8"));
-      await fs.writeFile(
-        siblingPackagePath,
-        JSON.stringify({
-          ...siblingPackage,
-          openclaw: { runtimeExtensions: ["./index.js"], extensions: ["./index.js"] },
-        }),
-      );
+      await writeJson(siblingPackagePath, {
+        ...siblingPackage,
+        openclaw: { runtimeExtensions: ["./index.js"], extensions: ["./index.js"] },
+      });
       const persisted = JSON.parse(await fs.readFile(configPath, "utf8"));
       const application = createRuntimeConfigWriteApplication();
       const committed = await commitConfigWithPendingPluginInstalls({
@@ -303,9 +280,7 @@ module.exports = { id: ${JSON.stringify(id)}, register(api) {
           return metadata;
         });
       onTestFinished(() => metadataSpy.mockRestore());
-      const explicit = await rpcReq(connected, "plugins.reload", {
-        plugins: [{ pluginId: "cold-chat-owner" }],
-      });
+      const explicit = await reloadPlugin(connected, "cold-chat-owner");
       expect(echoed).toBe(true);
       expect(explicit.ok, explicit.error?.message).toBe(true);
       expect(await settledProbe("sibling-chat")).toEqual(sibling);
@@ -396,7 +371,7 @@ module.exports = { id: ${JSON.stringify(id)}, register(api) {
         "instance-binding-probe": { enabled: true },
       },
     };
-    await fs.writeFile(configPath, JSON.stringify(config));
+    await writeJson(configPath, config);
     const hotReloadRecovery = vi.fn(() => ({ status: "emitted" as const }));
     await useGatewayGraphPluginRuntime();
     const maintenance = await observePostReadyStartupMaintenance();
@@ -431,9 +406,7 @@ module.exports = { id: ${JSON.stringify(id)}, register(api) {
     const { runtime } = await requireBoundRuntime(coordinator.runtimes, "webhook channel reload");
     await requestSettledInstanceBindingProbe(runtime);
     const initialRegistry = getActivePluginRegistry();
-    const reload = await rpcReq(socket, "plugins.reload", {
-      plugins: [{ pluginId: "instance-binding-probe" }],
-    });
+    const reload = await reloadPlugin(socket);
     if (teardownFails) {
       expect(reload).toMatchObject({
         ok: false,
@@ -447,9 +420,7 @@ module.exports = { id: ${JSON.stringify(id)}, register(api) {
         expect((await probe(accountId)).status).toBe(accountId === "active" ? 503 : 404);
         expect(starts.get(accountId)).toBe(1);
       }
-      const retry = await rpcReq(socket, "plugins.reload", {
-        plugins: [{ pluginId: "instance-binding-probe" }],
-      });
+      const retry = await reloadPlugin(socket);
       expect(retry.ok).toBe(false);
       expect(coordinator.serviceStarts).toBe(1);
       expect((await rpcReq(socket, "config.get", {})).ok).toBe(true);

@@ -9,13 +9,18 @@ import { getPluginInstance } from "../plugins/plugin-instance-scope.js";
 import { getActivePluginRegistry } from "../plugins/runtime.js";
 import { createDeferredCore } from "../shared/deferred.js";
 import * as settlement from "../shared/settle-within.js";
+import { acquireTestPortBlock } from "../test-utils/port-claims.js";
 import { clearInstanceBindingProbeCoordinators } from "./server-plugins.lifecycle.test-fixtures.js";
 import {
   installInstanceBindingConfigIo,
   prepareInstanceBindingFixture,
-  startPluginGateway,
 } from "./server-plugins.lifecycle.test-support.js";
-import { connectWebchatClient, installGatewayTestHooks, rpcReq } from "./test-helpers.server.js";
+import {
+  connectWebchatClient,
+  installGatewayTestHooks,
+  rpcReq,
+  startTestGatewayServer,
+} from "./test-helpers.server.js";
 
 // Automatic metadata repair owns the same lease as this fixture's manual reload.
 vi.mock("./server-runtime-services.js", async (importOriginal) => ({
@@ -51,7 +56,12 @@ it("reports plugin reload status and serves metadata throughout an admitted call
     },
   };
   await fs.writeFile(fixture.configPath, JSON.stringify(config));
-  const { server, port } = await startPluginGateway({});
+  const claim = await acquireTestPortBlock({ offsets: [0, 1, 2, 3, 4] });
+  const server = await startTestGatewayServer(claim, {
+    auth: { mode: "none" },
+    controlUiEnabled: false,
+    sidecarStartup: "start",
+  });
   let socket: Awaited<ReturnType<typeof connectWebchatClient>> | undefined;
   let held: ReturnType<typeof rpcReq> | undefined;
   let reloading: ReturnType<typeof rpcReq> | undefined;
@@ -61,7 +71,7 @@ it("reports plugin reload status and serves metadata throughout an admitted call
   let deadlineObservations = 0;
   try {
     await server.startupSettled;
-    socket = await connectWebchatClient({ port, scopes: ["operator.admin"] });
+    socket = await connectWebchatClient({ port: claim.port, scopes: ["operator.admin"] });
     const connected = socket;
     // Complete catalog acquisition before holding a call: retained acquisition
     // drains before call quiescence and may legitimately change reader status.
@@ -74,9 +84,10 @@ it("reports plugin reload status and serves metadata throughout an admitted call
     const reads = async () =>
       await Promise.all(
         ["models.list", "chat.metadata"].map(async (method) => {
+          const start = performance.now();
           const response = await rpcReq(connected, method, { agentId: "main" }, 120_000);
           expect(response.ok, `${method}: ${JSON.stringify(response)}`).toBe(true);
-          return response.payload;
+          return { method, durationMs: performance.now() - start, payload: response.payload };
         }),
       );
     const readReloadStatus = async () => {
@@ -187,7 +198,7 @@ it("reports plugin reload status and serves metadata throughout an admitted call
     const during = await withinTest(reads(), signal);
     expect(reloadSettled).toBe(false);
     expect(getActivePluginRegistry()).toBe(registry);
-    expect(during).toEqual(before);
+    expect(during.map((entry) => entry.payload)).toEqual(before.map((entry) => entry.payload));
     expect(deadlineObservations).toBe(1);
     deadline.resolve(false);
     expect(await reloading).toMatchObject({
@@ -198,7 +209,15 @@ it("reports plugin reload status and serves metadata throughout an admitted call
     expect(instance.acceptingCalls).toBe(true);
     expect(await readReloadStatus()).toBeUndefined();
     const after = await reads();
-    expect(after).toEqual(before);
+    expect(after.map((entry) => entry.payload)).toEqual(before.map((entry) => entry.payload));
+    console.info(
+      "PLUGIN_DRAIN_READER_LATENCY " +
+        JSON.stringify({
+          before: before.map(({ method, durationMs }) => ({ method, durationMs })),
+          during: during.map(({ method, durationMs }) => ({ method, durationMs })),
+          after: after.map(({ method, durationMs }) => ({ method, durationMs })),
+        }),
+    );
     release.resolve();
     expect((await held).ok).toBe(true);
   } finally {

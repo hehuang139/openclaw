@@ -3,6 +3,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { createDeferred, withinTest, withTestTimeout } from "../../test/helpers/promise.js";
 import type { ChannelPlugin } from "../channels/plugins/types.plugin.js";
 import { readConfigFileSnapshot } from "../config/config.js";
+import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { withPluginLifecycleLease } from "../plugins/plugin-lifecycle-lease.js";
 import { writeProviderAuthConfig } from "../plugins/provider-auth-config.js";
 import {
@@ -51,14 +52,28 @@ async function reloadChannels(
   });
 }
 
-function channelManager(getPluginRegistry = requireActivePluginChannelRegistry) {
+function channelManager(
+  getPluginRegistry = requireActivePluginChannelRegistry,
+  config: OpenClawConfig = {},
+) {
   return createChannelManager({
     scheduler: createTestGatewayScheduler(),
-    getRuntimeConfig: () => ({}),
+    getRuntimeConfig: () => config,
     getPluginRegistry,
     channelLogs: {},
     channelRuntimeEnvs: {},
   });
+}
+
+function installChannel(
+  gateway: ChannelPlugin["gateway"],
+  config: Partial<ChannelPlugin["config"]> = {},
+  id = "discord",
+  runtimeConfig: OpenClawConfig = {},
+) {
+  const plugin = { ...createChannelTestPluginBase({ id, config }), gateway };
+  setActivePluginRegistry(createTestRegistry([{ pluginId: id, plugin, source: "test" }]));
+  return channelManager(requireActivePluginChannelRegistry, runtimeConfig);
 }
 
 function untilAborted(signal: AbortSignal) {
@@ -98,9 +113,8 @@ it("the config watcher restarts a channel that can save provider settings after 
     const reloadScheduled = createDeferred();
     const reloadClock = createGatewaySchedulerClock(Date.now());
     let starts = 0;
-    const plugin: ChannelPlugin = {
-      ...createChannelTestPluginBase({ id: "telegram" }),
-      gateway: {
+    const owner = installChannel(
+      {
         startAccount: async ({ abortSignal }) => {
           const stopped = untilAborted(abortSignal);
           if (++starts === 2) {
@@ -132,15 +146,10 @@ it("the config watcher restarts a channel that can save provider settings after 
           await stopped;
         },
       },
-    };
-    setActivePluginRegistry(createTestRegistry([{ pluginId: "telegram", plugin, source: "test" }]));
-    const owner = createChannelManager({
-      scheduler: createTestGatewayScheduler(),
-      getRuntimeConfig: () => initialConfig,
-      getPluginRegistry: requireActivePluginChannelRegistry,
-      channelLogs: {},
-      channelRuntimeEnvs: {},
-    });
+      {},
+      "telegram",
+      initialConfig,
+    );
     await owner.startChannel("telegram");
     const log = {
       info: vi.fn(),
@@ -236,18 +245,13 @@ it("retries failed teardown before admitting a replacement", async () => {
       retryStarted.resolve();
       await finishTeardown.promise;
     });
-  const plugin: ChannelPlugin = {
-    ...createChannelTestPluginBase({
-      id: "discord",
-      config: {
-        listAccountIds: () => ["running"],
-        resolveAccount: (_cfg, accountId) => ({ accountId }),
-      },
-    }),
-    gateway: { startAccount, stopAccount },
-  };
-  setActivePluginRegistry(createTestRegistry([{ pluginId: "discord", plugin, source: "test" }]));
-  manager = channelManager();
+  manager = installChannel(
+    { startAccount, stopAccount },
+    {
+      listAccountIds: () => ["running"],
+      resolveAccount: (_cfg, accountId) => ({ accountId }),
+    },
+  );
   await manager.startChannel("discord");
   await expect(manager.stopChannel("discord", undefined, { manual: false })).rejects.toThrow(
     "teardown failed",
@@ -292,30 +296,25 @@ it.each(
     const configuring = createDeferred();
     const releaseConfiguration = createDeferred();
     let blockConfiguration = state === "racing";
-    const plugin: ChannelPlugin = {
-      ...createChannelTestPluginBase({
-        id: "discord",
-        config: {
-          listAccountIds: () => ["manual", "running"],
-          resolveAccount: (_cfg, accountId) => ({ accountId }),
-          isConfigured: async (account) => {
-            if (blockConfiguration && account.accountId === "manual") {
-              configuring.resolve();
-              await releaseConfiguration.promise;
-            }
-            return true;
-          },
-        },
-      }),
-      gateway: {
+    manager = installChannel(
+      {
         startAccount: async ({ accountId, abortSignal }) => {
           starts.push(accountId);
           await untilAborted(abortSignal);
         },
       },
-    };
-    setActivePluginRegistry(createTestRegistry([{ pluginId: "discord", plugin, source: "test" }]));
-    manager = channelManager();
+      {
+        listAccountIds: () => ["manual", "running"],
+        resolveAccount: (_cfg, accountId) => ({ accountId }),
+        isConfigured: async (account) => {
+          if (blockConfiguration && account.accountId === "manual") {
+            configuring.resolve();
+            await releaseConfiguration.promise;
+          }
+          return true;
+        },
+      },
+    );
     if (state === "stopped") {
       await manager.startChannel("discord", "manual");
       expect(starts).toEqual(["manual"]);
@@ -397,20 +396,21 @@ it("channel reload uses the attached registry instead of the process lookup", as
     }
   };
   try {
-    setActivePluginRegistry(attached);
-    await ownerA.startChannels();
-    expect(monitors.map(({ owner }) => owner)).toEqual(["A-original", "A-original"]);
-    await stopOwnedChannels();
-    expect(monitors.every(({ abortSignal, joined }) => abortSignal.aborted && joined)).toBe(true);
-
-    attached = current;
-    setActivePluginRegistry(current);
-    registryOwnerA.publish(current);
-    await ownerA.startChannels();
-    expect(monitors.slice(2).map(({ owner }) => owner)).toEqual(["A-current", "A-current"]);
-    // Reload must resume this generation, not the manager's original registry.
-    await stopOwnedChannels();
-    expect(monitors.every(({ abortSignal, joined }) => abortSignal.aborted && joined)).toBe(true);
+    for (const [name, next] of [
+      ["A-original", attached],
+      ["A-current", current],
+    ] as const) {
+      attached = next;
+      setActivePluginRegistry(next);
+      if (next === current) {
+        registryOwnerA.publish(next);
+      }
+      const beforeStart = monitors.length;
+      await ownerA.startChannels();
+      expect(monitors.slice(beforeStart).map(({ owner }) => owner)).toEqual([name, name]);
+      await stopOwnedChannels();
+      expect(monitors.every(({ abortSignal, joined }) => abortSignal.aborted && joined)).toBe(true);
+    }
 
     setActivePluginRegistry(foreign);
     await ownerB.startChannels();

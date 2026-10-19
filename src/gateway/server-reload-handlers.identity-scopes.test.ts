@@ -4,11 +4,6 @@ import { afterEach, assert, beforeEach, expect, it, vi } from "vitest";
 import { createInfoWarnErrorLogger } from "../../test/helpers/mock-logger.js";
 import { createDeferred } from "../../test/helpers/promise.js";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
-import {
-  getRuntimeAuthProfileStoreCredentialsRevision,
-  getRuntimeAuthProfileStoreSnapshotsRevision,
-  prepareRuntimeAuthProfileStoreSnapshots,
-} from "../agents/auth-profiles/runtime-snapshots.js";
 import { clearFinishedSessionsForScopes } from "../agents/bash-process-registry.js";
 import { runExecProcess, type ExecProcessHandle } from "../agents/bash-tools.exec-runtime.js";
 import { withGatewayToolCallerIdentity } from "../agents/tools/gateway-caller-context.js";
@@ -28,7 +23,6 @@ import {
   setActivePluginRegistry,
 } from "../plugins/runtime.js";
 import { resetGatewayWorkAdmission } from "../process/gateway-work-admission.js";
-import { createEmptyRuntimeWebToolsMetadata } from "../secrets/runtime-fast-path.js";
 import { clearSecretsRuntimeSnapshot } from "../secrets/runtime.js";
 import { ensureProfileForEmail } from "../state/user-profiles.js";
 import { createTestGatewayScheduler } from "../test-utils/gateway-scheduler-clock.js";
@@ -49,7 +43,10 @@ import {
 } from "./server-reload-handlers.config.test-support.js";
 import { startManagedGatewayConfigReloader } from "./server-reload-managed.js";
 import { SharedGatewaySessionGenerationState } from "./server-shared-auth-generation.js";
-import { createTestRuntimeSecretsActivator } from "./server-startup-config.test-support.js";
+import {
+  createTestRuntimeSecretsActivator,
+  makePreparedSecretsSnapshot,
+} from "./server-startup-config.test-support.js";
 import {
   createDispatchTestHarness,
   createOperatorWsClient,
@@ -223,15 +220,9 @@ it.each(revocations)("preserves proxy runs until %s ends", async (revocation) =>
       readSnapshot: fixture.readSnapshot,
       subscribeToWrites: fixture.subscribeToWrites,
       resolveGatewayContext: () => context,
-      activateRuntimeSecrets: createTestRuntimeSecretsActivator(async ({ config }) => ({
-        sourceConfig: config,
-        config,
-        authStoreCredentialsRevision: getRuntimeAuthProfileStoreCredentialsRevision(),
-        authStoreSnapshotsRevision: getRuntimeAuthProfileStoreSnapshotsRevision(),
-        warnings: [],
-        webTools: createEmptyRuntimeWebToolsMetadata(),
-        authStores: prepareRuntimeAuthProfileStoreSnapshots([]),
-      })),
+      activateRuntimeSecrets: createTestRuntimeSecretsActivator(async ({ config }) =>
+        makePreparedSecretsSnapshot(config),
+      ),
       requestRecoveryRestart,
     });
     const captures: NonNullable<Awaited<ReturnType<typeof captureGatewayOperatorRunAuthority>>>[] =
@@ -422,11 +413,11 @@ it.each(revocations)("preserves proxy runs until %s ends", async (revocation) =>
       await write(initialConfig);
       revokedEffect.release();
       const denied = await revokedEffect.outcome;
-      expect(denied).toHaveProperty("error");
-      if ("error" in denied) {
-        expect(denied.error).toBeInstanceOf(Error);
-        expect(String(denied.error)).toMatch(/authority is no longer active/);
-      }
+      expect(denied).toHaveProperty("error", expect.any(Error));
+      expect(denied).toHaveProperty(
+        "error.message",
+        expect.stringMatching(/authority is no longer active/),
+      );
       await expect(fs.readFile(revokedEffect.marker)).rejects.toMatchObject({ code: "ENOENT" });
       for (const { authority } of [original, delegated]) {
         expect(authority.signal?.aborted).toBe(true);
