@@ -9,6 +9,7 @@ import { hasReplaySafeCodeModeCheckpointInCurrentTurn } from "./main-session-res
 
 type RecoverySource =
   | "completion"
+  | "cron"
   | "harness_completion"
   | "inter_session"
   | "internal_system"
@@ -28,6 +29,8 @@ export function selectMainSessionRecoveryCheckpoint(
         replaySafe = false;
         switch (provenance?.kind) {
           case "internal_system":
+            source = provenance.sourceTool?.toLowerCase() === "cron" ? "cron" : provenance.kind;
+            break;
           case "external_user":
             source = provenance.kind;
             break;

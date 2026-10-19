@@ -6,6 +6,7 @@ import {
   getDiagnosticSessionState,
   touchDiagnosticSessionState,
   type SessionRef,
+  type SessionStateValue,
 } from "./diagnostic-session-state.js";
 import { createSubsystemLogger } from "./subsystem.js";
 
@@ -75,6 +76,42 @@ export function logLaneDequeue(lane: string, waitMs: number, queueSize: number):
     lane,
     queueSize,
     waitMs,
+  });
+  markDiagnosticActivity();
+}
+
+export function logSessionStateChange(
+  params: SessionRef & {
+    state: SessionStateValue;
+    reason?: string;
+    /** Message lifecycle owns its queue count; controller retirement only projects idle. */
+    consumeQueuedTurn?: boolean;
+  },
+) {
+  if (!areDiagnosticsEnabledForProcess()) {
+    return;
+  }
+  const state = getDiagnosticSessionState(params);
+  const prevState = state.state;
+  state.state = params.state;
+  touchDiagnosticSessionState(state);
+  if (params.state === "processing" && prevState !== "processing") {
+    state.activeQueuedTurn = state.queueDepth > 0;
+  }
+  if (params.state === "idle") {
+    if (params.consumeQueuedTurn !== false) {
+      state.queueDepth = Math.max(0, state.queueDepth - 1);
+    }
+    state.activeQueuedTurn = false;
+  }
+  emitDiagnosticEvent({
+    type: "session.state",
+    sessionId: state.sessionId,
+    sessionKey: state.sessionKey,
+    prevState,
+    state: params.state,
+    reason: params.reason,
+    queueDepth: state.queueDepth,
   });
   markDiagnosticActivity();
 }
