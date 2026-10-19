@@ -2248,7 +2248,7 @@ src/plugins/gateway-startup-plugin-config.ts	1
 src/plugins/hook-decision-types.ts	1
 src/plugins/hook-isolation.ts	3
 src/plugins/hook-runner-global-state.ts	1
-src/plugins/hook-types.ts	2
+src/plugins/hook-types.ts	1
 src/plugins/hooks.ts	7
 src/plugins/host-hook-attachments.ts	1
 src/plugins/host-hook-runtime.ts	1
@@ -2486,7 +2486,6 @@ src/worker/worker-process.ts	1
 src/worker/workspace-rsync-receiver.ts	1
 ui/src/app-navigation.ts	1
 ui/src/app-routes.ts	1
-ui/src/app/app-host-route-state.ts	1
 ui/src/app/app-shell-chrome.ts	2
 ui/src/app/app-shell-gateway.ts	1
 ui/src/app/assistant-identity.ts	2
