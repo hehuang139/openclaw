@@ -4,7 +4,7 @@ import { GATEWAY_OWNER_PROFILE_ID } from "../../../../packages/gateway-protocol/
 import type { GatewayClient } from "../../server-methods/client-types.js";
 import { attachGatewayHarness } from "./message-handler.post-connect-health.test-support.js";
 
-/** Real token admission must retain owner identity without enrolling an ephemeral client in presence. */
+/** Token admission retains owner identity; device-less unauthenticated probes stay rejected. */
 export async function expectEphemeralOwnerConnect(
   mode: "cli" | "backend" | "probe",
   authMethod: "token" | "none",
@@ -23,17 +23,28 @@ export async function expectEphemeralOwnerConnect(
     caps: [],
   });
   await harness.runWhenIdle();
-  expect(harness.frames).toContainEqual(expect.objectContaining({ id: "connect", ok: true }));
-  if (authMethod === "token") {
-    expect(harness.client).toMatchObject({
-      authenticatedUserProfile: { profileId: GATEWAY_OWNER_PROFILE_ID },
-      connect: { scopes: [] },
-      internal: { authenticatedOperator: true, operatorRoleActor: { kind: "system" } },
-    });
-    expect(harness.registeredProfileId).toBe(GATEWAY_OWNER_PROFILE_ID);
-  } else {
-    expect(harness.client).not.toHaveProperty("authenticatedUserProfile");
+  if (authMethod === "none") {
+    expect(harness.frames).toContainEqual(
+      expect.objectContaining({
+        id: "connect",
+        ok: false,
+        error: expect.objectContaining({
+          message: "device identity required",
+          details: { code: "DEVICE_IDENTITY_REQUIRED" },
+        }),
+      }),
+    );
+    expect(harness.client).toBeNull();
+    expect(harness.registeredProfileId).toBeUndefined();
+    return;
   }
+  expect(harness.frames).toContainEqual(expect.objectContaining({ id: "connect", ok: true }));
+  expect(harness.client).toMatchObject({
+    authenticatedUserProfile: { profileId: GATEWAY_OWNER_PROFILE_ID },
+    connect: { scopes: [] },
+    internal: { authenticatedOperator: true, operatorRoleActor: { kind: "system" } },
+  });
+  expect(harness.registeredProfileId).toBe(GATEWAY_OWNER_PROFILE_ID);
   expect(harness.client).not.toHaveProperty("authenticatedUserId");
 }
 

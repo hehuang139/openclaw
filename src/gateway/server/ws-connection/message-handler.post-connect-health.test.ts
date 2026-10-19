@@ -425,7 +425,7 @@ describe("attachGatewayWsMessageHandler post-connect health refresh", () => {
     ["probe", "token"],
     ["probe", "none"],
   ] as const)(
-    "keeps %s input identity independent of presence (auth: %s)",
+    "keeps %s admission and identity independent of presence (auth: %s)",
     async (mode, authMethod) => {
       await withOpenClawTestState(
         { label: "gateway-owner-ephemeral", prepareProfileCatalog: true },
@@ -1811,7 +1811,7 @@ describe("attachGatewayWsMessageHandler post-connect health refresh", () => {
         scopes: ["operator.admin"],
         ...(remote ? { auth: { token: "gateway-token" } } : {}),
       });
-      await waitForFast(() => expect(harness.socketSend).toHaveBeenCalled());
+      await harness.whenAttached;
       const client = harness.client as GatewayWsClient;
       expect(client.clientIp).toBe(remote ? "203.0.113.50" : undefined);
       expect(client.internal?.isLocalClient).toBe(remote ? undefined : true);
@@ -1949,7 +1949,7 @@ describe("attachGatewayWsMessageHandler post-connect health refresh", () => {
             : { approvalRuntimeToken: await getOperatorApprovalRuntimeToken() }),
         },
       });
-      await waitForFast(() => expect(harness.socketSend).toHaveBeenCalled());
+      await harness.whenAttached;
       const client = harness.client as GatewayWsClient;
       if (kind === "missing") {
         expect(client.connect.scopes).toEqual(["operator.approvals"]);

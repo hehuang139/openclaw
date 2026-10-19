@@ -100,19 +100,9 @@ describe("sessions_send steering custody", () => {
               await receiver.commit();
               expect(receiver.pendingCount()).toBe(0);
             }
-            const result = await sent;
-            expect(result.details).toMatchObject(
-              outcome === "sender completed"
-                ? { status: "accepted", targetDisposition: "steered" }
-                : {
-                    status: "error",
-                    error: expect.stringMatching(
-                      outcome === "source revoked"
-                        ? /authority|access|revoked/i
-                        : /queue_message_failed reason=injection_unavailable/,
-                    ),
-                  },
-            );
+            // Recipient custody can settle after the sender ends, but a closed
+            // personal-tool turn must never receive a fresh result.
+            await expect(sent).rejects.toThrow("This turn has ended");
             expect(receiver.pendingCount()).toBe(0);
             // Join recipient custody cleanup without a timed wait or polling.
             await setImmediate();
