@@ -129,10 +129,10 @@ export function registerAgentPreDispatchFailureTests() {
         );
         const clock = createGatewaySchedulerClock(Date.now());
         const scheduler = createTestGatewayScheduler(clock.clock);
-        const stuck: string[] = [];
+        let stuckCount = 0;
         const unsubscribe = onDiagnosticEvent((event) => {
           if (event.type === "session.stuck" && event.sessionKey === sessionKey) {
-            stuck.push(event.reason);
+            stuckCount += 1;
           }
         });
         try {
@@ -198,7 +198,7 @@ export function registerAgentPreDispatchFailureTests() {
           await clock.advanceBy(30_000);
           await clock.advanceBy(30_000);
           await waitForDiagnosticEventsDrained();
-          expect(stuck).toEqual([]);
+          expect(stuckCount).toBe(0);
         } finally {
           unsubscribe();
           stopGatewayDiagnosticHeartbeat();
