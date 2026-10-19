@@ -55,12 +55,15 @@ jobs:
         uses: ./.github/actions/setup-node-env
         with:
           cache-mode: restore
+      - name: Setup pinned Bun test runtime
+        uses: ./.github/actions/setup-test-bun
       - name: Replay exact failing cases
         shell: bash
         env:
           EXPECTED_SHA: ${{ matrix.ref }}
           REPLAY_SUITE: ${{ matrix.suite }}
           TMPDIR: ${{ runner.temp }}
+          OPENCLAW_VITEST_RUNTIME: bun
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
