@@ -467,7 +467,16 @@ it("steers its watched raw child while another agent has a newer row", async () 
       }),
     ).toContainEqual(
       expect.objectContaining({
-        message: expect.objectContaining({ role: "user", content: "Continue main" }),
+        message: expect.objectContaining({
+          role: "user",
+          content: expect.stringContaining("Continue main"),
+          provenance: {
+            kind: "inter_session",
+            sourceSessionKey: children.get("main")!.parentKey,
+            sourceTool: "sessions_send",
+          },
+          __openclaw: { steerTargetRunId: "main-1" },
+        }),
       }),
     );
     expect(
