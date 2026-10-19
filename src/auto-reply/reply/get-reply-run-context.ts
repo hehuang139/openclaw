@@ -555,9 +555,6 @@ export async function prepareReplyRunContext(params: RunPreparedReplyParams) {
         ? softResetTail || `[OpenClaw session ${startupAction}]`
         : effectiveBaseBody;
     const fragments: RuntimeContextFragment[] = [
-      ...(requestGitCredit
-        ? [{ kind: "runtime-instruction" as const, text: requestGitCredit }]
-        : []),
       ...(isRoomEvent ? [{ kind: "runtime-instruction" as const, text: ROOM_EVENT_PROMPT }] : []),
       ...(normalizedInboundUserContext
         ? [{ kind: "conversation-data" as const, text: normalizedInboundUserContext }]
@@ -566,7 +563,7 @@ export async function prepareReplyRunContext(params: RunPreparedReplyParams) {
         ? [{ kind: "runtime-instruction" as const, text: deliveryDirective }]
         : []),
     ];
-    const currentInboundContext: CurrentInboundPromptContext | undefined =
+    let currentInboundContext: CurrentInboundPromptContext | undefined =
       !isBareSessionReset && currentInboundContextText
         ? {
             text: currentInboundContextText,
@@ -576,6 +573,11 @@ export async function prepareReplyRunContext(params: RunPreparedReplyParams) {
             ...(activeGoalContext ? { injectedGoalContexts: [activeGoalContext] } : {}),
           }
         : undefined;
+    if (requestGitCredit) {
+      currentInboundContext = appendCurrentInboundContext(currentInboundContext, [
+        { kind: "runtime-instruction", text: requestGitCredit },
+      ]);
+    }
 
     return {
       effectiveBaseBody,
