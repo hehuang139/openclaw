@@ -18,7 +18,18 @@ export function renderSessionSummary(
     return <div class="usage-empty-block">{t("usage.details.noUsageData")}</div>;
   }
 
-  const formatTs = (ts?: number): string => (ts ? formatMs(ts) : t("usage.common.emptyValue"));
+  // One compact span: the date once, then both times when the session stayed within a day.
+  const formatActivitySpan = (first?: number, last?: number): string => {
+    if (!first || !last) {
+      return first || last ? formatMs((first || last)!) : t("usage.common.emptyValue");
+    }
+    const day = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" });
+    const time = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" });
+    const sameDay = day.format(first) === day.format(last);
+    return sameDay
+      ? `${day.format(first)}, ${time.format(first)} – ${time.format(last)}`
+      : `${day.format(first)}, ${time.format(first)} → ${day.format(last)}, ${time.format(last)}`;
+  };
   const hasInterval = filteredLogs !== undefined;
   const datedLogs = filteredLogs?.filter(({ log }) => log.timestamp > 0);
   const messageCounts = !hasInterval
@@ -56,10 +67,14 @@ export function renderSessionSummary(
       }
     }
   }
-  const toolItems = baseTools.map((tool) => ({
-    label: tool.name,
-    value: `${toolCounts ? (toolCounts.get(tool.name) ?? 0) : hasInterval ? t("usage.common.emptyValue") : tool.count}`,
-  }));
+  const toolItems = baseTools.map((tool) => {
+    const count = toolCounts ? (toolCounts.get(tool.name) ?? 0) : tool.count;
+    return {
+      label: tool.name,
+      value: `${!toolCounts && hasInterval ? t("usage.common.emptyValue") : count}`,
+      weight: !toolCounts && hasInterval ? 0 : count,
+    };
+  });
   const toolCallCount = toolCounts
     ? [...toolCounts.values()].reduce((sum, count) => sum + count, 0)
     : hasInterval
@@ -74,6 +89,7 @@ export function renderSessionSummary(
     usage.modelUsage?.slice(0, 6).map((entry) => ({
       label: entry.model ?? t("usage.common.unknown"),
       value: formatUsageCost(entry.totals.totalCost, 2, entry.totals.usageReport),
+      weight: entry.totals.totalCost || entry.totals.totalTokens / 1e9,
       sub: formatUsageTokens(entry.totals.totalTokens, entry.totals.usageReport),
     })) ?? [];
   const cards = [
@@ -122,12 +138,7 @@ export function renderSessionSummary(
     {
       labelKey: "usage.details.duration",
       value: formatDurationCompact(usage.durationMs) ?? t("usage.common.emptyValue"),
-      meta: (
-        <>
-          {" "}
-          {formatTs(usage.firstActivity)} → {formatTs(usage.lastActivity)}{" "}
-        </>
-      ),
+      meta: <> {formatActivitySpan(usage.firstActivity, usage.lastActivity)} </>,
     },
   ];
 

@@ -8,6 +8,7 @@ const enUsage = {
     unavailable:
       "Token usage and cost are unknown because a response ended before final usage arrived. Select an unaffected session to view its usage.",
     lowerBoundShort: "≥ Lower bound",
+    partialShort: "Partial results",
     lowerBound:
       "≥ marks a lower bound: some responses ended before their final usage arrived, so their tokens and cost are partly counted.",
     presets: {
@@ -88,7 +89,12 @@ const enUsage = {
       select: "Filter by session creator",
       selected: "Selected identity",
       identity: "Identity",
-      unattributed: "Unattributed",
+      unattributed: "Not recorded",
+      unattributedHint:
+        "These sessions have no creator on record, usually because they started before OpenClaw recorded who starts each session.",
+      channelUser: "{channel} user {id}",
+      channelGroup: "{channel} group",
+      channelTopic: "{channel} group · topic {topic}",
       system: "System",
       empty: "No usage for these dates and filters.",
       more: "Show {count} more identities",
@@ -171,6 +177,9 @@ const enUsage = {
     sessions: {
       title: "Sessions",
       shown: "{count} shown",
+      showAll: "Show all {count}",
+      details: "Session details",
+      showTop: "Show top {count}",
       total: "{count} total",
       avg: "avg",
       all: "All",

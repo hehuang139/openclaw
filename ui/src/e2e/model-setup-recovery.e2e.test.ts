@@ -2,6 +2,7 @@
 import { expect, it } from "vitest";
 import { installMockGateway } from "../test-helpers/control-ui-e2e.ts";
 import { createControlUiE2eSuite } from "./control-ui-e2e-suite.test-support.ts";
+import { expandProvider } from "./model-providers.test-support.ts";
 import {
   activated,
   button,
@@ -114,7 +115,7 @@ suite.define(() => {
           .toBe(false);
         await page.setViewportSize({ height: 900, width: 1280 });
         await button(page.locator(".model-setup-discovery"), "Close").click();
-        const currentProvider = page.locator('[data-provider-id="openai"]');
+        const currentProvider = await expandProvider(page, "openai");
         await button(currentProvider, "Test connection").click();
         const verify = await gateway.waitForRequest("models.probe");
         expect(verify.params).toEqual({ provider: "openai", agentId: "main" });
@@ -304,7 +305,7 @@ suite.define(() => {
 
         const response = await page.goto(suite.server.baseUrl + "settings/model-providers");
         expect(response?.status()).toBe(200);
-        const selectedModel = page.locator('[data-provider-id="lmstudio"]');
+        const selectedModel = await expandProvider(page, "lmstudio");
         await selectedModel.getByText("LM Studio", { exact: true }).waitFor();
         await expectText(
           page.locator(".model-providers__defaults openclaw-select-picker").first(),

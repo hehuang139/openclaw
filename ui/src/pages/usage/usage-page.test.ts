@@ -49,14 +49,18 @@ describe("UsagePage cache convergence", () => {
     const client = { request } as unknown as GatewayBrowserClient;
     const page = await createPage(client, true, contextWithClient(client));
     await preloadUsage(page);
-    expect(page.querySelector(".callout.danger")?.textContent).toBe(message);
+    // A partial answer is not an error: one quiet chip carries the gateway's explanation.
+    expect(page.querySelector(".callout.danger")).toBeNull();
+    expect(
+      page.querySelector(".usage-lower-bound:not(.usage-lower-bound--off)")?.textContent,
+    ).toContain(message);
     expect(page.textContent).not.toContain("Select a date range and click Refresh");
 
     result = cacheSnapshot("fresh").result;
     refreshButton(page).click();
     await vi.advanceTimersByTimeAsync(0);
     await page.updateComplete;
-    expect(page.querySelector(".callout.danger")).toBeNull();
+    expect(page.querySelector(".usage-lower-bound")?.classList).toContain("usage-lower-bound--off");
   });
 
   beforeEach(() => {

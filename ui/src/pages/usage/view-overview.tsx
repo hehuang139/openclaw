@@ -1,6 +1,6 @@
 import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
 import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
-import { For, Show, createMemo } from "solid-js";
+import { For, Show, createMemo, createSignal } from "solid-js";
 import {
   addCostUsageTotals,
   createEmptyCostUsageTotals,
@@ -117,46 +117,62 @@ function renderFilterChips(
 }
 
 /** Daily cost per calendar day of a window, zero-filled; null for ranges too long to draw as columns. */
+/** Daily cost per calendar day of a window, zero-filled; null for ranges too long to draw as columns. */
 function windowDailyCosts(costs: Map<string, number>, endDate: string, days: number) {
   if (days < 2 || days > 92) {
     return null;
   }
   const start = Date.parse(endDate) - (days - 1) * 86_400_000;
-  return Array.from(
-    { length: days },
-    (_, index) => costs.get(new Date(start + index * 86_400_000).toISOString().slice(0, 10)) ?? 0,
-  );
+  return Array.from({ length: days }, (_, index) => {
+    const date = new Date(start + index * 86_400_000).toISOString().slice(0, 10);
+    return { date, cost: costs.get(date) ?? 0 };
+  });
 }
 
-/** Carapace mini columns: quiet bars, the newest period in accent. */
-function CostColumns(props: { values: number[]; label: string }) {
-  const max = () => Math.max(...props.values, 0);
+/** Mini daily columns: tinted by value, the newest day in full accent, a readout on hover. */
+function CostColumns(props: { days: Array<{ date: string; cost: number }>; label: string }) {
+  const max = () => Math.max(0, ...props.days.map((day) => day.cost));
+  const [hover, setHover] = createSignal<number | null>(null);
+  const active = () => {
+    const index = hover();
+    return index === null ? undefined : props.days[index];
+  };
   return (
-    <svg
+    <div
       class="usage-bars"
-      viewBox={`0 0 ${props.values.length * 10} 28`}
-      preserveAspectRatio="none"
       role="img"
       aria-label={props.label}
+      onPointerLeave={() => setHover(null)}
     >
-      <For each={props.values}>
-        {(value, index) => {
-          const height = () => (max() > 0 && value > 0 ? Math.max(1.5, (value / max()) * 26) : 0);
+      <For each={props.days}>
+        {(day, index) => {
+          const share = () => (max() > 0 ? day.cost / max() : 0);
           return (
-            <rect
+            <span
               class={[
                 "usage-bars__bar",
-                { "usage-bars__bar--current": index() === props.values.length - 1 },
+                {
+                  "usage-bars__bar--current": index() === props.days.length - 1,
+                  "usage-bars__bar--hover": hover() === index(),
+                },
               ]}
-              x={index() * 10 + 1}
-              y={28 - height()}
-              width={8}
-              height={height()}
+              style={{
+                height: `${day.cost > 0 ? Math.max(6, share() * 100) : 0}%`,
+                "--usage-bar-tint": `${Math.round(35 + share() * 50)}%`,
+              }}
+              onPointerEnter={() => setHover(index())}
             />
           );
         }}
       </For>
-    </svg>
+      <Show when={active()}>
+        {(day) => (
+          <span class="usage-bars__tip">
+            {formatDayLabel(day().date)} · <b>{formatAnalysisCost(day().cost)}</b>
+          </span>
+        )}
+      </Show>
+    </div>
   );
 }
 
@@ -209,7 +225,7 @@ function renderCostWindowComparison(
                     ? ` · ${formatAnalysisCost(summary.totals.totalCost / summary.days, summary.totals.usageReport)} ${t("usage.costWindows.perDay")}`
                     : undefined}
                 </div>
-                {columns ? <CostColumns values={columns} label={label} /> : undefined}
+                {columns ? <CostColumns days={columns} label={label} /> : undefined}
               </div>
             );
           }}
@@ -219,9 +235,11 @@ function renderCostWindowComparison(
   );
 }
 
+type InsightItem = { label: string; value: string; sub?: string; agentId?: string; weight: number };
+
 function renderInsightList(
   title: string,
-  items: Array<{ label: string; value: string; sub?: string; agentId?: string }>,
+  items: InsightItem[],
   emptyLabel: string,
   options?: {
     className?: string;
@@ -229,31 +247,35 @@ function renderInsightList(
     error?: boolean;
   },
 ) {
+  // Bars compare rows within one list; the leader fills the track.
+  const max = Math.max(0, ...items.map((item) => item.weight));
+  const share = (item: InsightItem) => (max > 0 ? (item.weight / max) * 100 : 0);
   return (
     <div class={["usage-insight-card", options?.className]}>
       <div class="usage-insight-title">{title}</div>
       {items.length === 0 ? (
         <div class="muted">{emptyLabel}</div>
       ) : (
-        <div class={[options?.error ? "usage-error-list" : "usage-list", options?.listClassName]}>
+        <div
+          class={[
+            "usage-list",
+            { "usage-list--error": options?.error === true },
+            options?.listClassName,
+          ]}
+        >
           <For each={items}>
-            {(item) =>
-              options?.error ? (
-                <div class="usage-error-row">
-                  <div class="usage-error-date">{item.label}</div>
-                  <div class="usage-error-rate">{item.value}</div>
-                  {item.sub ? <div class="usage-error-sub">{item.sub}</div> : undefined}
-                </div>
-              ) : (
-                <div class="usage-list-item">
-                  <span class="usage-list-label" title={item.label}>
-                    {item.agentId ? <AgentRowChip agentId={item.agentId} /> : item.label}
-                  </span>
-                  <span class="usage-list-value">{item.value}</span>
-                  {item.sub ? <span class="usage-list-sub">{item.sub}</span> : undefined}
-                </div>
-              )
-            }
+            {(item, index) => (
+              <div class={["usage-list-item", { "usage-list-item--lead": index() === 0 }]}>
+                <span class="usage-list-label" title={item.label}>
+                  {item.agentId ? <AgentRowChip agentId={item.agentId} /> : item.label}
+                </span>
+                <span class="usage-list-value">{item.value}</span>
+                <span class="usage-list-bar" aria-hidden="true">
+                  <span style={{ width: `${share(item)}%` }} />
+                </span>
+                {item.sub ? <span class="usage-list-sub">{item.sub}</span> : undefined}
+              </div>
+            )}
           </For>
         </div>
       )}
@@ -266,8 +288,7 @@ export function UsageInsights(props: {
   aggregates: UsageAggregates;
   stats: UsageInsightStats;
   showCostHint: boolean;
-  showCostShares: boolean;
-  errorHours: Array<{ label: string; value: string; sub?: string }>;
+  errorHours: InsightItem[];
   sessionCount: number;
   totalSessions: number;
 }) {
@@ -275,12 +296,12 @@ export function UsageInsights(props: {
     const totals = props.totals;
     const aggregates = props.aggregates;
     const stats = props.stats;
-    const showCostShares = props.showCostShares;
     if (!totals) {
       return undefined;
     }
 
-    // A ratio of partial counters is neither exact nor a lower bound: show it only when complete.
+    // Partial tokens over exact counts or durations are lower bounds; a ratio with partial
+    // values on both sides (cache hit rate) is only approximate.
     const report = totals.usageReport;
     const partial = report?.state === "unavailable";
     const empty = t("usage.common.emptyValue");
@@ -290,15 +311,21 @@ export function UsageInsights(props: {
     const avgCost = aggregates.messages.total ? totals.totalCost / aggregates.messages.total : 0;
     const cacheBase = totals.input + totals.cacheRead + totals.cacheWrite;
     const cacheHitRate = cacheBase > 0 ? totals.cacheRead / cacheBase : 0;
-    const cacheHitLabel = cacheBase > 0 && !partial ? `${(cacheHitRate * 100).toFixed(1)}%` : empty;
+    const cacheHitPercent = `${(cacheHitRate * 100).toFixed(1)}%`;
+    const cacheHitLabel =
+      cacheBase <= 0
+        ? empty
+        : partial
+          ? t("usage.common.approx", { value: cacheHitPercent })
+          : cacheHitPercent;
     const errorRatePct = stats.errorRate * 100;
     const throughputLabel =
-      stats.throughputTokensPerMin !== undefined && !partial
-        ? `${formatUsageTokens(Math.round(stats.throughputTokensPerMin))} ${t("usage.overview.tokensPerMinute")}`
+      stats.throughputTokensPerMin !== undefined
+        ? `${formatUsageTokens(Math.round(stats.throughputTokensPerMin), report)} ${t("usage.overview.tokensPerMinute")}`
         : t("usage.common.emptyValue");
     const throughputCostLabel =
-      stats.throughputCostPerMin !== undefined && !partial
-        ? `${formatAnalysisCost(stats.throughputCostPerMin)} ${t("usage.overview.perMinute")}`
+      stats.throughputCostPerMin !== undefined
+        ? `${formatAnalysisCost(stats.throughputCostPerMin, report)} ${t("usage.overview.perMinute")}`
         : t("usage.common.emptyValue");
     const avgDurationLabel =
       stats.durationCount > 0
@@ -311,6 +338,7 @@ export function UsageInsights(props: {
       .map((day) => ({
         label: formatDayLabel(day.date),
         value: `${((day.errors / day.messages) * 100).toFixed(2)}%`,
+        weight: day.errors / day.messages,
         sub: `${day.errors.toLocaleString()} ${normalizeLowercaseStringOrEmpty(t("usage.overview.errors"))} · ${day.messages.toLocaleString()} ${t("usage.overview.messagesAbbrev")} · ${formatUsageTokens(day.tokens, day.usageReport)}`,
       }));
 
@@ -326,17 +354,9 @@ export function UsageInsights(props: {
         entryTotals.totalCost === 0 && entryTotals.missingCostEntries > 0
           ? t("usage.overview.unpriced")
           : formatAnalysisCost(entryTotals.totalCost, entryTotals.usageReport),
+      // Bars rank by cost, which reflects model, speed tier and cache use better than tokens.
+      weight: entryTotals.totalCost || entryTotals.totalTokens / 1e9,
       sub: [
-        // A share needs a complete entry and a complete denominator.
-        showCostShares &&
-        !partial &&
-        entryTotals.usageReport?.state !== "unavailable" &&
-        entryTotals.totalCost > 0 &&
-        totals.totalCost > 0
-          ? t("usage.overview.costShare", {
-              percent: ((entryTotals.totalCost / totals.totalCost) * 100).toFixed(1),
-            })
-          : null,
         formatUsageTokens(entryTotals.totalTokens, entryTotals.usageReport),
         count === undefined
           ? null
@@ -346,7 +366,11 @@ export function UsageInsights(props: {
         .join(" · "),
     });
 
+    // Rows with no tokens and no cost (e.g. delivery mirrors) carry no usage worth ranking.
+    const used = (entry: { totals: UsageTotals }) =>
+      entry.totals.totalTokens > 0 || entry.totals.totalCost > 0;
     const topModels = aggregates.byModel
+      .filter(used)
       .slice(0, 5)
       .map((entry) => costAttribution(entry.model ?? t("usage.common.unknown"), entry));
     // Aliases such as claude-cli fold into the provider they bill through.
@@ -366,6 +390,7 @@ export function UsageInsights(props: {
           count: entries.reduce((sum, entry) => sum + entry.count, 0),
         };
       })
+      .filter(used)
       .toSorted(
         (a, b) =>
           b.totals.totalCost - a.totals.totalCost || b.totals.totalTokens - a.totals.totalTokens,
@@ -380,11 +405,14 @@ export function UsageInsights(props: {
     const topTools = aggregates.tools.tools.slice(0, 6).map((tool) => ({
       label: tool.name,
       value: `${tool.count.toLocaleString()} ${t("usage.overview.calls")}`,
+      weight: tool.count,
     }));
     const topAgents = aggregates.byAgent
+      .filter(used)
       .slice(0, 5)
       .map((entry) => costAttribution(entry.agentId, entry, true));
     const topChannels = aggregates.byChannel
+      .filter(used)
       .slice(0, 5)
       .map((entry) => costAttribution(entry.channel, entry));
     const insightLists = [
@@ -399,8 +427,8 @@ export function UsageInsights(props: {
       aggregates,
       throughputLabel,
       throughputCostLabel,
-      avgTokensLabel: partial ? empty : formatUsageTokens(avgTokens),
-      avgCostLabel: partial ? empty : formatAnalysisCost(avgCost),
+      avgTokensLabel: formatUsageTokens(avgTokens, report),
+      avgCostLabel: formatAnalysisCost(avgCost, report),
       partial,
       report,
       cacheHitLabel,

@@ -29,21 +29,28 @@ export function UsageMosaic(props: {
     const maxHour = Math.max(...stats.hourTotals, 0);
     const maxWeekday = Math.max(...stats.weekdayTotals.map((day) => day.tokens), 0);
     const share = (value: number, max: number) => (max > 0 ? (value / max) * 100 : 0);
-    const weekdays = stats.weekdayTotals.map((day) => ({
+    // Bars are tinted by value so the chart reads at a glance; "now" marks today and this hour.
+    const tint = (percent: number) => `${Math.round(35 + percent * 0.5)}%`;
+    const now = new Date();
+    const nowHour = timeZone === "utc" ? now.getUTCHours() : now.getHours();
+    const nowWeekday = timeZone === "utc" ? now.getUTCDay() : now.getDay();
+    const weekdays = stats.weekdayTotals.map((day, index) => ({
       ...day,
       share: share(day.tokens, maxWeekday),
       peak: maxWeekday > 0 && day.tokens === maxWeekday,
+      now: index === nowWeekday,
     }));
     const hours = stats.hourTotals.map((value, hour) => ({
       hour,
       share: share(value, maxHour),
       // A selection takes the accent; the peak only marks itself when nothing is selected.
       peak: selectedHours.length === 0 && maxHour > 0 && value === maxHour,
+      now: hour === nowHour,
       title: `${hour}:00 · ${formatUsageTokens(value, report)} ${normalizeLowercaseStringOrEmpty(t("usage.metrics.tokens"))}`,
       selected: selectedHours.includes(hour),
     }));
 
-    return { stats, timeZone, weekdays, hours, onSelectHour, report };
+    return { stats, timeZone, weekdays, hours, onSelectHour, report, tint };
   });
   return (
     <SettingsSection
@@ -74,10 +81,21 @@ export function UsageMosaic(props: {
               <ul class="usage-weekdays">
                 <For each={state().weekdays}>
                   {(day) => (
-                    <li class={["usage-weekday", { "usage-weekday--peak": day.peak }]}>
+                    <li
+                      class={[
+                        "usage-weekday",
+                        { "usage-weekday--peak": day.peak, "usage-weekday--now": day.now },
+                      ]}
+                    >
                       <span class="usage-weekday__label">{day.label}</span>
                       <span class="usage-weekday__track" aria-hidden="true">
-                        <span class="usage-weekday__fill" style={{ width: `${day.share}%` }} />
+                        <span
+                          class="usage-weekday__fill"
+                          style={{
+                            width: `${day.share}%`,
+                            "--usage-bar-tint": state().tint(day.share),
+                          }}
+                        />
                       </span>
                       <span class="usage-weekday__value">
                         {formatUsageTokens(day.tokens, state().report)}
@@ -96,7 +114,11 @@ export function UsageMosaic(props: {
                       type="button"
                       class={[
                         "usage-hour-cell",
-                        { selected: hour().selected, "usage-hour-cell--peak": hour().peak },
+                        {
+                          selected: hour().selected,
+                          "usage-hour-cell--peak": hour().peak,
+                          "usage-hour-cell--now": hour().now,
+                        },
                       ]}
                       title={hour().title}
                       aria-label={hour().title}
@@ -105,7 +127,13 @@ export function UsageMosaic(props: {
                         state().onSelectHour(hour().hour, event.shiftKey)
                       }
                     >
-                      <span class="usage-hour-cell__bar" style={{ height: `${hour().share}%` }} />
+                      <span
+                        class="usage-hour-cell__bar"
+                        style={{
+                          height: `${hour().share}%`,
+                          "--usage-bar-tint": state().tint(hour().share),
+                        }}
+                      />
                     </button>
                   )}
                 </For>

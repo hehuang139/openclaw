@@ -20,6 +20,7 @@ import {
   createPendingUsageRouteData,
   focusDocument,
   refreshButton,
+  showRecentSessions,
 } from "./usage-page.test-support.ts";
 
 afterEach(cleanupUsagePageTest);
@@ -63,6 +64,7 @@ describe("UsagePage detail requests", () => {
         : { providers: [], points: [], logs: [] },
     );
     const { page } = await loadUsagePage(request);
+    await showRecentSessions(page);
     const settle = async () => {
       await waitForFast(() => expect(page.usageLoading).toBe(false));
       await page.updateComplete;

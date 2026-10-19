@@ -66,7 +66,8 @@ export function createUsagePage(context: ApplicationContext) {
   };
   // Sorting and recent selection belong to the next request, before Solid commits.
   let display: UsageOwnerView["display"] = {
-    sessionSort: "recent",
+    // Cost reflects model, speed tier and cache use; it is what a reader ranks sessions by.
+    sessionSort: "cost",
     sessionSortDir: "desc",
     recentSessions: [],
     sessionsTab: "all",
@@ -530,7 +531,7 @@ export function createUsagePage(context: ApplicationContext) {
       data: {
         loading: usageLoading(),
         exporting: usageExportRequest.pending,
-        error: usageError ?? usageResult()?.partial?.message ?? null,
+        error: usageError,
         sessions: usageRosterResult()?.sessions ?? [],
         sessionPage: usageRosterResult()?.overview,
         creatorOptions: usageCreatorOptions(),

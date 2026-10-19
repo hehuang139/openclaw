@@ -368,6 +368,13 @@ export async function preloadUsage(page: TestUsagePage): Promise<void> {
   await page.updateComplete;
 }
 
+/** Tests written against the recent-first session order opt back into it; the page sorts by cost. */
+export async function showRecentSessions(page: TestUsagePage): Promise<void> {
+  page.read().callbacks.display.onChange({ sessionSort: "recent" });
+  await vi.waitFor(() => expect(page.usageLoading).toBe(false));
+  await page.updateComplete;
+}
+
 export function refreshButton(page: TestUsagePage): HTMLButtonElement {
   const button = [...page.querySelectorAll<HTMLButtonElement>("button")].find(
     (entry) => (entry.getAttribute("aria-label") ?? entry.textContent?.trim()) === "Refresh",

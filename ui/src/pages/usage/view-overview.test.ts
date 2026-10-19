@@ -65,7 +65,6 @@ describe("UsageInsights", () => {
             errorRate: 0,
           },
           showCostHint: false,
-          showCostShares: true,
           errorHours: [],
           sessionCount: 1,
           totalSessions: 1,
@@ -148,7 +147,6 @@ describe("UsageInsights", () => {
           },
           stats: { durationCount: 0, avgDurationMs: 0, errorRate: 0 },
           showCostHint: false,
-          showCostShares: true,
           errorHours: [],
           sessionCount: 1,
           totalSessions: 1,
@@ -174,7 +172,6 @@ describe("UsageInsights", () => {
           },
           stats: { durationCount: 0, avgDurationMs: 0, errorRate: 0 },
           showCostHint: false,
-          showCostShares: true,
           errorHours: [],
           sessionCount: 1,
           totalSessions: 1,
@@ -485,5 +482,31 @@ describe("SessionsCard", () => {
       [...container.querySelectorAll(".session-bar-title")].map((entry) => entry.textContent),
     ).toEqual(["B", "A"]);
     expect(container.querySelector(".sessions-card-stats")?.textContent).toContain("500 avg");
+  });
+
+  it("leads with the top ten sessions and expands to the full page on request", () => {
+    const base = createUsageProps();
+    const sessions = Array.from({ length: 12 }, (_, index) => session(`S${index + 1}`));
+    const overview = createUsageOverview({ total: 12, tableSessionCount: 12 });
+    const container = document.createElement("div");
+    mountSolid(
+      () =>
+        SessionsCard({
+          sessions,
+          usage: { ...base, data: { ...base.data, overview } },
+          overview,
+          totalSessions: 12,
+        }),
+      { container },
+    );
+    flush();
+    const rows = () => container.querySelectorAll(".session-bar-row").length;
+    expect(rows()).toBe(10);
+    const toggle = container.querySelector<HTMLButtonElement>(".sessions-show-all")!;
+    expect(toggle.textContent?.trim()).toBe("Show all 12");
+    toggle.click();
+    flush();
+    expect(rows()).toBe(12);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
   });
 });

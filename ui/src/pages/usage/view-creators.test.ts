@@ -96,7 +96,7 @@ it("keeps all creator choices after filtering and passes opaque identities throu
 });
 
 it.each([
-  { actor: undefined, label: "Unattributed" },
+  { actor: undefined, label: "Not recorded" },
   { actor: { type: "system" as const }, label: "System" },
 ])("labels $label attribution explicitly without displaying the filter key", ({ actor, label }) => {
   const onSelect = vi.fn<(key: string | null) => void>();
@@ -129,4 +129,40 @@ it.each([
   expect(container.textContent).toContain("not per-turn billing");
   button.click();
   expect(onSelect).toHaveBeenCalledWith("unattributed:opaque-key");
+});
+
+it.each([
+  ["telegram:group:-100123:topic:2051", "Telegram group · topic 2051"],
+  ["200482621", "Telegram user 200482621"],
+  ["telegram:200482621", "Telegram user 200482621"],
+  ["telegram:group:-100123", "Telegram group"],
+])("names the legacy channel creator %s as %s", (id, label) => {
+  const container = document.createElement("div");
+  document.body.append(container);
+  mountSolid(
+    () =>
+      UsageCreators({
+        groups: [
+          {
+            key: JSON.stringify(["human", "channel", "main", "telegram", "default", id]),
+            actor: {
+              type: "human",
+              id,
+              identity: { type: "legacy", actorType: "human", source: null, id },
+            },
+            totals: createEmptyCostUsageTotals(),
+            sessionCount: 1,
+            daily: [],
+            sessionActivity: [],
+          },
+        ],
+        selectedKey: null,
+        mode: "cost",
+        onSelect: () => {},
+      }),
+    { container },
+  );
+  flush();
+  // Raw sender ids read as people and places, never as opaque keys.
+  expect(container.querySelector(".usage-creator-name")?.textContent).toContain(label);
 });

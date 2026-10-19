@@ -51,6 +51,8 @@ type UsageDataState = {
   loading: boolean;
   exporting: boolean;
   error: string | null;
+  /** The gateway answered with part of the range; not an error. */
+  partialNotice?: string | null;
   sessions: UsageSessionEntry[];
   creatorOptions: NonNullable<SessionsUsageResult["creatorOptions"]>;
   overview?: SessionsUsageResult["overview"];

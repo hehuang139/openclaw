@@ -1,5 +1,5 @@
 import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
-import { For, createMemo } from "solid-js";
+import { For, Show, createMemo, createSignal } from "solid-js";
 import { providerDisplayLabel } from "../../components/provider-icon.ts";
 import { SettingsSection, SettingsSegmented } from "../../components/solid/settings-ui.tsx";
 import { formatDurationCompact } from "../../lib/format-duration.ts";
@@ -34,6 +34,8 @@ const buildSessionMeta = (session: UsageSessionEntry): string[] => {
   ].filter((part): part is string => typeof part === "string" && part.length > 0);
 };
 
+const SESSION_PREVIEW = 10;
+
 export function SessionsCard(props: {
   sessions: UsageSessionEntry[];
   usage: UsageProps;
@@ -42,6 +44,8 @@ export function SessionsCard(props: {
   totalSessions: number;
 }) {
   const isTokenMode = createMemo(() => props.usage.display.chartMode === "tokens");
+  // The page leads with the costliest sessions; the rest of the page stays one click away.
+  const [showAll, setShowAll] = createSignal(false);
   const selectedRows = () => props.usage.data.overview?.selectedRows ?? [];
   const averageLabel = createMemo(() => {
     i18nRevision();
@@ -152,11 +156,23 @@ export function SessionsCard(props: {
             ]}
           >
             <SessionRows
-              sessions={props.sessions}
+              sessions={showAll() ? props.sessions : props.sessions.slice(0, SESSION_PREVIEW)}
               selectedSessions={props.usage.filters.selectedSessions}
               isTokenMode={isTokenMode()}
               onSelect={props.usage.callbacks.details.onSelectSession}
             />
+            <Show when={props.sessions.length > SESSION_PREVIEW}>
+              <button
+                type="button"
+                class="btn btn--sm btn--ghost sessions-show-all"
+                aria-expanded={showAll() ? "true" : "false"}
+                onClick={() => setShowAll((current) => !current)}
+              >
+                {showAll()
+                  ? t("usage.sessions.showTop", { count: String(SESSION_PREVIEW) })
+                  : t("usage.sessions.showAll", { count: props.sessions.length.toLocaleString() })}
+              </button>
+            </Show>
           </div>
         )}
         {props.usage.display.sessionsTab === "all" && props.overview ? (

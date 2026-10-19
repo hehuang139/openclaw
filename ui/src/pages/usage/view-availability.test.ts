@@ -62,8 +62,9 @@ it("shows lower-bound totals after interruption while keeping completed session 
       ?.closest(".usage-summary-card")
       ?.querySelector(".usage-summary-value")
       ?.textContent?.trim();
-  expect(summaryValue("cache-hit-rate")).toBe("—");
-  expect(summaryValue("average-tokens")).toBe("—");
+  // Partial tokens over exact message counts are lower bounds; partial-over-partial is approximate.
+  expect(summaryValue("cache-hit-rate")).toMatch(/^≈ /);
+  expect(summaryValue("average-tokens")).toMatch(/^≥ /);
   expect(container.textContent).not.toContain("of cost");
 
   setSelection(["completed"]);
@@ -79,7 +80,7 @@ it("shows lower-bound totals after interruption while keeping completed session 
   );
   // An exact selection shows exact sums and ratios again.
   expect(container.querySelector(".cost-breakdown-total")?.textContent).not.toContain("≥");
-  expect(summaryValue("average-tokens")).not.toBe("—");
+  expect(summaryValue("average-tokens")).not.toMatch(/^[≥≈]/);
 });
 
 it("keeps the lower-bound note for full-session charts when only the selected day is complete", () => {

@@ -692,8 +692,7 @@
 
 .usage-summary-sub,
 .session-summary-meta,
-.usage-list-sub,
-.usage-error-sub {
+.usage-list-sub {
   font-size: 12px;
   color: var(--muted);
   font-variant-numeric: tabular-nums;
@@ -768,6 +767,10 @@
 .usage-creator-filter {
   width: 260px;
   max-width: 100%;
+}
+
+.usage-creator-row--unrecorded :is(th, td) {
+  color: var(--muted);
 }
 
 .usage-creators {
@@ -942,7 +945,6 @@
 }
 
 .usage-list,
-.usage-error-list,
 .context-breakdown-list {
   display: grid;
   gap: 0;
@@ -958,28 +960,52 @@
   font-size: 13px;
 }
 
-/* Insight rows: one-line name and value, detail underneath; names never wrap mid-word. */
-.usage-list-item,
-.usage-error-row {
+/* Insight rows: name and value, a share bar, then quiet detail; names never wrap mid-word. */
+.usage-list-item {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: baseline;
-  gap: 2px var(--space-3);
-  padding: var(--space-2) 0;
-  border-bottom: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
+  gap: 5px var(--space-3);
+  padding: 10px 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 45%, transparent);
   font-size: 13px;
 }
 
-.usage-list-label,
-.usage-error-date {
+.usage-list-label {
   overflow: hidden;
   color: var(--text);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.usage-list-sub,
-.usage-error-sub {
+.usage-list-bar {
+  grid-column: 1 / -1;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--border) 55%, transparent);
+}
+
+.usage-list-bar > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+.usage-list-item--lead .usage-list-bar > span {
+  background: var(--accent);
+}
+
+.usage-list--error .usage-list-bar > span {
+  background: color-mix(in srgb, var(--danger) 50%, transparent);
+}
+
+.usage-list--error .usage-list-item--lead .usage-list-bar > span {
+  background: var(--danger);
+}
+
+.usage-list-sub {
   grid-column: 1 / -1;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -994,27 +1020,23 @@
 }
 
 .usage-list-item:last-child,
-.usage-error-row:last-child,
 .context-breakdown-item:last-child {
   border-bottom: none;
   padding-bottom: 0;
 }
 
 .usage-list-item:first-child,
-.usage-error-row:first-child,
 .context-breakdown-item:first-child {
   padding-top: 0;
 }
 
-.usage-list-value,
-.usage-error-rate {
+.usage-list-value {
   color: var(--text-strong);
-  font-family: var(--mono);
-  font-weight: 500;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
 
-.usage-error-rate {
+.usage-list--error .usage-list-value {
   color: var(--danger);
 }
 
@@ -1101,7 +1123,7 @@
   display: block;
   height: 100%;
   border-radius: inherit;
-  background: var(--border-strong);
+  background: color-mix(in srgb, var(--accent) var(--usage-bar-tint, 45%), transparent);
 }
 
 .usage-weekday__value {
@@ -1110,10 +1132,21 @@
   text-align: right;
 }
 
-/* Only the peak carries the accent; every other mark stays quiet. */
+/* Marks are tinted by value; the peak and the current day or hour carry the full accent. */
 .usage-weekday--peak .usage-weekday__fill,
-.usage-hour-cell--peak .usage-hour-cell__bar {
+.usage-weekday--now .usage-weekday__fill,
+.usage-hour-cell--peak .usage-hour-cell__bar,
+.usage-hour-cell--now .usage-hour-cell__bar {
   background: var(--accent);
+}
+
+.usage-weekday--now .usage-weekday__label {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.usage-hour-cell--now .usage-hour-cell__bar {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 30%, transparent);
 }
 
 .usage-weekday--peak .usage-weekday__value {
@@ -1144,7 +1177,7 @@
 .usage-hour-cell__bar {
   width: 100%;
   border-radius: 2px 2px 0 0;
-  background: var(--border-strong);
+  background: color-mix(in srgb, var(--accent) var(--usage-bar-tint, 45%), transparent);
 }
 
 .usage-hour-cell:hover {
@@ -1173,10 +1206,6 @@
   grid-template-columns: minmax(0, 1fr);
   gap: 16px;
   align-items: start;
-}
-
-.usage-grid:has(.usage-grid-column:nth-child(2)) {
-  grid-template-columns: minmax(0, 0.9fr) minmax(360px, 1.1fr);
 }
 
 .usage-grid-column {
@@ -1234,20 +1263,50 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* Carapace mini columns: quiet bars; only the newest period carries the accent. */
+/* Mini daily columns: tinted by value; the newest day stands out; hover reads a day out. */
 .usage-bars {
-  display: block;
-  width: 100%;
-  height: 28px;
-  margin-top: 10px;
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 36px;
+  margin-top: 14px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
 }
 
 .usage-bars__bar {
-  fill: var(--border-strong);
+  flex: 1 1 0;
+  min-width: 2px;
+  border-radius: 2px 2px 0 0;
+  background: color-mix(in srgb, var(--accent) var(--usage-bar-tint, 45%), transparent);
 }
 
 .usage-bars__bar--current {
-  fill: var(--accent);
+  background: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+.usage-bars__bar--hover {
+  background: var(--text-strong);
+}
+
+.usage-bars__tip {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 4px);
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+  color: var(--muted);
+  font-size: var(--control-ui-text-xs);
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.usage-bars__tip b {
+  color: var(--text-strong);
+  font-variant-numeric: tabular-nums;
 }
 
 /* One shrinkable column: a wide child must not widen its card past the grid track. */
@@ -1643,6 +1702,28 @@
   align-items: center;
   gap: 10px;
   flex: 0 0 auto;
+}
+
+.session-bar-copy {
+  width: 28px;
+  height: 28px;
+  min-width: 28px;
+  padding: 5px;
+}
+
+.session-bar-copy svg {
+  width: 14px;
+  height: 14px;
+}
+
+.session-bar-copy-feedback {
+  color: var(--muted);
+  font-size: var(--control-ui-text-xs);
+}
+
+.sessions-show-all {
+  justify-self: center;
+  margin-top: 8px;
 }
 
 .session-bar-value {

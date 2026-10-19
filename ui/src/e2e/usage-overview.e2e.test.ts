@@ -117,6 +117,9 @@ suite.define(() => {
         });
         await page.goto(`${suite.server.baseUrl}usage`);
         const rows = page.locator(".sessions-card .session-bar-title");
+        // The card leads with the ten costliest sessions and expands to the full server page.
+        await expect.poll(() => rows.count()).toBe(10);
+        await page.getByRole("button", { name: "Show all 50", exact: true }).click();
         await expect.poll(() => rows.count()).toBe(50);
         await expect
           .poll(() => page.locator(".session-bar-meta").first().textContent())

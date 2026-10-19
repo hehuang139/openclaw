@@ -71,6 +71,7 @@ function buildPeakErrorHours(hourMsgs: number[], hourErrors: number[]) {
     .map((entry) => ({
       label: formatHourLabel(entry.hour),
       value: `${(entry.rate * 100).toFixed(2)}%`,
+      weight: entry.rate,
       sub: `${Math.round(entry.errors).toLocaleString()} ${normalizeLowercaseStringOrEmpty(t("usage.overview.errors"))} · ${Math.round(entry.msgs).toLocaleString()} ${t("usage.overview.messagesAbbrev")}`,
     }));
 }

@@ -1,6 +1,7 @@
 import { createMemo, Show } from "solid-js";
 import { AgentRowChip } from "../../components/agent-row-chip.tsx";
 import { handleCopyButton } from "../../components/copy-button-state.ts";
+import { Icon } from "../../components/solid/icon.tsx";
 import { t } from "../../lib/reactive/i18n.ts";
 
 export function SessionBarRow(props: {
@@ -51,14 +52,17 @@ export function SessionBarRow(props: {
               {" "}
               <button
                 type="button"
-                class="btn btn--sm btn--ghost"
+                class="btn btn--sm btn--icon session-bar-copy"
+                aria-label={t("usage.sessions.copy")}
+                title={t("usage.sessions.copy")}
                 onClick={(event: MouseEvent) => {
                   event.stopPropagation();
                   void handleCopyButton(event, props.displayLabel, t("usage.sessions.copy"));
                 }}
               >
-                <span data-copy-label>{t("usage.sessions.copy")}</span>
-              </button>{" "}
+                <Icon name="copy" />
+              </button>
+              <span class="session-bar-copy-feedback" data-copy-feedback hidden />{" "}
             </>
           )}
         </Show>

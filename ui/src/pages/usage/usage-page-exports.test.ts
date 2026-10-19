@@ -11,6 +11,7 @@ import {
   contextWeight,
   createPage,
   preloadUsage,
+  showRecentSessions,
 } from "./usage-page.test-support.ts";
 
 afterEach(cleanupUsagePageTest);
@@ -90,6 +91,7 @@ it.each([
   const download = vi.spyOn(downloads, "downloadTextFile").mockImplementation(() => {});
   const page = await createPage({ request } as unknown as GatewayBrowserClient, true);
   await preloadUsage(page);
+  await showRecentSessions(page);
   for (const [index, label] of selected.entries()) {
     page
       .querySelector<HTMLButtonElement>(`.session-bar-selection[aria-label="${label}"]`)!

@@ -293,23 +293,23 @@ suite.define(() => {
             await expect.poll(() => hours.isVisible()).toBe(true);
             await expect
               .poll(async () => ({
-                labels: await trimmedTexts(hours.locator(".usage-error-date")),
-                rates: await trimmedTexts(hours.locator(".usage-error-rate")),
-                details: await trimmedTexts(hours.locator(".usage-error-sub")),
+                labels: await trimmedTexts(hours.locator(".usage-list-label")),
+                rates: await trimmedTexts(hours.locator(".usage-list-value")),
+                details: await trimmedTexts(hours.locator(".usage-list-sub")),
               }))
               .toEqual({ labels: ["2 AM"], rates: ["50.00%"], details: ["5 errors · 10 msgs"] });
           }
           await cells.nth(2).click();
           await expect.poll(() => cells.nth(2).getAttribute("aria-pressed")).toBe("true");
           await expectTexts(page.locator(".session-bar-title"), ["Historical hour"]);
-          await expectText(hours.locator(".usage-error-date")).toBe("2 AM");
+          await expectText(hours.locator(".usage-list-label")).toBe("2 AM");
           await cells.nth(2).click();
           await cells.nth(3).click();
           await expectTexts(page.locator(".session-bar-title"), []);
           await expect.poll(() => hours.count()).toBe(0);
           await page.getByRole("button", { name: "Remove hours filter", exact: true }).click();
           await expectTexts(page.locator(".session-bar-title"), ["Historical hour"]);
-          await expectText(hours.locator(".usage-error-date")).toBe("2 AM");
+          await expectText(hours.locator(".usage-list-label")).toBe("2 AM");
         },
       );
     },

@@ -17,7 +17,7 @@ import type { ProviderUsageSummary } from "./data-types.ts";
 import { formatIsoDate } from "./helpers.ts";
 import { UsageMosaic } from "./metrics-view.tsx";
 import { buildPeakErrorHours, formatUsageCost, formatUsageTokens } from "./metrics.ts";
-import { renderUsageEmptyState, renderUsageLoadingStatus } from "./page-shell.tsx";
+import { renderUsageEmptyState } from "./page-shell.tsx";
 import { buildProviderSeries } from "./provider-series.ts";
 import { buildQuerySuggestions } from "./query.ts";
 import type { UsageProps } from "./types.ts";
@@ -99,6 +99,11 @@ export function renderUsage(props: UsageProps) {
   const lowerBound = () =>
     displayTotals()?.usageReport?.state === "unavailable" ||
     props.data.overview?.usageReport?.state === "unavailable";
+  // One quiet explanation for incomplete data: lower-bound totals and partial gateway answers.
+  const incompleteNote = () =>
+    [lowerBound() ? t("usage.lowerBound") : "", props.data.partialNotice ?? ""]
+      .filter(Boolean)
+      .join(" ");
   const providerSeries = createMemo(() =>
     buildProviderSeries(props.data.aggregates?.modelDaily ?? []),
   );
@@ -344,41 +349,23 @@ export function renderUsage(props: UsageProps) {
                 )}
               </For>
               <div class="usage-summary-strip__actions">
-                {/* One fixed slot: loading status or the lower-bound chip, never both, never a reflow. */}
+                {/* One fixed slot: the incomplete-data chip, laid out even when hidden so nothing reflows. */}
                 <span class="usage-summary-strip__status">
-                  <Show
-                    when={!overview().loadingOverview && props.data.cacheRefresh !== "retrying"}
-                    fallback={
-                      <span
-                        role="status"
-                        title={
-                          overview().loadingOverview ? undefined : t("usage.cacheStatus.warning")
-                        }
-                      >
-                        {renderUsageLoadingStatus(
-                          overview().loadingOverview
-                            ? t("usage.loading.badge")
-                            : t("usage.cacheStatus.checking"),
-                        )}
-                      </span>
-                    }
+                  <openclaw-tooltip
+                    open-on-click
+                    class={["usage-lower-bound", { "usage-lower-bound--off": !incompleteNote() }]}
+                    role="note"
+                    aria-hidden={incompleteNote() ? undefined : "true"}
                   >
-                    <openclaw-tooltip
-                      open-on-click
-                      class={["usage-lower-bound", { "usage-lower-bound--off": !lowerBound() }]}
-                      role="note"
-                      aria-hidden={lowerBound() ? undefined : "true"}
+                    <button
+                      type="button"
+                      class="usage-lower-bound__chip"
+                      tabindex={incompleteNote() ? undefined : -1}
                     >
-                      <button
-                        type="button"
-                        class="usage-lower-bound__chip"
-                        tabindex={lowerBound() ? undefined : -1}
-                      >
-                        {t("usage.lowerBoundShort")}
-                      </button>
-                      <span slot="content">{t("usage.lowerBound")}</span>
-                    </openclaw-tooltip>
-                  </Show>
+                      {lowerBound() ? t("usage.lowerBoundShort") : t("usage.partialShort")}
+                    </button>
+                    <span slot="content">{incompleteNote()}</span>
+                  </openclaw-tooltip>
                 </span>
                 <button
                   class={[
@@ -458,7 +445,9 @@ export function renderUsage(props: UsageProps) {
               filterOptions={filterOptions()}
               queryTerms={queryTerms()}
               querySuggestions={querySuggestions()}
-              queryWarnings={props.data.overview?.queryWarnings ?? []}
+              queryWarnings={(props.data.overview?.queryWarnings ?? []).filter(
+                (warning) => warning !== props.data.partialNotice,
+              )}
             />
 
             {props.data.error ? (
@@ -526,10 +515,6 @@ export function renderUsage(props: UsageProps) {
               aggregates={activeAggregates()}
               stats={insightStats()}
               showCostHint={(displayTotals()?.missingCostEntries ?? 0) > 0}
-              showCostShares={
-                /* Daily buckets are exact; category rollups remain full-session totals. */
-                props.filters.selectedDays.length === 0
-              }
               errorHours={buildPeakErrorHours(
                 props.data.overview?.hourlyMessages ?? [],
                 props.data.overview?.hourlyErrors ?? [],
@@ -569,7 +554,8 @@ export function renderUsage(props: UsageProps) {
               </div>
               <Show when={primarySelectedEntry()}>
                 {(selectedSession) => (
-                  <div class="usage-grid-column">
+                  // Details stack under the session list so the page stays one column.
+                  <aside class="usage-grid-column" aria-label={t("usage.sessions.details")}>
                     <SessionDetailPanel
                       session={selectedSession()}
                       detail={props.detail}
@@ -578,7 +564,7 @@ export function renderUsage(props: UsageProps) {
                       contextExpanded={props.display.contextExpanded}
                       onClose={() => props.callbacks.filters.onClearSessions()}
                     />
-                  </div>
+                  </aside>
                 )}
               </Show>
             </div>

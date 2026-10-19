@@ -9,6 +9,7 @@ import {
   createPage,
   focusDocument,
   preloadUsage,
+  showRecentSessions,
 } from "./usage-page.test-support.ts";
 
 afterEach(cleanupUsagePageTest);
@@ -64,6 +65,7 @@ it.each([
     );
     const page = await createPage({ request } as unknown as GatewayBrowserClient, true);
     await preloadUsage(page);
+    await showRecentSessions(page);
     const startDate = page.querySelector<HTMLInputElement>('input[aria-label="Start date"]')!;
     startDate.value = "2026-05-01";
     startDate.dispatchEvent(new Event("change", { bubbles: true }));

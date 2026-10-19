@@ -2596,6 +2596,7 @@ export const en: TranslationMap & {
       emptyValue: "—",
       unknown: "unknown",
       atLeast: "≥ {value}",
+      approx: "≈ {value}",
     },
     loading: {
       title: "Usage Overview",
