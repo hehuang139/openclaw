@@ -68,20 +68,27 @@ const killSessionEntry = vi.hoisted(() => ({
     | { sessionId: string; lifecycleRevision?: string; updatedAt: number }
     | undefined,
 }));
+
+const makeSessionEntry = (sessionId: string, lifecycleRevision: string) => ({
+  sessionId,
+  lifecycleRevision,
+  updatedAt: Date.now(),
+});
+const sessionChangedError = () =>
+  Object.assign(new Error("session changed"), {
+    name: "GatewayClientRequestError",
+    gatewayCode: "INVALID_REQUEST",
+    details: { reason: "session-changed" },
+  });
 vi.mock("./subagent-registry-restart-recovery.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./subagent-registry-restart-recovery.js")>();
-  return {
-    ...actual,
-    recoverInterruptedSubagentRow: recoverRow,
-  };
+  return { ...actual, recoverInterruptedSubagentRow: recoverRow };
 });
 vi.mock("../../../infra/agent-run-registry.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../infra/agent-run-registry.js")>()),
   getAgentRunContext,
 }));
-vi.mock("../../internal-session-effects.js", () => ({
-  removeInternalSessionEffectsSession,
-}));
+vi.mock("../../internal-session-effects.js", () => ({ removeInternalSessionEffectsSession }));
 vi.mock("./subagent-control-session.js", { spy: true });
 vi.mock("./subagent-session-reconciliation.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./subagent-session-reconciliation.js")>();
@@ -116,11 +123,7 @@ describe("subagent registry recovery scheduling", () => {
       };
     });
     getAgentRunContext.mockReset().mockReturnValue(undefined);
-    killSessionEntry.current = {
-      sessionId: "session-id",
-      lifecycleRevision: "session-revision",
-      updatedAt: Date.now(),
-    };
+    killSessionEntry.current = makeSessionEntry("session-id", "session-revision");
     removeInternalSessionEffectsSession.mockReset();
   });
 
@@ -247,12 +250,7 @@ describe("subagent registry recovery scheduling", () => {
         expect(completeSubagentRunWithRecovery).toHaveBeenCalledOnce();
         replaceSessionEntrySync(
           { sessionKey: sibling.childSessionKey, env: state.env },
-          {
-            ...sessionEntry,
-            sessionId: "sibling-session",
-            status: "done",
-            endedAt: Date.now(),
-          },
+          { ...sessionEntry, sessionId: "sibling-session", status: "done", endedAt: Date.now() },
         );
         completion.resolve();
         await pending;
@@ -392,11 +390,7 @@ describe("subagent registry recovery scheduling", () => {
           };
           replaceSessionEntrySync(
             { sessionKey: child.childSessionKey, env: state.env },
-            {
-              sessionId: child.runId,
-              lifecycleRevision: "original-revision",
-              updatedAt: Date.now(),
-            },
+            makeSessionEntry(child.runId, "original-revision"),
           );
         }
         callGateway.mockImplementation(async ({ params: request }) => {
@@ -426,11 +420,7 @@ describe("subagent registry recovery scheduling", () => {
             deleteTranscriptWithoutArchive: true,
           });
           if (deleted.expectedEntryMismatch) {
-            throw Object.assign(new Error("session changed"), {
-              name: "GatewayClientRequestError",
-              gatewayCode: "INVALID_REQUEST",
-              details: { reason: "session-changed" },
-            });
+            throw sessionChangedError();
           }
           return deleted;
         });
@@ -551,18 +541,11 @@ describe("subagent registry recovery scheduling", () => {
     const calls = () =>
       recoverRow.mock.calls.filter(([params]) => params.runId === entry.runId).length;
     await sweeper.sweepOnce();
-    for (const { delay, expected } of [
-      { delay: 1_000, expected: 2 },
-      { delay: 2_000, expected: 3 },
-      { delay: 4_000, expected: 4 },
-      { delay: 8_000, expected: 5 },
-      { delay: 16_000, expected: 6 },
-      { delay: 32_000, expected: 7 },
-      { delay: 60_000, expected: 8 },
-      { delay: 60_000, expected: 9 },
-    ]) {
+    for (const [index, delay] of [
+      1_000, 2_000, 4_000, 8_000, 16_000, 32_000, 60_000, 60_000,
+    ].entries()) {
       await vi.advanceTimersByTimeAsync(delay);
-      expect(calls()).toBe(expected);
+      expect(calls()).toBe(index + 2);
     }
     const sibling = { ...run(), runId: "new-sibling", childSessionKey: "agent:main:subagent:new" };
     runs.set(sibling.runId, sibling);
@@ -651,19 +634,11 @@ describe("subagent registry recovery scheduling", () => {
           });
           replaceSessionEntrySync(
             { agentId: "research", storePath, sessionKey: "global", env: state.env },
-            {
-              sessionId: "research-session",
-              lifecycleRevision: "research-revision",
-              updatedAt: Date.now(),
-            },
+            makeSessionEntry("research-session", "research-revision"),
           );
           replaceSessionEntrySync(
             { agentId: "main", sessionKey: "global", env: state.env },
-            {
-              sessionId: "main-session",
-              lifecycleRevision: "main-revision",
-              updatedAt: Date.now(),
-            },
+            makeSessionEntry("main-session", "main-revision"),
           );
           entry.killIntent = {
             requestedAt: Date.now(),
@@ -772,10 +747,7 @@ describe("subagent registry recovery scheduling", () => {
           ? createSubagentRunRecord({
               runId: "successor-run",
               childSessionKey: entry.childSessionKey,
-              requesterSessionKey: entry.requesterSessionKey,
-              requesterDisplayKey: entry.requesterDisplayKey,
               task: "current successor",
-              cleanup: "keep",
               generation: 2,
               createdAt: Date.now(),
               startedAt: Date.now(),
@@ -791,16 +763,8 @@ describe("subagent registry recovery scheduling", () => {
         if (request.method !== "sessions.delete") {
           return {};
         }
-        killSessionEntry.current = {
-          sessionId: "successor-session",
-          lifecycleRevision: "successor-revision",
-          updatedAt: Date.now(),
-        };
-        throw Object.assign(new Error("session changed"), {
-          name: "GatewayClientRequestError",
-          gatewayCode: "INVALID_REQUEST",
-          details: { reason: "session-changed" },
-        });
+        killSessionEntry.current = makeSessionEntry("successor-session", "successor-revision");
+        throw sessionChangedError();
       });
 
       await sweeper.sweepOnce();
@@ -908,10 +872,7 @@ describe("superseded subagent retirement", () => {
               await cleanupEntered.promise;
               await mutateSubagentRuns(
                 [successor.runId],
-                () => ({
-                  value: undefined,
-                  postimages: new Map([[successor.runId, null]]),
-                }),
+                () => ({ value: undefined, postimages: new Map([[successor.runId, null]]) }),
                 { runs },
               );
             } finally {

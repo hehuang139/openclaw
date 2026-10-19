@@ -3,9 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { expect, it, vi } from "vitest";
 import { awaitGateBeforeSettlement, createDeferred } from "../../../../test/helpers/promise.js";
-import { getRuntimeConfig } from "../../../config/config.js";
 import { setRuntimeConfigSnapshot } from "../../../config/runtime-snapshot.js";
-import { resolveSessionStorePathCore } from "../../../config/sessions.js";
 import {
   loadSessionEntryReadOnly,
   replaceSessionEntrySync,
@@ -308,9 +306,7 @@ export function registerSubagentSweeperSessionReadTests(ignoreRecovery: () => vo
       const scope = {
         agentId: "main",
         sessionKey: entry.childSessionKey,
-        storePath: resolveSessionStorePathCore(getRuntimeConfig().session?.store, {
-          agentId: "main",
-        }),
+        storePath: state.statePath("agents/main/sessions/sessions.json"),
         env: state.env,
       };
       replaceSessionEntrySync(scope, { sessionId: "invalid-child", updatedAt: Date.now() });
