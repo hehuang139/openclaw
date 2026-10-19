@@ -1,4 +1,3 @@
-// Collects startup speech provider metadata from plugin manifests.
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { normalizeOptionalLowercaseString } from "@openclaw/normalization-core/string-coerce";
 import { listAgentEntries, withAgentRosterFactsBatch } from "../agents/agent-scope-config.js";
@@ -7,7 +6,6 @@ import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { isTtsConfigReservedKey, resolveEffectiveTtsConfig } from "../tts/tts-config.js";
 import { isConfigActivationValueEnabled } from "./gateway-startup-plugin-contracts.js";
 
-/** Normalizes configured TTS provider ids for startup plugin selection. */
 function normalizeConfiguredSpeechProviderIdForStartup(value: unknown): string | undefined {
   const normalized = normalizeOptionalLowercaseString(value);
   return normalized === "edge" ? "microsoft" : normalized;

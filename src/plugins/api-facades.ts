@@ -34,7 +34,6 @@ const identitySensitiveRegistrations = new Set([
   "registerWebSearchProvider",
 ]);
 
-/** Attaches nested facade namespaces to the flat plugin API implementation. */
 export function attachPluginApiFacades<T extends object>(
   api: T & PluginApiFacadeSource & Partial<PluginApiFacadeFields>,
 ): T & PluginApiFacadeFields {

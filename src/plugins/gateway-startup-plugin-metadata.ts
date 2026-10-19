@@ -1,4 +1,3 @@
-// Builds deterministic metadata scopes for startup planning.
 import { getConfiguredDecisionProviderIds } from "../agents/decision-model-setting.js";
 import type { AmbientEnvTriggerPolicy } from "../channels/config-presence.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";

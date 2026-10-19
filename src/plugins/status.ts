@@ -522,7 +522,6 @@ function buildPluginInspectRecord(
     }
   }
 
-  // Populate LSP server info for bundle-format plugins with a known rootDir.
   let lspServers: PluginInspectReport["lspServers"] = [];
   if (plugin.format === "bundle" && plugin.bundleFormat && plugin.rootDir) {
     const lspSupport = inspectBundleLspRuntimeSupport({

@@ -14,14 +14,12 @@ type OwnerPlugin = Pick<
 > &
   Partial<Pick<PluginManifestRecord, "channels">>;
 
-/** Reasons a manifest owner plugin can fail the base activation policy. */
 export type ManifestOwnerBasePolicyBlockReason =
   | "plugins-disabled"
   | "blocked-by-denylist"
   | "plugin-disabled"
   | "not-in-allowlist";
 
-/** True when a manifest owner comes from a bundled plugin. */
 export function isBundledManifestOwner(plugin: Pick<PluginManifestRecord, "origin">): boolean {
   return plugin.origin === "bundled";
 }
@@ -47,7 +45,6 @@ export function passesManifestOwnerBasePolicy(params: {
   return resolveManifestOwnerBasePolicyBlock(params) === null;
 }
 
-/** Resolves the base policy block reason for a manifest owner plugin. */
 export function resolveManifestOwnerBasePolicyBlock(params: {
   plugin: Pick<PluginManifestRecord, "id">;
   normalizedConfig: NormalizedPluginsConfig;
@@ -73,7 +70,6 @@ export function resolveManifestOwnerBasePolicyBlock(params: {
   return null;
 }
 
-/** Resolves whether a manifest owner plugin is effectively activated. */
 export function isActivatedManifestOwner(params: {
   plugin: OwnerPlugin;
   normalizedConfig: NormalizedPluginsConfig;

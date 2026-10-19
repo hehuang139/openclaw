@@ -19,7 +19,6 @@ export function listSetupProviderIds(record: SetupDescriptorRecord): readonly st
   return [...providerIds, ...aliases];
 }
 
-/** Lists setup CLI backend ids from setup metadata or manifest contribution ids. */
 export function listSetupCliBackendIds(record: SetupDescriptorRecord): readonly string[] {
   return record.setup?.cliBackends ?? record.cliBackends;
 }

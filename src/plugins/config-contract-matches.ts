@@ -6,7 +6,6 @@ import { isRecord } from "../utils.js";
 type PluginConfigContractMatch = {
   /** Concrete config path matched by the contract pattern. */
   path: string;
-  /** Config value stored at the matched path. */
   value: unknown;
   /** Exact matched container and key so assignments update the original location directly. */
   parent: Record<string, unknown> | unknown[];
@@ -51,7 +50,6 @@ function parseCanonicalArrayIndex(segment: string, length: number): number | nul
   return index !== undefined && index < length ? index : null;
 }
 
-/** Collect concrete config values that match a plugin contract path pattern. */
 export function collectPluginConfigContractMatches(params: {
   root: unknown;
   pathPattern: string;

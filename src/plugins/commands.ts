@@ -42,7 +42,6 @@ export async function executePluginCommand(
   return await executeRegisteredPluginCommand(requireActivePluginRegistry(), params);
 }
 
-/** List registered plugin commands for help and command discovery. */
 export function listPluginCommands(): Array<{
   name: string;
   description: string;

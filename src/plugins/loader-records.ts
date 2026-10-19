@@ -144,7 +144,6 @@ export function recordPluginConfiguredUnavailable(params: {
   });
 }
 
-/** Joins auto-enable reasons into the single registry field shown by status surfaces. */
 export function formatAutoEnabledActivationReason(
   reasons: readonly string[] | undefined,
 ): string | undefined {
@@ -271,7 +270,6 @@ export function recordPluginError(params: {
   params.logger?.error(`${params.logPrefix ?? ""}${displayError}`);
 }
 
-/** Groups failed plugin ids by loader phase for compact startup summaries. */
 export function formatPluginFailureSummary(failedPlugins: PluginRecord[]): string {
   return [...groupPluginRecords(failedPlugins, (plugin) => plugin.failurePhase ?? "load")]
     .map(([phase, plugins]) => `${phase}: ${plugins.map((plugin) => plugin.id).join(", ")}`)

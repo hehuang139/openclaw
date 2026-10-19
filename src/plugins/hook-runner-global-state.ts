@@ -1,4 +1,3 @@
-// Internal state and live registry view for the global hook runner.
 import { resolveGlobalSingleton } from "../shared/global-singleton.js";
 import type { GlobalHookRunnerRegistry } from "./hook-registry.types.js";
 import type { HookRunner } from "./hooks.js";
@@ -153,7 +152,6 @@ export function createLiveHookRegistryFacade(
   };
 }
 
-/** Get the registry view that backs global hook dispatch. */
 export function getGlobalHookRunnerRegistry(): TrustedPolicyHookRunnerRegistry | null {
   return resolveHookRegistry(hookRunnerGlobalState)
     ? createLiveHookRegistryFacade(hookRunnerGlobalState)

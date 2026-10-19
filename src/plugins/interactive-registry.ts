@@ -9,14 +9,12 @@ import {
 } from "./runtime.js";
 import type { PluginInteractiveHandlerRegistration } from "./types.js";
 
-/** Registered interactive handler with owning plugin metadata. */
 export type RegisteredInteractiveHandler = PluginInteractiveHandlerRegistration & {
   pluginId: string;
   pluginName?: string;
   pluginRoot?: string;
 };
 
-/** Registration result for plugin interactive namespace handlers. */
 type InteractiveRegistrationResult = {
   ok: boolean;
   error?: string;
@@ -105,7 +103,6 @@ export function registerPluginInteractiveHandler(
   );
 }
 
-/** Clears all active plugin interactive handlers. */
 export function clearPluginInteractiveHandlers(): void {
   requireActivePluginChannelRegistry().interactiveHandlers.length = 0;
   clearPluginInteractiveHandlersState();

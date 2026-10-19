@@ -6,7 +6,6 @@ type PluginDefaultEnablement = {
   enabledByDefaultOnPlatforms?: readonly string[];
 };
 
-/** True when a plugin should be enabled by default for a platform. */
 export function isPluginEnabledByDefaultForPlatform(
   plugin: PluginDefaultEnablement,
   platform: NodeJS.Platform = process.platform,

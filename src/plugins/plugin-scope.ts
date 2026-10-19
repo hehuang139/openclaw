@@ -1,4 +1,3 @@
-// Normalizes plugin scope identifiers and scope lists.
 import { normalizeSortedUniqueTrimmedStringList } from "@openclaw/normalization-core/string-normalization";
 
 /** Normalizes plugin id scope input into a sorted unique string list. */

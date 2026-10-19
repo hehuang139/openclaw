@@ -1,11 +1,9 @@
-/** Normalizes manifest-declared CLI command aliases. */
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import {
   normalizeOptionalLowercaseString,
   normalizeOptionalString,
 } from "@openclaw/normalization-core/string-coerce";
 
-/** One command alias declared by a plugin manifest. */
 export type PluginManifestCommandAlias = {
   /** Command-like name users may put in plugin config by mistake. */
   name: string;

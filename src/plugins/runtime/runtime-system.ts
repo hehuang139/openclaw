@@ -14,7 +14,6 @@ const runHeartbeatOnceInternal = createLazyRuntimeMethod(
   (runtime) => runtime.runHeartbeatOnce,
 );
 
-/** Creates the plugin runtime system facade with heartbeat/event/process helpers. */
 export function createRuntimeSystem(): PluginRuntime["system"] {
   const requestHeartbeatNow: PluginRuntime["system"]["requestHeartbeatNow"] = (opts) =>
     requestHeartbeat({

@@ -3,7 +3,6 @@ import { loadPluginManifestRegistryForInstalledIndex } from "./manifest-registry
 import type { PluginManifestRegistry } from "./manifest-registry.js";
 import { createPluginManifestIdNormalizer } from "./plugin-manifest-id-normalizer.js";
 
-/** Inputs used to resolve aliases for installed plugin ids. */
 export type PluginRegistryIdNormalizerOptions = {
   manifestRegistry?: PluginManifestRegistry;
   lookUpTable?: Pick<{ manifestRegistry: PluginManifestRegistry }, "manifestRegistry">;

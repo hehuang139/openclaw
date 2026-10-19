@@ -256,7 +256,6 @@ function isEmptyPluginConfigJsonSchema(schema: Record<string, unknown>): boolean
   return Object.keys(schema).every((keyword) => EMPTY_PLUGIN_CONFIG_SHORTCUT_KEYWORDS.has(keyword));
 }
 
-/** Builds the common manifest-backed record shape used by runtime and CLI loaders. */
 function createManifestPluginRecord(params: {
   candidate: PluginCandidate;
   manifestRecord: PluginManifestRecord;

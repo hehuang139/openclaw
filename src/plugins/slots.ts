@@ -21,7 +21,6 @@ const DEFAULT_SLOT_BY_KEY: Record<PluginSlotKey, string> = {
 
 const PLUGIN_SLOT_KEYS = Object.keys(DEFAULT_SLOT_BY_KEY) as PluginSlotKey[];
 
-/** Normalize a kind field to an array for uniform iteration. */
 function normalizeKinds(kind?: PluginKind | PluginKind[]): PluginKind[] {
   if (!kind) {
     return [];
@@ -29,7 +28,6 @@ function normalizeKinds(kind?: PluginKind | PluginKind[]): PluginKind[] {
   return Array.isArray(kind) ? kind : [kind];
 }
 
-/** Check whether a plugin's kind field includes a specific kind. */
 export function hasKind(kind: PluginKind | PluginKind[] | undefined, target: PluginKind): boolean {
   return normalizeKinds(kind).includes(target);
 }
@@ -44,7 +42,6 @@ export function kindsEqual(
   return aN.length === bN.length && aN.every((k, i) => k === bN[i]);
 }
 
-/** Return all slot keys that a plugin's kind field maps to. */
 function slotKeysForPluginKind(kind?: PluginKind | PluginKind[]): PluginSlotKey[] {
   return normalizeKinds(kind)
     .map((k) => SLOT_BY_KIND[k])

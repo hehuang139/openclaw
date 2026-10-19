@@ -36,7 +36,6 @@ export type ConfiguredChannelPresenceSource =
   | Exclude<ChannelPresenceSignalSource, "config">
   | "manifest-env";
 
-/** Reasons a configured channel signal is not effective. */
 export type ConfiguredChannelBlockedReason =
   | "plugins-disabled"
   | "blocked-by-denylist"
@@ -48,7 +47,6 @@ export type ConfiguredChannelBlockedReason =
   | "no-channel-owner"
   | "not-activated";
 
-/** Policy evaluation row for one configured channel signal. */
 export type ConfiguredChannelPresencePolicyEntry = {
   channelId: string;
   sources: ConfiguredChannelPresenceSource[];
@@ -691,7 +689,6 @@ export function resolveDiscoverableScopedChannelPluginIds(params: {
     .toSorted((left, right) => left.localeCompare(right));
 }
 
-/** Resolves plugin ids that own currently configured channels. */
 export function resolveConfiguredChannelPluginIds(params: {
   config: OpenClawConfig;
   activationSourceConfig?: OpenClawConfig;
