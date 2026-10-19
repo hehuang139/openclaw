@@ -31,7 +31,6 @@ import {
   inspectorGateway,
   createActivityPage,
   expandFirst,
-  mountActivityPage,
   previews,
   toolEvent,
   type TestActivityPage,
