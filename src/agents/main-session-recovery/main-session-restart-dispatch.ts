@@ -106,6 +106,7 @@ type ResumeMainSessionParams = {
   entry: SessionEntry;
   observation: MainSessionRecoveryObservation;
   completionSource?: SessionSourceAssertion;
+  releaseCompletionSource?: () => void;
   recoveryAttempt: number;
   storePath: string;
   sessionKey: string;
@@ -122,10 +123,6 @@ type ResumeMainSessionParams = {
 export async function resumeMainSession(
   params: ResumeMainSessionParams,
 ): Promise<MainSessionResumeResult> {
-  const source = captureSessionEntryMetadataRead(params, () => {});
-  const matchesRequester = (current: SessionEntryCurrentFacts | undefined) =>
-    current?.sessionId === params.entry.sessionId &&
-    current.lifecycleRevision === params.entry.lifecycleRevision;
   let retained: ReturnType<typeof retainPreparedSessionEntryPredicate> | undefined;
   let retainedByDispatch = false;
   let dispatchSettled = false;
@@ -133,9 +130,14 @@ export async function resumeMainSession(
     [Symbol.dispose]: () => {
       if (!retainedByDispatch || dispatchSettled) {
         retained?.release();
+        params.releaseCompletionSource?.();
       }
     },
   };
+  const source = captureSessionEntryMetadataRead(params, () => {});
+  const matchesRequester = (current: SessionEntryCurrentFacts | undefined) =>
+    current?.sessionId === params.entry.sessionId &&
+    current.lifecycleRevision === params.entry.lifecycleRevision;
   if (!source) {
     let databaseIdentity: string | undefined;
     await withSessionEntriesFromStoreInWorker(
@@ -187,6 +189,7 @@ export async function resumeMainSession(
       dispatchSettled = true;
       if (retainedByDispatch) {
         retained?.release();
+        params.releaseCompletionSource?.();
       }
     },
   );
