@@ -3,6 +3,8 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { replaceSessionEntry } from "../config/sessions/session-accessor.js";
+import type { ModelDefinitionConfig } from "../config/types.models.js";
+import type { OpenClawConfig } from "../config/types.openclaw.js";
 import {
   patchCodexNativeWebSearchPayload,
   resolveCodexNativeSearchActivation,
@@ -14,178 +16,120 @@ import {
 } from "./codex-native-web-search.shared.js";
 import { withPreparedSessionCapabilityRead } from "./subagents/spawn/subagent-session-store.js";
 
-const baseConfig = {
-  tools: {
-    web: {
-      search: {
-        enabled: true,
-        openaiCodex: {
-          enabled: true,
-          mode: "cached",
-        },
-      },
-    },
-  },
-} as const;
+type SearchConfig = NonNullable<NonNullable<OpenClawConfig["tools"]>["web"]>["search"];
+const searchConfig = (search: SearchConfig): OpenClawConfig => ({ tools: { web: { search } } });
+const baseConfig = searchConfig({ enabled: true, openaiCodex: { enabled: true, mode: "cached" } });
+function activate(params: Parameters<typeof resolveCodexNativeSearchActivation>[0] = {}) {
+  return resolveCodexNativeSearchActivation({
+    config: baseConfig,
+    modelProvider: "gateway",
+    modelApi: "openai-chatgpt-responses",
+    ...params,
+  });
+}
+function expectInactive(params: Parameters<typeof activate>[0], inactiveReason: string) {
+  expect(activate(params)).toMatchObject({ state: "managed_only", inactiveReason });
+}
 
 describe("resolveCodexNativeSearchActivation", () => {
   it("returns managed_only when native Codex search is disabled", () => {
-    const result = resolveCodexNativeSearchActivation({
-      config: { tools: { web: { search: { enabled: true } } } },
-      modelProvider: "openai",
-      modelApi: "openai-chatgpt-responses",
-    });
-
-    expect(result.state).toBe("managed_only");
-    expect(result.inactiveReason).toBe("codex_not_enabled");
+    expectInactive(
+      { config: searchConfig({ enabled: true }), modelProvider: "openai" },
+      "codex_not_enabled",
+    );
   });
 
   it("keeps an explicit managed provider authoritative on the ChatGPT transport", () => {
-    expect(
-      resolveCodexNativeSearchActivation({
-        config: {
-          ...baseConfig,
-          tools: { web: { search: { provider: "brave", openaiCodex: { enabled: true } } } },
-        },
-        modelProvider: "gateway",
-        modelApi: "openai-chatgpt-responses",
-      }),
-    ).toMatchObject({ state: "managed_only", inactiveReason: "managed_provider_selected" });
+    expectInactive(
+      { config: searchConfig({ provider: "brave", openaiCodex: { enabled: true } }) },
+      "managed_provider_selected",
+    );
   });
 
   it("returns managed_only for non-eligible models", () => {
-    const result = resolveCodexNativeSearchActivation({
-      config: baseConfig,
-      modelProvider: "openai",
-      modelApi: "openai-responses",
-    });
-
-    expect(result.state).toBe("managed_only");
-    expect(result.inactiveReason).toBe("model_not_eligible");
+    expectInactive({ modelProvider: "openai", modelApi: "openai-responses" }, "model_not_eligible");
   });
 
   it.each([{ name: "without auth", config: baseConfig }] as const)(
     "leaves credential admission to the model request for direct openai $name",
     ({ config }) => {
-      const result = resolveCodexNativeSearchActivation({
-        config,
-        modelProvider: "openai",
-        modelApi: "openai-chatgpt-responses",
-      });
-
-      expect(result.state).toBe("native_active");
-      expect(result.codexMode).toBe("cached");
+      const result = activate({ config, modelProvider: "openai" });
+      expect(result).toMatchObject({ state: "native_active", codexMode: "cached" });
       expect(result).not.toHaveProperty("inactiveReason");
     },
   );
 
   it("keeps all search disabled when global web search is disabled", () => {
-    const result = resolveCodexNativeSearchActivation({
-      config: {
-        tools: {
-          web: {
-            search: {
-              enabled: false,
-              openaiCodex: { enabled: true, mode: "live" },
-            },
-          },
-        },
+    expectInactive(
+      {
+        config: searchConfig({ enabled: false, openaiCodex: { enabled: true, mode: "live" } }),
+        modelProvider: "openai",
       },
-      modelProvider: "openai",
-      modelApi: "openai-chatgpt-responses",
-    });
-
-    expect(result.state).toBe("managed_only");
-    expect(result.inactiveReason).toBe("globally_disabled");
+      "globally_disabled",
+    );
   });
 
   it("keeps native injection disabled when the session disables web search", () => {
-    const result = resolveCodexNativeSearchActivation({
-      config: baseConfig,
-      webSearchEnabled: false,
-      modelProvider: "gateway",
-      modelApi: "openai-chatgpt-responses",
-    });
-
-    expect(result.state).toBe("managed_only");
-    expect(result.inactiveReason).toBe("globally_disabled");
+    expectInactive({ webSearchEnabled: false }, "globally_disabled");
   });
 
   it("keeps native search inactive when the agent denies group:web via session key", () => {
-    const result = resolveCodexNativeSearchActivation({
-      config: {
-        ...baseConfig,
-        agents: {
-          entries: {
-            main: {
-              tools: { deny: ["group:web"] },
+    expectInactive(
+      {
+        config: {
+          ...baseConfig,
+          agents: { entries: { main: { tools: { deny: ["group:web"] } } } },
+        },
+        sessionKey: "agent:main:main",
+        modelId: "gpt-5.5",
+      },
+      "tool_policy_denied",
+    );
+  });
+
+  it("keeps native search inactive when provider policy denies web_search", () => {
+    expectInactive(
+      {
+        modelId: "gpt-5.5",
+        config: {
+          ...baseConfig,
+          tools: {
+            ...baseConfig.tools,
+            byProvider: {
+              "gateway/gpt-5.5": { deny: ["web_search"] },
             },
           },
         },
       },
-      sessionKey: "agent:main:main",
-      modelProvider: "gateway",
-      modelApi: "openai-chatgpt-responses",
-      modelId: "gpt-5.5",
-    });
-
-    expect(result.state).toBe("managed_only");
-    expect(result.inactiveReason).toBe("tool_policy_denied");
-  });
-
-  it("keeps native search inactive when provider policy denies web_search", () => {
-    const result = resolveCodexNativeSearchActivation({
-      config: {
-        ...baseConfig,
-        tools: {
-          ...baseConfig.tools,
-          byProvider: {
-            "gateway/gpt-5.5": { deny: ["web_search"] },
-          },
-        },
-      },
-      modelProvider: "gateway",
-      modelApi: "openai-chatgpt-responses",
-      modelId: "gpt-5.5",
-    });
-
-    expect(result.state).toBe("managed_only");
-    expect(result.inactiveReason).toBe("tool_policy_denied");
+      "tool_policy_denied",
+    );
   });
 
   it("keeps native search inactive when sender policy denies web_search", () => {
-    const result = resolveCodexNativeSearchActivation({
-      config: {
-        ...baseConfig,
-        tools: {
-          ...baseConfig.tools,
-          toolsBySender: {
-            "channel:msteams:alice": { deny: ["web_search"] },
+    expectInactive(
+      {
+        modelId: "gpt-5.5",
+        config: {
+          ...baseConfig,
+          tools: {
+            ...baseConfig.tools,
+            toolsBySender: {
+              "channel:msteams:alice": { deny: ["web_search"] },
+            },
           },
         },
+        messageProvider: "teams",
+        senderId: "alice",
       },
-      messageProvider: "teams",
-      senderId: "alice",
-      modelProvider: "gateway",
-      modelApi: "openai-chatgpt-responses",
-      modelId: "gpt-5.5",
-    });
-
-    expect(result.state).toBe("managed_only");
-    expect(result.inactiveReason).toBe("tool_policy_denied");
+      "tool_policy_denied",
+    );
   });
 
   it("keeps native search inactive when sandbox policy denies group:web", () => {
-    const result = resolveCodexNativeSearchActivation({
-      config: baseConfig,
-      sandboxToolPolicy: { deny: ["group:web"] },
-      modelProvider: "gateway",
-      modelApi: "openai-chatgpt-responses",
-      modelId: "gpt-5.5",
-    });
-
-    expect(result.state).toBe("managed_only");
-    expect(result.inactiveReason).toBe("tool_policy_denied");
+    expectInactive(
+      { sandboxToolPolicy: { deny: ["group:web"] }, modelId: "gpt-5.5" },
+      "tool_policy_denied",
+    );
   });
 
   it("keeps native search inactive when inherited session policy denies web_search", async () => {
@@ -200,10 +144,7 @@ describe("resolveCodexNativeSearchActivation", () => {
       "sessions.json",
     );
     await replaceSessionEntry(
-      {
-        sessionKey,
-        storePath,
-      },
+      { sessionKey, storePath },
       {
         sessionId: "limited-session",
         updatedAt: Date.now(),
@@ -215,92 +156,63 @@ describe("resolveCodexNativeSearchActivation", () => {
     );
 
     const result = await withPreparedSessionCapabilityRead(() =>
-      resolveCodexNativeSearchActivation({
-        config: {
-          ...baseConfig,
-          session: {
-            store: storePath,
-          },
-        },
+      activate({
+        config: { ...baseConfig, session: { store: storePath } },
         sessionKey,
-        modelProvider: "gateway",
-        modelApi: "openai-chatgpt-responses",
         modelId: "gpt-5.5",
       }),
     );
 
-    expect(result.state).toBe("managed_only");
-    expect(result.inactiveReason).toBe("tool_policy_denied");
+    expect(result).toMatchObject({ state: "managed_only", inactiveReason: "tool_policy_denied" });
   });
 });
 
 describe("Codex native web-search payload helpers", () => {
   it("omits the summary when global web search is disabled", () => {
     expect(
-      describeCodexNativeWebSearch({
-        tools: {
-          web: {
-            search: {
-              enabled: false,
-              openaiCodex: {
-                enabled: true,
-                mode: "live",
-              },
-            },
-          },
-        },
-      }),
+      describeCodexNativeWebSearch(
+        searchConfig({ enabled: false, openaiCodex: { enabled: true, mode: "live" } }),
+      ),
     ).toBeUndefined();
   });
 
   it("normalizes optional config values", () => {
-    const result = resolveCodexNativeWebSearchConfig({
-      tools: {
-        web: {
-          search: {
-            openaiCodex: {
-              enabled: true,
-              allowedDomains: [" example.com ", "example.com", ""],
-              contextSize: "high",
-              userLocation: {
-                country: " US ",
-                city: " New York ",
-                timezone: "America/New_York",
-              },
-            },
+    const result = resolveCodexNativeWebSearchConfig(
+      searchConfig({
+        openaiCodex: {
+          enabled: true,
+          allowedDomains: [" example.com ", "example.com", ""],
+          contextSize: "high",
+          userLocation: {
+            country: " US ",
+            city: " New York ",
+            timezone: "America/New_York",
           },
         },
-      },
+      }),
+    );
+    expect(result).toMatchObject({
+      enabled: true,
+      mode: "cached",
+      allowedDomains: ["example.com"],
+      contextSize: "high",
+      userLocation: { country: "US", city: "New York", timezone: "America/New_York" },
     });
-
-    expect(result.enabled).toBe(true);
-    expect(result.mode).toBe("cached");
-    expect(result.allowedDomains).toEqual(["example.com"]);
-    expect(result.contextSize).toBe("high");
-    expect(result.userLocation?.country).toBe("US");
-    expect(result.userLocation?.city).toBe("New York");
-    expect(result.userLocation?.timezone).toBe("America/New_York");
   });
 
   it("injects native search restrictions into the Responses payload", () => {
     const payload: Record<string, unknown> = {};
     patchCodexNativeWebSearchPayload({
       payload,
-      config: {
-        tools: {
-          web: {
-            search: {
-              openaiCodex: {
-                enabled: true,
-                mode: "live",
-                allowedDomains: ["example.com"],
-                contextSize: "medium",
-                userLocation: { country: "US" },
-              },
-            },
-          },
+      config: searchConfig({
+        openaiCodex: {
+          enabled: true,
+          mode: "live",
+          allowedDomains: ["example.com"],
+          contextSize: "medium",
+          userLocation: { country: "US" },
         },
-      },
+      }),
     });
     expect(payload.tools).toEqual([
       {
@@ -342,38 +254,28 @@ describe("isCodexNativeWebSearchRelevant", () => {
   it("treats a default model with model-level openai-chatgpt-responses api as relevant", async () => {
     // Provider-level APIs can be generic while individual models opt into the
     // ChatGPT Responses shape that supports native web_search.
-    expect(
-      await isCodexNativeWebSearchRelevant({
-        config: {
-          agents: {
-            defaults: {
-              model: {
-                primary: "gateway/gpt-5.4",
-              },
-            },
-          },
-          models: {
-            providers: {
-              gateway: {
-                api: "openai-responses",
-                baseUrl: "https://gateway.example/v1",
-                models: [
-                  {
-                    id: "gpt-5.4",
-                    name: "gpt-5.4",
-                    api: "openai-chatgpt-responses",
-                    reasoning: false,
-                    input: ["text"],
-                    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-                    contextWindow: 128_000,
-                    maxTokens: 16_384,
-                  },
-                ],
-              },
-            },
+    const model: ModelDefinitionConfig = {
+      id: "gpt-5.4",
+      name: "gpt-5.4",
+      api: "openai-chatgpt-responses",
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 128_000,
+      maxTokens: 16_384,
+    };
+    const config: OpenClawConfig = {
+      agents: { defaults: { model: { primary: "gateway/gpt-5.4" } } },
+      models: {
+        providers: {
+          gateway: {
+            api: "openai-responses",
+            baseUrl: "https://gateway.example/v1",
+            models: [model],
           },
         },
-      }),
-    ).toBe(true);
+      },
+    };
+    expect(await isCodexNativeWebSearchRelevant({ config })).toBe(true);
   });
 });
