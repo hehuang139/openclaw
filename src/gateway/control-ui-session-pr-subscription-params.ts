@@ -1,3 +1,4 @@
+import { asNullableRecord } from "@openclaw/normalization-core/record-coerce";
 import { CHAT_SEND_SESSION_KEY_MAX_LENGTH } from "../../packages/gateway-protocol/src/schema/primitives.js";
 import { CONTROL_UI_SESSION_PULL_REQUESTS_MAX_KEYS } from "./control-ui-contract.js";
 
@@ -22,14 +23,10 @@ function parseSessionKeys(value: unknown): string[] | null {
 export function parseControlUiSessionPullRequestsSubscribeParams(
   value: unknown,
 ): { sessionKeys: string[]; refreshSessionKeys: string[]; passiveSessionKeys?: string[] } | null {
-  if (!value || typeof value !== "object" || !("sessionKeys" in value)) {
+  const raw = asNullableRecord(value);
+  if (!raw) {
     return null;
   }
-  const raw = value as {
-    sessionKeys?: unknown;
-    refreshSessionKeys?: unknown;
-    passiveSessionKeys?: unknown;
-  };
   const sessionKeys = parseSessionKeys(raw.sessionKeys);
   const refreshSessionKeys =
     raw.refreshSessionKeys === undefined ? [] : parseSessionKeys(raw.refreshSessionKeys);

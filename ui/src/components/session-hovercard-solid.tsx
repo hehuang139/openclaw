@@ -399,6 +399,12 @@ function PullRequestRow(props: { request: SessionDisplayPullRequest }) {
 function PullRequestDetails(props: { snapshot?: ControlUiSessionPullRequestSnapshot }) {
   const branch = () => props.snapshot?.branch;
   const requests = createMemo(() => displaySessionPullRequests(props.snapshot));
+  const count = createMemo(
+    () =>
+      props.snapshot?.pullRequestCount ??
+      Math.max(requests().length, props.snapshot?.taskPullRequestCount ?? 0),
+  );
+  const remaining = createMemo(() => Math.max(0, count() - requests().length));
   const branchLabel = () =>
     t("chat.pullRequests.createPrLabel", { branch: branch()?.branch ?? "" });
   return (
@@ -432,26 +438,15 @@ function PullRequestDetails(props: { snapshot?: ControlUiSessionPullRequestSnaps
         <div class="session-hovercard__pr-list">
           <div class="session-hovercard__pr-heading">
             <span>{t("sessionHovercard.pullRequests")}</span>
-            <span class="session-hovercard__pr-count">
-              {props.snapshot?.pullRequestCount ??
-                Math.max(requests().length, props.snapshot?.taskPullRequestCount ?? 0)}
-            </span>
+            <span class="session-hovercard__pr-count">{count()}</span>
           </div>
           <For each={requests()} keyed={(request) => request.url}>
             {(request) => <PullRequestRow request={request()} />}
           </For>
-          <Show
-            when={
-              (props.snapshot?.taskPullRequestCount ?? 0) >
-              (props.snapshot?.taskPullRequests?.length ?? 0)
-            }
-          >
+          <Show when={remaining() > 0}>
             <div class="session-hovercard__more">
               {t("sessionHovercard.morePullRequests", {
-                count: String(
-                  (props.snapshot?.taskPullRequestCount ?? 0) -
-                    (props.snapshot?.taskPullRequests?.length ?? 0),
-                ),
+                count: String(remaining()),
               })}
             </div>
           </Show>

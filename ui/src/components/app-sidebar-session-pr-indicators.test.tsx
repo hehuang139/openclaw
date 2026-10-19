@@ -206,6 +206,9 @@ describe("Passive sidebar PR indicators", () => {
     await vi.advanceTimersByTimeAsync(60_000);
     expect(harness.request).not.toHaveBeenCalled();
     expect(host.indicators.summary(row.key, row.worktreeId ?? "")).toBeUndefined();
+    const initial = { numbers: [42], state: "open" as const };
+    expect(host.indicators.summary(row.key, "", initial)).toEqual(initial);
+    expect(host.indicators.summary(row.key, row.worktreeId ?? "", initial)).toBeUndefined();
   });
   it("keeps empty rows idle across sidebar updates", async () => {
     vi.useFakeTimers();

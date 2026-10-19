@@ -418,6 +418,28 @@ describe("session hovercard", () => {
     );
     expect(container.querySelector(".session-hovercard__pr-count")?.textContent).toBe("31");
     expect(container.querySelector(".session-hovercard__more")?.textContent).toContain("29 more");
+    // The branch PR can also belong to receipts outside the bounded task preview.
+    renderCard(
+      {
+        pullRequests: snapshot({
+          taskPullRequests: [task],
+          taskPullRequestCount: 30,
+          pullRequestCount: 30,
+          pullRequests: [
+            {
+              ...task,
+              number: 418,
+              url: "https://github.com/example/project/pull/418",
+              state: "open",
+            },
+          ],
+        }),
+      },
+      container,
+    );
+    expect(container.querySelector(".session-hovercard__pr-count")?.textContent).toBe("30");
+    expect(container.querySelectorAll(".session-hovercard__pr-row")).toHaveLength(2);
+    expect(container.querySelector(".session-hovercard__more")?.textContent).toContain("28 more");
     const known = { ...task, state: "merged" as const };
     renderCard(
       {

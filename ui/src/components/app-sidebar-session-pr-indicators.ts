@@ -205,7 +205,8 @@ export function createSessionPullRequestIndicators(options: SessionPullRequestIn
     summary(sessionKey: string, worktreeId: string, initial?: SessionCatalogPullRequestSummary) {
       const current = presentation();
       if (!current.readable) {
-        return undefined;
+        // Catalog-only rows already carry an authorized summary; live PR access is separate.
+        return worktreeId ? undefined : initial;
       }
       const entry = current.entries.get(sessionKey);
       // Receipt-only hydration says nothing about a catalog branch summary.
