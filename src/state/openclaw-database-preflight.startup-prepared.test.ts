@@ -70,9 +70,9 @@ function withImmediateAdmission(run: Parameters<typeof withAgentDatabaseStartupA
   return withAgentDatabaseStartupAdmission(run, { deferInspections: false });
 }
 
-it("skips an unconfigured system-agent database across startup passes while keeping Doctor strict", async () => {
+it("skips an unowned non-reserved database across startup passes while keeping Doctor strict", async () => {
   const fleet = createFleet();
-  const leftover = fleet.agent("openclaw").path;
+  const leftover = fleet.agent("unowned").path;
   closeDatabases();
   fs.writeFileSync(leftover, "not a configured database");
   const before = fs.readFileSync(leftover);
@@ -83,7 +83,7 @@ it("skips an unconfigured system-agent database across startup passes while keep
       compatible,
     );
     fleet.expectInspections(0);
-    expect(readAgentDatabaseAdmissionRefusal("openclaw", { env: fleet.env })).toBeUndefined();
+    expect(readAgentDatabaseAdmissionRefusal("unowned", { env: fleet.env })).toBeUndefined();
   });
   await expect(fleet.doctor([], fleet.config)).rejects.toThrow();
   expect(fs.readFileSync(leftover)).toEqual(before);
