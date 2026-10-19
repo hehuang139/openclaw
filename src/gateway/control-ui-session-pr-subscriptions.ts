@@ -579,26 +579,25 @@ export function createControlUiSessionPullRequestSubscriptions(deps: Subscriptio
           const previous = previousSubscription?.get(key);
           const receiptOnly = !activeKeys.has(key);
           const existingMode = previous?.target.taskReceiptsOnly === true;
-          const retainedRead =
-            previous && existingMode === receiptOnly && (await previous.readCurrent())
-              ? previous.readCurrent
-              : undefined;
-          const preparedRead = retainedRead ?? (await deps.prepareRead(normalizedConnId, session));
-          const readCurrent = !preparedRead
-            ? undefined
-            : receiptOnly && !retainedRead
-              ? async () => {
-                  const target = await preparedRead();
-                  return (
-                    target && {
-                      ...target,
-                      taskReceiptsOnly: true,
-                      identity: JSON.stringify([target.identity, "receipts-only"]),
-                    }
-                  );
-                }
-              : preparedRead;
-          const target = await readCurrent?.();
+          let readCurrent = existingMode === receiptOnly ? previous?.readCurrent : undefined;
+          let target = await readCurrent?.();
+          if (!target) {
+            const preparedRead = await deps.prepareRead(normalizedConnId, session);
+            readCurrent =
+              preparedRead && receiptOnly
+                ? async () => {
+                    const current = await preparedRead();
+                    return (
+                      current && {
+                        ...current,
+                        taskReceiptsOnly: true,
+                        identity: JSON.stringify([current.identity, "receipts-only"]),
+                      }
+                    );
+                  }
+                : preparedRead;
+            target = await readCurrent?.();
+          }
           if (!readCurrent || !target) {
             continue;
           }
