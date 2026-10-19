@@ -112,6 +112,7 @@ const sourceFiles = [
   "en-settings.ts",
   "en-sidebar-attention.ts",
   "en-skill-library.ts",
+  "en-session-skill-library.ts",
   "en-skill-workshop.ts",
   "en-skills-browser.ts",
   "en-systems.ts",
