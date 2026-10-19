@@ -5,11 +5,14 @@ import "../../../components/elapsed-time.tsx";
 import { Icon } from "../../../components/solid/icon.tsx";
 import { useOptionalApplication } from "../../../lib/reactive/context.ts";
 import { t } from "../../../lib/reactive/i18n.ts";
-import { listSubagents, type ChatSubagentActivity } from "../chat-subagent-wait.ts";
+import {
+  listSubagents,
+  type ChatSubagentActivity as ChatSubagentActivityRow,
+} from "../chat-subagent-wait.ts";
 import { ProcessesPanelData } from "../processes-panel-data.ts";
 import type { ChatDetailsProps } from "./chat-details-types.ts";
 import { useSessionPanel } from "./chat-session-panel.tsx";
-import "./chat-subagent-activity-live.ts";
+import { ChatSubagentActivity } from "./chat-subagent-activity-live.ts";
 
 type Props = { details: ChatDetailsProps; presented: boolean };
 type State = "running" | "queued" | "failed" | "stopped" | "done";
@@ -22,7 +25,7 @@ const SUMMARY = ["running", "queued", "done", "failed", "stopped"] as const;
 const ORDER: Record<State, number> = { running: 0, queued: 1, failed: 2, stopped: 3, done: 4 };
 const PREVIEW_ROWS = 3;
 
-function subagentState(row: ChatSubagentActivity): State {
+function subagentState(row: ChatSubagentActivityRow): State {
   return row.status === "waiting" ? "running" : row.status;
 }
 
@@ -220,12 +223,12 @@ export function ChatDetailsBackground(props: Props) {
           onExpandedChange={setSubagentsExpanded}
         >
           {props.presented && (
-            <openclaw-chat-subagent-activity
-              prop:rows={subagents()}
-              prop:limit={subagentsExpanded() ? undefined : PREVIEW_ROWS}
-              prop:compact={true}
-              prop:onOpenSubagent={props.details.onOpenSubagent}
-              prop:onOpenSession={props.details.onSessionSelect}
+            <ChatSubagentActivity
+              rows={subagents()}
+              limit={subagentsExpanded() ? undefined : PREVIEW_ROWS}
+              compact={true}
+              onOpenSubagent={props.details.onOpenSubagent}
+              onOpenSession={props.details.onSessionSelect}
             />
           )}
         </BackgroundGroup>
