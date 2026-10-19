@@ -20,6 +20,7 @@ import {
   restoreActivePluginRegistrySnapshot,
   stageActivePluginRegistry,
 } from "../plugins/runtime.js";
+import { withPluginRuntimeGatewayRequestScope } from "../plugins/runtime/gateway-request-scope.js";
 import { createPluginRecord } from "../plugins/status.test-helpers.js";
 import { openOpenClawStateDatabase } from "../state/openclaw-state-db.js";
 import { setCanonicalUserProfileDisplayName } from "../state/user-profile-writes.js";
@@ -43,7 +44,12 @@ import {
   restoreGatewayOperatorSource,
 } from "./operator-run-recovery.js";
 import { createOperatorRecoveryFixture } from "./operator-run-recovery.test-support.js";
+import {
+  captureOperatorToolGatewayContinuationContext,
+  withOperatorToolGatewayAuthority,
+} from "./server-plugin-in-process-authority.js";
 import { createContext } from "./server-plugin-in-process-dispatch.test-support.js";
+import { createSyntheticPluginRuntimeClient } from "./server-plugin-runtime-client.js";
 import {
   enforceSharedGatewaySessionGenerationForConfigWrite,
   SharedGatewaySessionGenerationState,
@@ -136,6 +142,41 @@ function expectRevoked(authority: { signal?: AbortSignal; assertCurrent: () => v
 }
 
 describe("restart recovery authenticated operator source", () => {
+  it("keeps an accepted child current after its recovered requester settles", () =>
+    withRecovery(async (fixture) => {
+      const restored = expectDefined(await fixture.restore(), "recovered requester authority");
+      const client = createSyntheticPluginRuntimeClient({
+        authenticatedUserProfile: fixture.client.authenticatedUserProfile,
+        operatorRoleActor: { kind: "operator", profileId: restored.authority.profileId },
+        operatorRunAuthority: restored.authority,
+        scopes: ["operator.write"],
+      });
+      const child = expectDefined(
+        await withPluginRuntimeGatewayRequestScope(
+          { client, context: fixture.context, isWebchatConnect: () => false },
+          () =>
+            withOperatorToolGatewayAuthority(
+              { operatorRunAuthority: restored.authority, scopes: ["operator.write"] },
+              async () => await captureOperatorToolGatewayContinuationContext(),
+            ),
+        ),
+        "accepted child authority",
+      );
+      try {
+        fixture.retire();
+        restored.release();
+        expect(restored.authority.assertCurrent).toThrow("Recovery claim retired");
+        expect(child.operatorAuthority?.scopes).toEqual(["operator.write"]);
+        expect(child.run(() => "child completed")).toBe("child completed");
+        invalidateGatewayDeviceRevocation(fixture.context, "recovery-device", "operator");
+        expect(() => child.run(() => "child completed")).toThrow();
+        expect(child.signal.aborted).toBe(true);
+      } finally {
+        child.release();
+        restored.release();
+      }
+    }));
+
   it.each(["current", "owner closed", "device revoked"] as const)(
     "checks independently owned continuation custody after preparation: %s",
     (change) =>
