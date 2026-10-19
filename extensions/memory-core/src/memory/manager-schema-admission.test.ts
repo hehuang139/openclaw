@@ -25,6 +25,18 @@ import { createManagerIndexFixture } from "./manager-index.test-support.js";
 import { bindSqliteWorkerBackend } from "./manager-publication.worker.js";
 
 const { closeAllMemorySearchManagers, getMemorySearchManager } = await import("./index.js");
+const schemaRead =
+  /sqlite_(?:schema|master)|pragma_(?:table|index|foreign_key)|\bPRAGMA\s+(?:encoding|user_version|schema_version|integrity_check|quick_check|foreign_key_check|table_info|table_xinfo|index_list|index_info|index_xinfo)\b|\bFROM\s+"?schema_meta\b/iu;
+
+function observeSql(predicate: (sql: string) => boolean) {
+  const queries: string[] = [];
+  const observed = observeHostDataSql((sql) => {
+    if (predicate(sql)) {
+      queries.push(sql);
+    }
+  });
+  return { queries, [Symbol.dispose]: () => observed.restore() };
+}
 
 describe("memory index schema admission", () => {
   const fixture = createManagerIndexFixture({
@@ -35,21 +47,24 @@ describe("memory index schema admission", () => {
   it("reports an uninitialized status without creating agent or registry databases", async () => {
     const agentPath = resolveOpenClawAgentSqlitePath({ agentId: "main" });
     const statePath = path.join(fixture.paths.stateDir, "state", "openclaw.sqlite");
-    const observed = observeHostDataSql();
-    let manager: Awaited<ReturnType<typeof getMemorySearchManager>>["manager"] = null;
+    using observed = observeSql((sql) =>
+      /memory_index_|memory_embedding_cache|sqlite_(?:schema|master)|\b(?:pragma_)?(?:table_info|table_xinfo|table_list|foreign_key_list|index_list|index_info)\b/i.test(
+        sql,
+      ),
+    );
+    const result = await getMemorySearchManager({
+      runInBackgroundContext: runInMemoryTestBackgroundContext,
+      cfg: fixture.createConfig({
+        cacheEnabled: true,
+        sources: ["memory", "sessions"],
+        sessionMemory: true,
+      }),
+      agentId: "main",
+      purpose: "status",
+      inspectSources: true,
+    });
+    const manager = result.manager;
     try {
-      const result = await getMemorySearchManager({
-        runInBackgroundContext: runInMemoryTestBackgroundContext,
-        cfg: fixture.createConfig({
-          cacheEnabled: true,
-          sources: ["memory", "sessions"],
-          sessionMemory: true,
-        }),
-        agentId: "main",
-        purpose: "status",
-        inspectSources: true,
-      });
-      manager = result.manager;
       expect(result.error).toBeUndefined();
       assert(manager, "Expected an uninitialized status manager");
       await expect(manager.probeEmbeddingAvailability()).resolves.toMatchObject({ ok: true });
@@ -68,21 +83,11 @@ describe("memory index schema admission", () => {
         custom: { indexIdentity: { status: "missing" } },
       });
       await manager.close?.();
-      expect(
-        observed.queries.filter((sql) =>
-          /memory_index_|memory_embedding_cache|sqlite_(?:schema|master)|\b(?:pragma_)?(?:table_info|table_xinfo|table_list|foreign_key_list|index_list|index_info)\b/i.test(
-            sql,
-          ),
-        ),
-      ).toEqual([]);
+      expect(observed.queries).toEqual([]);
       await expect(fs.access(agentPath)).rejects.toThrow("ENOENT");
       await expect(fs.access(statePath)).rejects.toThrow("ENOENT");
     } finally {
-      try {
-        await manager?.close?.();
-      } finally {
-        observed.restore();
-      }
+      await manager?.close?.();
     }
   });
 
@@ -137,38 +142,28 @@ describe("memory index schema admission", () => {
       });
       // Agent boot admission is separate from the memory manager's runtime admission.
       openOpenClawAgentDatabase({ agentId: "main" });
-      const schemaSql: string[] = [];
       let publishedAdmitted = false;
-      const observed = observeHostDataSql((sql) => {
-        if (
-          publishedAdmitted
-            ? /sqlite_(?:schema|master)|pragma_(?:table|index|foreign_key)|\bPRAGMA\s+(?:encoding|user_version|schema_version|integrity_check|quick_check|foreign_key_check|table_info|table_xinfo|index_list|index_info|index_xinfo)\b|\bFROM\s+"?schema_meta\b/iu.test(
-                sql,
-              )
-            : new Error().stack?.includes("/memory-schema")
-        ) {
-          schemaSql.push(sql);
-        }
+      using observed = observeSql((sql) =>
+        publishedAdmitted
+          ? schemaRead.test(sql)
+          : new Error().stack?.includes("/memory-schema") === true,
+      );
+      const schemaSql = observed.queries;
+      const manager = await fixture.getFreshManager(cfg, "cli");
+      expect.soft(schemaSql.splice(0), "published admission").toEqual([]);
+      // Initial reader ownership admission is cold; indexing must not repeat any schema checks.
+      publishedAdmitted = true;
+      await manager.sync({ reason: "test", force: true });
+      expect.soft(schemaSql.splice(0), "shadow admission").toEqual([]);
+      expect(await manager.statusAsync()).toMatchObject({
+        files: 1,
+        fts: { available: true },
+        custom: { indexIdentity: { status: "valid" } },
       });
-      try {
-        const manager = await fixture.getFreshManager(cfg, "cli");
-        expect.soft(schemaSql.splice(0), "published admission").toEqual([]);
-        // Initial reader ownership admission is cold; indexing must not repeat any schema checks.
-        publishedAdmitted = true;
-        await manager.sync({ reason: "test", force: true });
-        expect.soft(schemaSql.splice(0), "shadow admission").toEqual([]);
-        expect(await manager.statusAsync()).toMatchObject({
-          files: 1,
-          fts: { available: true },
-          custom: { indexIdentity: { status: "valid" } },
-        });
-        expect(await manager.search("Zebra")).toEqual([
-          expect.objectContaining({ path: "memory/2026-01-12.md" }),
-        ]);
-        expect.soft(schemaSql, "search after vector publication").toEqual([]);
-      } finally {
-        observed.restore();
-      }
+      expect(await manager.search("Zebra")).toEqual([
+        expect.objectContaining({ path: "memory/2026-01-12.md" }),
+      ]);
+      expect.soft(schemaSql, "search after vector publication").toEqual([]);
       if (vectorEnabled) {
         const { db } = openOpenClawAgentDatabase({ agentId: "main" });
         expect(tableExists(db, "memory_index_chunks_vec")).toBe(true);
@@ -216,28 +211,15 @@ describe("memory index schema admission", () => {
           },
         }),
       ).toMatchObject({ ok: true, facts: { hasVectorTable: true } });
-      const schemaSql: string[] = [];
-      const observed = observeHostDataSql((sql) => {
-        if (
-          /sqlite_(?:schema|master)|pragma_(?:table|index|foreign_key)|\bPRAGMA\s+(?:encoding|user_version|schema_version|integrity_check|quick_check|foreign_key_check|table_info|table_xinfo|index_list|index_info|index_xinfo)\b|\bFROM\s+"?schema_meta\b/iu.test(
-            sql,
-          )
-        ) {
-          schemaSql.push(sql);
-        }
-      });
-      try {
-        // The existing reader must receive the catalog before any opener can re-admit it.
-        expect(tableExists(reader.database.db, "memory_index_chunks_vec")).toBe(true);
-        // A cached open skips admission; retire the writer to exercise receipt adoption.
-        database.db.close();
-        expect(tableExists(openOpenClawAgentDatabase(options).db, "memory_index_chunks_vec")).toBe(
-          true,
-        );
-        expect(schemaSql).toEqual([]);
-      } finally {
-        observed.restore();
-      }
+      using observed = observeSql((sql) => schemaRead.test(sql));
+      // The existing reader must receive the catalog before any opener can re-admit it.
+      expect(tableExists(reader.database.db, "memory_index_chunks_vec")).toBe(true);
+      // A cached open skips admission; retire the writer to exercise receipt adoption.
+      database.db.close();
+      expect(tableExists(openOpenClawAgentDatabase(options).db, "memory_index_chunks_vec")).toBe(
+        true,
+      );
+      expect(observed.queries).toEqual([]);
       expect(
         reader.database.db.prepare("SELECT count(*) AS count FROM memory_index_chunks_vec").get(),
       ).toEqual({ count: 0 });

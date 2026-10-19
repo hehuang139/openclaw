@@ -14,6 +14,25 @@ import { createManagerIndexFixture } from "./manager-index.test-support.js";
 import { MEMORY_INDEX_PROVENANCE_VERSION, type MemoryIndexMeta } from "./manager-reindex-state.js";
 
 const { closeAllMemorySearchManagers, getMemorySearchManager } = await import("./index.js");
+const fixture = createManagerIndexFixture({ getMemorySearchManager, closeAllMemorySearchManagers });
+const createConfig = (model = "mock-embed") =>
+  fixture.createConfig({ model, vectorEnabled: false });
+const alphaResult = expect.arrayContaining([
+  expect.objectContaining({ path: "memory/2026-01-12.md" }),
+]);
+const versionKeys = ["chunkingVersion", "provenanceVersion"] as const;
+const versions = {
+  chunkingVersion: MEMORY_CHUNKING_VERSION,
+  provenanceVersion: MEMORY_INDEX_PROVENANCE_VERSION,
+};
+type VersionKey = keyof typeof versions;
+
+async function closeManager(manager: Awaited<ReturnType<typeof fixture.getFreshManager>>) {
+  await manager.close();
+  await closeAllMemorySearchManagers();
+  await closeOpenClawAgentDatabasesAsync();
+  closeOpenClawAgentDatabasesForTest();
+}
 
 function withDatabase<T>(dbPath: string, run: (db: DatabaseSync) => T): T {
   const db = new DatabaseSync(dbPath);
@@ -34,76 +53,60 @@ function readMeta(db: DatabaseSync): MemoryIndexMeta {
   return JSON.parse(row.value) as MemoryIndexMeta;
 }
 
-const versions = ["chunkingVersion", "provenanceVersion"] as const;
-describe("memory search after a runtime index upgrade", () => {
-  const fixture = createManagerIndexFixture({
-    getMemorySearchManager,
-    closeAllMemorySearchManagers,
-  });
-
-  function createConfig(model = "mock-embed") {
-    return fixture.createConfig({ model, vectorEnabled: false });
+function updateMeta(db: DatabaseSync, meta: MemoryIndexMeta) {
+  db.prepare("UPDATE memory_index_meta SET value = ? WHERE key = 'memory_index_meta_v1'").run(
+    JSON.stringify(meta),
+  );
+}
+async function publishIndex(cfg: ReturnType<typeof createConfig>): Promise<string> {
+  const manager = await fixture.getFreshManager(cfg);
+  await manager.sync({ reason: "test", force: true });
+  const dbPath = manager.status().dbPath;
+  if (!dbPath) {
+    throw new Error("fixture database path is missing");
   }
-
+  await closeManager(manager);
+  return dbPath;
+}
+describe("memory search after a runtime index upgrade", () => {
   async function seedIndex(
     cfg: ReturnType<typeof createConfig>,
-    versionKey: (typeof versions)[number] = "chunkingVersion",
+    versionKey: VersionKey = "chunkingVersion",
+    offset = -1,
   ): Promise<string> {
-    const manager = await fixture.getFreshManager(cfg);
-    await manager.sync({ reason: "test", force: true });
-    const dbPath = manager.status().dbPath;
-    if (!dbPath) {
-      throw new Error("fixture database path is missing");
-    }
-    await manager.close();
-    await closeAllMemorySearchManagers();
-    await closeOpenClawAgentDatabasesAsync();
-    closeOpenClawAgentDatabasesForTest();
+    const dbPath = await publishIndex(cfg);
     // Reopen unchanged indexed files as an older runtime's publication.
-    const currentVersion =
-      versionKey === "chunkingVersion" ? MEMORY_CHUNKING_VERSION : MEMORY_INDEX_PROVENANCE_VERSION;
     withDatabase(dbPath, (db) => {
-      const meta = readMeta(db);
-      db.prepare("UPDATE memory_index_meta SET value = ? WHERE key = 'memory_index_meta_v1'").run(
-        JSON.stringify({ ...meta, [versionKey]: currentVersion - 1 }),
-      );
+      updateMeta(db, { ...readMeta(db), [versionKey]: versions[versionKey] + offset });
     });
     return dbPath;
   }
 
-  it.each(["default"] as const)(
-    "rebuilds unchanged prior-version content on the first %s search",
-    async (purpose) => {
-      const cfg = createConfig();
-      const dbPath = await seedIndex(cfg);
-      const manager = await fixture.getFreshManager(cfg, purpose);
+  it("rebuilds unchanged prior-version content on the first default search", async () => {
+    const cfg = createConfig();
+    const dbPath = await seedIndex(cfg);
+    const manager = await fixture.getFreshManager(cfg, "default");
 
-      const results = await manager.search("alpha", { lexicalOnly: true });
+    const results = await manager.search("alpha", { lexicalOnly: true });
 
-      expect(results).toEqual(
-        expect.arrayContaining([expect.objectContaining({ path: "memory/2026-01-12.md" })]),
-      );
-      expect(manager.status().custom?.indexIdentity).toEqual({ status: "valid" });
-      expect(withDatabase(dbPath, readMeta).chunkingVersion).toBe(MEMORY_CHUNKING_VERSION);
+    expect(results).toEqual(alphaResult);
+    expect(manager.status().custom?.indexIdentity).toEqual({ status: "valid" });
+    expect(withDatabase(dbPath, readMeta).chunkingVersion).toBe(MEMORY_CHUNKING_VERSION);
 
-      await manager.close();
-      await closeAllMemorySearchManagers();
-      await closeOpenClawAgentDatabasesAsync();
-      closeOpenClawAgentDatabasesForTest();
-      const publication = () =>
-        withDatabase(dbPath, (db) => ({
-          meta: readMeta(db),
-          revision: db.prepare("SELECT revision FROM memory_index_state WHERE id = 1").get(),
-        }));
-      const rebuilt = publication();
-      const embedded = fixture.provider.embedBatchCalls;
-      const reopened = await fixture.getFreshManager(cfg, purpose);
-      await reopened.sync({ reason: "watch" });
-      expect(await reopened.search("alpha", { lexicalOnly: true })).not.toEqual([]);
-      expect(fixture.provider.embedBatchCalls).toBe(embedded);
-      expect(publication()).toEqual(rebuilt);
-    },
-  );
+    await closeManager(manager);
+    const publication = () =>
+      withDatabase(dbPath, (db) => ({
+        meta: readMeta(db),
+        revision: db.prepare("SELECT revision FROM memory_index_state WHERE id = 1").get(),
+      }));
+    const rebuilt = publication();
+    const embedded = fixture.provider.embedBatchCalls;
+    const reopened = await fixture.getFreshManager(cfg, "default");
+    await reopened.sync({ reason: "watch" });
+    expect(await reopened.search("alpha", { lexicalOnly: true })).not.toEqual([]);
+    expect(fixture.provider.embedBatchCalls).toBe(embedded);
+    expect(publication()).toEqual(rebuilt);
+  });
 
   it("keeps status inspection read-only during an upgrade", async () => {
     const cfg = createConfig();
@@ -118,17 +121,10 @@ describe("memory search after a runtime index upgrade", () => {
     expect(withDatabase(dbPath, readMeta).chunkingVersion).toBe(MEMORY_CHUNKING_VERSION - 1);
   });
 
-  it.each(versions)("preserves newer %s indexes until explicit reindex", async (versionKey) => {
-    const currentVersion =
-      versionKey === "chunkingVersion" ? MEMORY_CHUNKING_VERSION : MEMORY_INDEX_PROVENANCE_VERSION;
+  it.each(versionKeys)("preserves newer %s indexes until explicit reindex", async (versionKey) => {
+    const currentVersion = versions[versionKey];
     const cfg = createConfig();
-    const dbPath = await seedIndex(cfg, versionKey);
-    withDatabase(dbPath, (db) => {
-      const meta = readMeta(db);
-      db.prepare("UPDATE memory_index_meta SET value = ? WHERE key = 'memory_index_meta_v1'").run(
-        JSON.stringify({ ...meta, [versionKey]: currentVersion + 1 }),
-      );
-    });
+    const dbPath = await seedIndex(cfg, versionKey, 1);
     const manager = await fixture.getFreshManager(cfg);
     const embedded = fixture.provider.embedBatchCalls;
     await manager.sync({ reason: "search", force: true });
@@ -140,13 +136,10 @@ describe("memory search after a runtime index upgrade", () => {
     expect(withDatabase(dbPath, readMeta)[versionKey]).toBe(currentVersion);
   });
 
-  it.each(versions)(
+  it.each(versionKeys)(
     "serves only compatible lexical rows when the %s rebuild fails",
     async (versionKey) => {
-      const currentVersion =
-        versionKey === "chunkingVersion"
-          ? MEMORY_CHUNKING_VERSION
-          : MEMORY_INDEX_PROVENANCE_VERSION;
+      const currentVersion = versions[versionKey];
       const cfg = createConfig();
       const dbPath = await seedIndex(cfg, versionKey);
       await fs.writeFile(
@@ -157,9 +150,7 @@ describe("memory search after a runtime index upgrade", () => {
       const manager = await fixture.getFreshManager(cfg);
       const results = await manager.search("alpha", { lexicalOnly: true });
       if (versionKey === "chunkingVersion") {
-        expect(results).toEqual(
-          expect.arrayContaining([expect.objectContaining({ path: "memory/2026-01-12.md" })]),
-        );
+        expect(results).toEqual(alphaResult);
       } else {
         expect(results).toEqual([]);
       }
@@ -169,35 +160,19 @@ describe("memory search after a runtime index upgrade", () => {
 });
 
 describe("memory search after an EmbeddingGemma input format upgrade", () => {
-  const fixture = createManagerIndexFixture({
-    getMemorySearchManager,
-    closeAllMemorySearchManagers,
-  });
-
   it("re-embeds unchanged legacy-identity cache rows once on ordinary search", async () => {
     const cfg = fixture.createConfig({
       model: "embeddinggemma",
       cacheEnabled: true,
       vectorEnabled: false,
     });
-    const seeded = await fixture.getFreshManager(cfg);
-    await seeded.sync({ reason: "test", force: true });
-    const dbPath = seeded.status().dbPath;
-    if (!dbPath) {
-      throw new Error("fixture database path is missing");
-    }
-    await seeded.close();
-    await closeAllMemorySearchManagers();
-    await closeOpenClawAgentDatabasesAsync();
-    closeOpenClawAgentDatabasesForTest();
+    const dbPath = await publishIndex(cfg);
     // Reopen the unchanged fixture cache under the identity used before task prefixes.
     const legacyProviderKey = withDatabase(dbPath, (db) => {
       const meta = readMeta(db);
       const providerKey = hashText(JSON.stringify({ provider: meta.provider, model: meta.model }));
       delete meta.embeddingInputFormatVersion;
-      db.prepare("UPDATE memory_index_meta SET value = ? WHERE key = 'memory_index_meta_v1'").run(
-        JSON.stringify({ ...meta, providerKey }),
-      );
+      updateMeta(db, { ...meta, providerKey });
       db.prepare("UPDATE memory_embedding_cache SET provider_key = ?").run(providerKey);
       expect(
         db.prepare("SELECT count(*) AS count FROM memory_embedding_cache").get()?.count,
@@ -209,19 +184,14 @@ describe("memory search after an EmbeddingGemma input format upgrade", () => {
     const previousBatches = fixture.provider.embedBatchCalls;
     const manager = await fixture.getFreshManager(cfg);
 
-    expect(await manager.search("alpha")).toEqual(
-      expect.arrayContaining([expect.objectContaining({ path: "memory/2026-01-12.md" })]),
-    );
+    expect(await manager.search("alpha")).toEqual(alphaResult);
     expect(manager.status().custom?.indexIdentity).toEqual({ status: "valid" });
     expect(fixture.provider.embedBatchCalls).toBeGreaterThan(previousBatches);
     expect(fixture.provider.embeddedBatchTexts).toEqual([
       expect.stringMatching(/^title: none \| text: /),
     ]);
     expect(fixture.provider.embeddedQueryTexts).toEqual(["task: search result | query: alpha"]);
-    await manager.close();
-    await closeAllMemorySearchManagers();
-    await closeOpenClawAgentDatabasesAsync();
-    closeOpenClawAgentDatabasesForTest();
+    await closeManager(manager);
     const upgraded = withDatabase(dbPath, readMeta);
     expect(upgraded.embeddingInputFormatVersion).toBe(1);
     expect(upgraded.providerKey).not.toBe(legacyProviderKey);
@@ -232,10 +202,7 @@ describe("memory search after an EmbeddingGemma input format upgrade", () => {
     expect(await reopened.search("alpha")).not.toEqual([]);
     expect(fixture.provider.embedBatchCalls).toBe(rebuiltBatches);
     expect(reopened.status().custom?.indexIdentity).toEqual({ status: "valid" });
-    await reopened.close();
-    await closeAllMemorySearchManagers();
-    await closeOpenClawAgentDatabasesAsync();
-    closeOpenClawAgentDatabasesForTest();
+    await closeManager(reopened);
     expect(withDatabase(dbPath, readMeta)).toEqual(upgraded);
   });
 });

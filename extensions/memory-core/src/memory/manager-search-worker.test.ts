@@ -15,15 +15,63 @@ import {
 const { closeAllMemorySearchManagers, getMemorySearchManager } = await import("./index.js");
 const fixture = createManagerIndexFixture({ getMemorySearchManager, closeAllMemorySearchManagers });
 const execFileAsync = promisify(execFile);
+const createConfig = (sources: Array<"memory" | "sessions"> = ["memory"]) =>
+  fixture.createConfig({
+    provider: "none",
+    sources,
+    sessionMemory: sources.includes("sessions"),
+    vectorEnabled: false,
+  });
+async function indexedManager(cfg = createConfig()) {
+  const manager = await fixture.getFreshManager(cfg, "cli");
+  await manager.sync({ reason: "test", force: true });
+  return manager;
+}
+const seedSession = (sessionId: string, content: string, kind = "chat") =>
+  fixture.seedSessionTranscript({
+    sessionId,
+    sessionKey: `agent:main:${kind}:${sessionId}`,
+    messages: [{ role: "user", timestamp: Date.now(), content }],
+  });
+function gateWorker(
+  signal: AbortSignal,
+  check: (result: Awaited<ReturnType<typeof cpuRuntime.runMemoryKeywordSearch>>) => void,
+) {
+  const ready = createDeferred<void>();
+  const release = createDeferred<void>();
+  const run = cpuRuntime.runMemoryKeywordSearch;
+  const query = vi
+    .spyOn(cpuRuntime, "runMemoryKeywordSearch")
+    .mockImplementationOnce(async (...args) => {
+      const result = await run(...args);
+      check(result);
+      ready.resolve();
+      await release.promise;
+      return result;
+    });
+  const abort = () => release.resolve();
+  signal.addEventListener("abort", abort, { once: true });
+  return {
+    ready: ready.promise,
+    release: () => release.resolve(),
+    restore() {
+      signal.removeEventListener("abort", abort);
+      query.mockRestore();
+    },
+  };
+}
+const awaitWorker = (ready: Promise<void>, search: Promise<unknown>) =>
+  Promise.race([
+    ready,
+    search.then(() => {
+      throw new Error("Search settled before its worker result was gated");
+    }),
+  ]);
 
 it("sees published replacements through reused search and curated readers", async () => {
   const filename = path.join(fixture.paths.workspace, "MEMORY.md");
   await fs.writeFile(filename, "- Remember violetcompass. <!-- trigger: compass -->");
-  const manager = await fixture.getFreshManager(
-    fixture.createConfig({ provider: "none", sources: ["memory"], vectorEnabled: false }),
-    "cli",
-  );
-  await manager.sync({ reason: "before-reader-reuse", force: true });
+  const manager = await indexedManager();
   expect((await manager.search("violetcompass", { lexicalOnly: true }))[0]?.snippet).toContain(
     "violetcompass",
   );
@@ -39,20 +87,8 @@ it("sees published replacements through reused search and curated readers", asyn
 });
 
 it("cancels post-probe metadata reads and releases the generation for publication", async () => {
-  await fixture.seedSessionTranscript({
-    sessionId: "metadata-cancellation",
-    messages: [{ role: "user", timestamp: Date.now(), content: "Alpha cancellation proof." }],
-  });
-  const manager = await fixture.getFreshManager(
-    fixture.createConfig({
-      provider: "none",
-      sources: ["memory", "sessions"],
-      sessionMemory: true,
-      vectorEnabled: false,
-    }),
-    "cli",
-  );
-  await manager.sync({ reason: "test", force: true });
+  await seedSession("metadata-cancellation", "Alpha cancellation proof.", "memory");
+  const manager = await indexedManager(createConfig(["memory", "sessions"]));
   const caller = new AbortController();
   const reason = new Error("caller cancelled metadata enrichment");
   const run = cpuRuntime.runMemoryRecallMetadata;
@@ -77,55 +113,28 @@ it("discards a worker hit forgotten before authoritative metadata enrichment", a
 }) => {
   const sessionId = "forgotten-worker-read";
   const sessionPath = `sessions/main/${sessionId}.jsonl`;
-  await fixture.seedSessionTranscript({
-    sessionId,
-    sessionKey: `agent:main:chat:${sessionId}`,
-    messages: [{ role: "user", timestamp: Date.now(), content: "Private violetfragment." }],
-  });
+  await seedSession(sessionId, "Private violetfragment.");
   await fs.writeFile(path.join(fixture.paths.memory, "survivor.md"), "Public violetfragment.");
-  const cfg = fixture.createConfig({
-    provider: "none",
-    sources: ["memory", "sessions"],
-    sessionMemory: true,
-    vectorEnabled: false,
+  const cfg = createConfig(["memory", "sessions"]);
+  const manager = await indexedManager(cfg);
+  const gate = gateWorker(signal, (result) => {
+    expect(result.body.rows.some((row) => row.path === sessionPath)).toBe(true);
   });
-  const manager = await fixture.getFreshManager(cfg, "cli");
-  await manager.sync({ reason: "index-before-forget", force: true });
-  const ready = createDeferred<void>();
-  const release = createDeferred<void>();
-  const run = cpuRuntime.runMemoryKeywordSearch;
-  const query = vi
-    .spyOn(cpuRuntime, "runMemoryKeywordSearch")
-    .mockImplementationOnce(async (...args) => {
-      const result = await run(...args);
-      expect(result.body.rows.some((row) => row.path === sessionPath)).toBe(true);
-      ready.resolve();
-      await release.promise;
-      return result;
-    });
-  const abort = () => release.resolve();
-  signal.addEventListener("abort", abort, { once: true });
   const search = manager.search("violetfragment", { lexicalOnly: true, signal });
   try {
-    await Promise.race([
-      ready.promise,
-      search.then(() => {
-        throw new Error("Search settled before its worker result was gated");
-      }),
-    ]);
+    await awaitWorker(gate.ready, search);
     await forgetMemoryEntries({ cfg, agentId: "main", sessionIds: [sessionId] });
     const db = Reflect.get(manager, "db") as DatabaseSync;
     expect(
       db.prepare("SELECT id FROM memory_index_chunks WHERE path = ?").get(sessionPath),
     ).toBeUndefined();
-    release.resolve();
+    gate.release();
     const results = await search;
     expect(results.map((result) => result.path)).toEqual(["memory/survivor.md"]);
   } finally {
-    signal.removeEventListener("abort", abort);
-    release.resolve();
+    gate.release();
     await search.catch(() => undefined);
-    query.mockRestore();
+    gate.restore();
   }
 });
 
@@ -134,37 +143,16 @@ it.for(["completed", "cancelled"] as const)(
   async (outcome, { signal }) => {
     const sessionId = "fused-search-custody";
     const sessionPath = `sessions/main/${sessionId}.jsonl`;
-    await fixture.seedSessionTranscript({
-      sessionId,
-      sessionKey: `agent:main:chat:${sessionId}`,
-      messages: [{ role: "user", timestamp: Date.now(), content: "Private violetcustody." }],
-    });
-    const cfg = fixture.createConfig({
-      provider: "none",
-      sources: ["sessions"],
-      sessionMemory: true,
-      vectorEnabled: false,
-    });
-    const manager = await fixture.getFreshManager(cfg, "cli");
-    await manager.sync({ reason: "before-fused-search", force: true });
-    const ready = createDeferred<void>();
-    const release = createDeferred<void>();
+    await seedSession(sessionId, "Private violetcustody.");
+    const cfg = createConfig(["sessions"]);
+    const manager = await indexedManager(cfg);
     const caller = new AbortController();
     const cancellation = new Error("cancel fused search during result delivery");
-    const run = cpuRuntime.runMemoryKeywordSearch;
-    const query = vi
-      .spyOn(cpuRuntime, "runMemoryKeywordSearch")
-      .mockImplementationOnce(async (...args) => {
-        const result = await run(...args);
-        expect(result.body.rows.some((row) => row.path === sessionPath)).toBe(true);
-        expect(result.recallData?.sourceMtimes.sessions.has(sessionPath)).toBe(true);
-        expect(result.body.rows.every((row) => result.recallData?.rows.has(row.id))).toBe(true);
-        ready.resolve();
-        await release.promise;
-        return result;
-      });
-    const abort = () => release.resolve();
-    signal.addEventListener("abort", abort, { once: true });
+    const gate = gateWorker(signal, (result) => {
+      expect(result.body.rows.some((row) => row.path === sessionPath)).toBe(true);
+      expect(result.recallData?.sourceMtimes.sessions.has(sessionPath)).toBe(true);
+      expect(result.body.rows.every((row) => result.recallData?.rows.has(row.id))).toBe(true);
+    });
     const search = manager.search("violetcustody", {
       lexicalOnly: true,
       sources: ["sessions"],
@@ -175,12 +163,7 @@ it.for(["completed", "cancelled"] as const)(
     let closing: Promise<void> | undefined;
     let forgetSettled = false;
     try {
-      await Promise.race([
-        ready.promise,
-        search.then(() => {
-          throw new Error("Search settled before its fused result was gated");
-        }),
-      ]);
+      await awaitWorker(gate.ready, search);
       forgetting = forgetMemoryEntries({ cfg, agentId: "main", sessionIds: [sessionId] }).then(
         (report) => {
           forgetSettled = true;
@@ -195,14 +178,14 @@ it.for(["completed", "cancelled"] as const)(
       if (outcome === "cancelled") {
         caller.abort(cancellation);
       }
-      release.resolve();
+      gate.release();
       if (outcome === "cancelled") {
         await expect(search).rejects.toBe(cancellation);
       } else {
         expect((await search).map((result) => result.path)).toEqual([sessionPath]);
       }
       await Promise.all([forgetting, closing]);
-      query.mockRestore();
+      gate.restore();
 
       const reopened = await fixture.getFreshManager(cfg, "cli");
       await reopened.sync({ reason: "after-fused-forget", force: true });
@@ -217,10 +200,9 @@ it.for(["completed", "cancelled"] as const)(
         db.prepare("SELECT session_id FROM session_windows WHERE session_id = ?").get(sessionId),
       ).toEqual({ session_id: sessionId });
     } finally {
-      signal.removeEventListener("abort", abort);
-      release.resolve();
+      gate.release();
       await Promise.allSettled([search, forgetting, closing]);
-      query.mockRestore();
+      gate.restore();
     }
   },
 );
@@ -246,11 +228,7 @@ async function tryIndependentWriter(databasePath: string): Promise<string> {
 
 it("keeps the owner's SQLite writer lock across worker reads and reader close", async () => {
   await fs.writeFile(path.join(fixture.paths.memory, "worker-lock.md"), "Axolotl lock proof.");
-  const manager = await fixture.getFreshManager(
-    fixture.createConfig({ provider: "none", sources: ["memory"], vectorEnabled: false }),
-    "cli",
-  );
-  await manager.sync({ reason: "test", force: true });
+  const manager = await indexedManager();
   const databasePath = manager.status().dbPath;
   if (!databasePath) {
     throw new Error("Expected a persistent memory database");
