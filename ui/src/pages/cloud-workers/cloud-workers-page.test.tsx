@@ -1,7 +1,7 @@
 /* @vitest-environment jsdom */
 import { expectDefined } from "@openclaw/normalization-core";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import {
   validateConfigPatchParams,
   type ConfigPatchParams,
@@ -10,6 +10,7 @@ import {
 import { applyMergePatch } from "../../../../src/config/merge-patch.js";
 import { createDeferred } from "../../../../test/helpers/promise.js";
 import type { GatewayBrowserClient } from "../../api/gateway.ts";
+import { bootstrapApplication } from "../../app/bootstrap.ts";
 import type { ApplicationContext } from "../../app/context.ts";
 import { showConfirmDialog } from "../../components/confirm-dialog.ts";
 import { i18n } from "../../i18n/index.ts";
@@ -86,12 +87,35 @@ it("retires a pending profile catalog when permissions change on the same connec
   const transport = vi.spyOn(client, "request");
   const source = createGatewayHarness(client);
   source.publish(true, client, gatewayHelloForMethods(["config.patch", "environments.list"]));
-  const gateway = Object.assign(source.gateway, {
-    connection: { gatewayUrl: "ws://gateway.example.test", token: "", password: "" },
-  });
+  const application = bootstrapApplication();
+  onTestFinished(application.stop);
+  const gateway: ApplicationContext["gateway"] = {
+    ...application.context.gateway,
+    connection: {
+      gatewayUrl: "ws://gateway.example.test",
+      token: "",
+      bootstrapToken: "",
+      password: "",
+    },
+    get snapshot() {
+      const snapshot = source.gateway.snapshot;
+      return {
+        ...application.context.gateway.snapshot,
+        client: snapshot.client,
+        phase: snapshot.phase,
+        sessionKey: snapshot.sessionKey,
+        hello: snapshot.hello ?? null,
+      };
+    },
+    subscribe: (listener) => source.gateway.subscribe(() => listener(gateway.snapshot)),
+  };
   const runtimeConfig = createRuntimeConfigCapability(gateway);
-  // SAFETY: This mounted page uses only Gateway, RuntimeConfig, and navigation capabilities.
-  const context = { gateway, runtimeConfig, navigate: vi.fn() } as ApplicationContext;
+  const context: ApplicationContext = {
+    ...application.context,
+    gateway,
+    runtimeConfig,
+    navigate: vi.fn(),
+  };
   const view = mountSolid(() => (
     <ApplicationProvider value={context}>
       <CloudWorkersPage />
@@ -106,16 +130,25 @@ it("retires a pending profile catalog when permissions change on the same connec
       );
     await waitForSolid(() => {
       expect(catalogIndex()).toBeGreaterThanOrEqual(0);
-      expect(transport.mock.calls[catalogIndex()][2]?.signal?.aborted).toBe(false);
+      const call = expectDefined(transport.mock.calls[catalogIndex()], "Profile catalog request");
+      expect(call[2]?.signal?.aborted).toBe(false);
     });
-    const catalogSignal = transport.mock.calls[catalogIndex()][2]?.signal;
-    const catalogCompletion = transport.mock.results[catalogIndex()].value;
-    expect(catalogSignal?.aborted).toBe(false);
+    const index = catalogIndex();
+    const call = expectDefined(transport.mock.calls[index], "Profile catalog request");
+    const catalogSignal = expectDefined(call[2]?.signal, "Profile catalog cancellation signal");
+    const catalogCompletion = expectDefined(
+      transport.mock.results[index],
+      "Profile catalog result",
+    ).value;
+    expect(catalogSignal.aborted).toBe(false);
 
     source.publish(true, client, gatewayHelloForMethods([]));
-    expect(catalogSignal?.aborted).toBe(true);
+    expect(catalogSignal.aborted).toBe(true);
     await waitForSolid(() => expect(view.getByText("Unavailable")).toBeTruthy());
-    pendingCatalog.resolve({ environments: [], profiles: [{ id: "worker" }] });
+    pendingCatalog.resolve({
+      environments: [],
+      profiles: [{ id: "worker", providerId: "crabbox" }],
+    });
     await catalogCompletion;
     flush();
 
