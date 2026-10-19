@@ -821,10 +821,10 @@ suite.define(() => {
             await expect
               .poll(() => thread.evaluate((element) => element.scrollTop))
               .toBeLessThan(originalTop);
-            return thread.evaluate((element, originalTop) => {
+            return thread.evaluate((element, restoreTop) => {
               const awayTop = element.scrollTop;
-              element.scrollTo({ top: originalTop, behavior: "instant" });
-              return { originalTop, awayTop, restoredTop: element.scrollTop };
+              element.scrollTo({ top: restoreTop, behavior: "instant" });
+              return { originalTop: restoreTop, awayTop, restoredTop: element.scrollTop };
             }, originalTop);
           })()
         : Promise.resolve(null);
