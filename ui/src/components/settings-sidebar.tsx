@@ -1,5 +1,5 @@
 import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
-import { createMemo, For, onSettled, Show } from "solid-js";
+import { createEffect, createMemo, For, onSettled, Show } from "solid-js";
 import type { ThemeBranding } from "../../../packages/gateway-protocol/src/theme.ts";
 import type { AgentsListResult } from "../api/types.ts";
 import {
@@ -310,21 +310,11 @@ function SettingsAgentSelector(props: SettingsSidebarProps) {
   const selectionSource = createMemo(() => props.settingsAgentSelection);
   const identities = createMemo(() => projectOwner(identitySource(), (source) => source.entries()));
   const selection = createMemo(() => projectAgentSelection(selectionSource()));
-  const requestScope = createMemo(() => ({ identity: identitySource(), selection: selection() }));
-  const identityRequests = (
-    <Show when={requestScope()} keyed>
-      {(scope) => {
-        onSettled(() => {
-          const ensureSelected = () => {
-            void scope.identity.ensure([scope.selection.read().state.selectedId]);
-          };
-          const stop = scope.selection.subscribe(ensureSelected);
-          ensureSelected();
-          return stop;
-        });
-        return null;
-      }}
-    </Show>
+  createEffect(
+    () => [identitySource(), selection().read().state.selectedId] as const,
+    ([source, agentId]) => {
+      void source.ensure([agentId]);
+    },
   );
   const agents = createMemo(() =>
     listSelectableAgents(props.agents).map((agent) =>
@@ -346,7 +336,6 @@ function SettingsAgentSelector(props: SettingsSidebarProps) {
   );
   return (
     <div class="settings-sidebar__agent">
-      {identityRequests}
       <openclaw-agent-select
         prop:options={options()}
         prop:identityById={Object.fromEntries(
