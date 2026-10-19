@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { parse } from "yaml";
 import {
   buildOpenShellPolicyYaml,
@@ -48,8 +48,15 @@ it.runIf(process.platform !== "win32")("reports a signal-killed probe as failure
   expect(result.code).not.toBe(0);
 });
 
+const roots: string[] = [];
+afterEach(async () => {
+  vi.restoreAllMocks();
+  await Promise.all(roots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true })));
+});
+
 async function createCleanupFixture(options: { mode?: string; inventory?: string } = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "openshell-cleanup-test-"));
+  roots.push(root);
   const stateFile = path.join(root, "state.json");
   const command = path.join(root, "openshell");
   const initial = {
@@ -114,7 +121,6 @@ if (state.mode === "stuck" && state.observations > 0) {
       }),
     read: async () => JSON.parse(await fs.readFile(stateFile, "utf8")) as typeof initial,
     deadlineExpired: () => existsSync(stateFile + ".expired"),
-    dispose: () => fs.rm(root, { recursive: true, force: true }),
   };
 }
 
@@ -124,16 +130,12 @@ describe.runIf(process.platform !== "win32")("OpenShell workspace cleanup", () =
     ["unexpected sandbox", '[{"name":"someone-else"}]'],
   ])("rejects %s inventory without deleting resources", async (_label, inventory) => {
     const fixture = await createCleanupFixture({ inventory });
-    try {
-      await expect(fixture.cleanup()).rejects.toThrow();
-      expect(await fixture.read()).toMatchObject({
-        listCalls: 1,
-        deletes: [],
-        workspaceDeletes: 0,
-      });
-    } finally {
-      await fixture.dispose();
-    }
+    await expect(fixture.cleanup()).rejects.toThrow();
+    expect(await fixture.read()).toMatchObject({
+      listCalls: 1,
+      deletes: [],
+      workspaceDeletes: 0,
+    });
   });
 
   it.each([
@@ -143,20 +145,16 @@ describe.runIf(process.platform !== "win32")("OpenShell workspace cleanup", () =
     "retains %s while attempting remaining owned deletes once",
     async (mode, message, listCalls) => {
       const fixture = await createCleanupFixture({ mode });
-      try {
-        const failure = await fixture.cleanup().catch((error: unknown) => error);
-        expect(failure).toBeInstanceOf(AggregateError);
-        expect((failure as AggregateError).errors).toEqual([
-          expect.objectContaining({ message: expect.stringContaining(message) }),
-        ]);
-        expect(await fixture.read()).toMatchObject({
-          listCalls,
-          deletes: ["first", "second"],
-          workspaceDeletes: 0,
-        });
-      } finally {
-        await fixture.dispose();
-      }
+      const failure = await fixture.cleanup().catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(AggregateError);
+      expect((failure as AggregateError).errors).toEqual([
+        expect.objectContaining({ message: expect.stringContaining(message) }),
+      ]);
+      expect(await fixture.read()).toMatchObject({
+        listCalls,
+        deletes: ["first", "second"],
+        workspaceDeletes: 0,
+      });
     },
   );
 
@@ -165,38 +163,29 @@ describe.runIf(process.platform !== "win32")("OpenShell workspace cleanup", () =
     const startedAt = Date.now();
     // Advance at the real child operation boundary, not a wall-clock poll that
     // can expire before a loaded host starts the command.
-    const clock = vi
-      .spyOn(Date, "now")
-      .mockImplementation(() => startedAt + (fixture.deadlineExpired() ? 120_000 : 0));
-    try {
-      const failure = await fixture.cleanup().catch((error: unknown) => error);
-      expect(failure).toBeInstanceOf(AggregateError);
-      expect((failure as AggregateError).errors).toContainEqual(
-        expect.objectContaining({ message: expect.stringContaining("120 seconds") }),
-      );
-      expect(await fixture.read()).toMatchObject({
-        listCalls: 2,
-        deletes: ["first"],
-        observations: 1,
-        workspaceDeletes: 0,
-      });
-    } finally {
-      clock.mockRestore();
-      await fixture.dispose();
-    }
+    vi.spyOn(Date, "now").mockImplementation(
+      () => startedAt + (fixture.deadlineExpired() ? 120_000 : 0),
+    );
+    const failure = await fixture.cleanup().catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(AggregateError);
+    expect((failure as AggregateError).errors).toContainEqual(
+      expect.objectContaining({ message: expect.stringContaining("120 seconds") }),
+    );
+    expect(await fixture.read()).toMatchObject({
+      listCalls: 2,
+      deletes: ["first"],
+      observations: 1,
+      workspaceDeletes: 0,
+    });
   });
 
   it("waits for durable sandbox absence and reports workspace deletion failure", async () => {
     const fixture = await createCleanupFixture({ mode: "workspace-failure" });
-    try {
-      await expect(fixture.cleanup()).rejects.toThrow("workspace cleanup failed");
-      expect(await fixture.read()).toMatchObject({
-        names: [],
-        deletes: ["first", "second"],
-        workspaceDeletes: 1,
-      });
-    } finally {
-      await fixture.dispose();
-    }
+    await expect(fixture.cleanup()).rejects.toThrow("workspace cleanup failed");
+    expect(await fixture.read()).toMatchObject({
+      names: [],
+      deletes: ["first", "second"],
+      workspaceDeletes: 1,
+    });
   });
 });

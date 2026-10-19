@@ -1,4 +1,3 @@
-// Openshell tests cover mirror plugin behavior.
 import { execFileSync } from "node:child_process";
 import fs from "node:fs/promises";
 import net from "node:net";
@@ -22,14 +21,23 @@ async function makeTmpDir(): Promise<string> {
 }
 
 async function expectPathMissing(targetPath: string): Promise<void> {
-  let error: unknown;
-  try {
-    await fs.lstat(targetPath);
-  } catch (caught) {
-    error = caught;
+  const result = fs.lstat(targetPath);
+  await expect(result).rejects.toBeInstanceOf(Error);
+  await expect(result).rejects.toMatchObject({ code: "ENOENT" });
+}
+
+async function writeFiles(root: string, files: Record<string, string>) {
+  for (const [name, contents] of Object.entries(files)) {
+    const file = path.join(root, name);
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, contents);
   }
-  expect(error).toBeInstanceOf(Error);
-  expect((error as NodeJS.ErrnoException).code).toBe("ENOENT");
+}
+
+async function expectFiles(root: string, files: Record<string, string>) {
+  for (const [name, contents] of Object.entries(files)) {
+    expect(await fs.readFile(path.join(root, name), "utf8")).toBe(contents);
+  }
 }
 
 afterEach(async () => {
@@ -57,32 +65,26 @@ describe("replaceDirectoryContents", () => {
   it("applies remote deletions and file-directory replacements without protected links", async () => {
     const source = await makeTmpDir();
     const target = await makeTmpDir();
-    await fs.mkdir(path.join(target, "deleted", "nested"), { recursive: true });
-    await fs.writeFile(path.join(target, "deleted", "nested", "old.txt"), "stale");
-    await fs.mkdir(path.join(target, "now-file"));
-    await fs.writeFile(path.join(target, "now-file", "old.txt"), "stale");
-    await fs.writeFile(path.join(source, "now-file"), "file");
-    await fs.writeFile(path.join(target, "now-directory"), "stale");
-    await fs.mkdir(path.join(source, "now-directory"));
-    await fs.writeFile(path.join(source, "now-directory", "new.txt"), "directory");
+    await writeFiles(target, {
+      "deleted/nested/old.txt": "stale",
+      "now-file/old.txt": "stale",
+      "now-directory": "stale",
+    });
+    const files = { "now-file": "file", "now-directory/new.txt": "directory" };
+    await writeFiles(source, files);
     await fs.mkdir(path.join(source, "empty-directory"));
 
     await replaceDirectoryContents({ sourceDir: source, targetDir: target });
 
     await expectPathMissing(path.join(target, "deleted"));
-    expect(await fs.readFile(path.join(target, "now-file"), "utf8")).toBe("file");
-    expect(await fs.readFile(path.join(target, "now-directory", "new.txt"), "utf8")).toBe(
-      "directory",
-    );
+    await expectFiles(target, files);
     expect(await fs.readdir(path.join(target, "empty-directory"))).toEqual([]);
   });
 
   it("waits for in-flight copies before reporting a mirror failure", async () => {
     const source = await makeTmpDir();
     const target = await makeTmpDir();
-    await fs.mkdir(path.join(source, "nested"));
-    await fs.writeFile(path.join(source, "nested", "failed.txt"), "failed");
-    await fs.writeFile(path.join(source, "nested", "delayed.txt"), "finished");
+    await writeFiles(source, { "nested/failed.txt": "failed", "nested/delayed.txt": "finished" });
     const failure = new Error("copy failed");
     const failedCopyStarted = createDeferred<void>();
     const delayedCopyStarted = createDeferred<void>();
@@ -129,10 +131,7 @@ describe("replaceDirectoryContents", () => {
     const source = await makeTmpDir();
     const target = await makeTmpDir();
 
-    // Source uses variant casing to try to bypass the exclusion
-    await fs.mkdir(path.join(source, "Hooks", "evil"), { recursive: true });
-    await fs.writeFile(path.join(source, "Hooks", "evil", "handler.js"), "// malicious");
-    await fs.writeFile(path.join(source, "data.txt"), "ok");
+    await writeFiles(source, { "Hooks/evil/handler.js": "// malicious", "data.txt": "ok" });
 
     await replaceDirectoryContents({
       sourceDir: source,
@@ -140,10 +139,7 @@ describe("replaceDirectoryContents", () => {
       excludeDirs: ["hooks"],
     });
 
-    // Legitimate content is synced
     expect(await fs.readFile(path.join(target, "data.txt"), "utf8")).toBe("ok");
-
-    // "Hooks" (variant case) must still be excluded
     await expectPathMissing(path.join(target, "Hooks"));
   });
 
@@ -151,20 +147,18 @@ describe("replaceDirectoryContents", () => {
     const source = await makeTmpDir();
     const target = await makeTmpDir();
 
-    await fs.mkdir(path.join(source, "hooks"), { recursive: true });
-    await fs.writeFile(path.join(source, "hooks", "pre-commit"), "malicious");
-    await fs.mkdir(path.join(source, "git-hooks"), { recursive: true });
-    await fs.writeFile(path.join(source, "git-hooks", "pre-commit"), "malicious");
-    await fs.mkdir(path.join(source, ".git", "hooks"), { recursive: true });
-    await fs.writeFile(path.join(source, ".git", "hooks", "post-checkout"), "malicious");
-    await fs.writeFile(path.join(source, "safe.txt"), "ok");
-
-    await fs.mkdir(path.join(target, "hooks"), { recursive: true });
-    await fs.writeFile(path.join(target, "hooks", "trusted"), "trusted");
-    await fs.mkdir(path.join(target, "git-hooks"), { recursive: true });
-    await fs.writeFile(path.join(target, "git-hooks", "trusted"), "trusted");
-    await fs.mkdir(path.join(target, ".git"), { recursive: true });
-    await fs.writeFile(path.join(target, ".git", "HEAD"), "ref: refs/heads/main\n");
+    await writeFiles(source, {
+      "hooks/pre-commit": "malicious",
+      "git-hooks/pre-commit": "malicious",
+      ".git/hooks/post-checkout": "malicious",
+      "safe.txt": "ok",
+    });
+    const protectedFiles = {
+      "hooks/trusted": "trusted",
+      "git-hooks/trusted": "trusted",
+      ".git/HEAD": "ref: refs/heads/main\n",
+    };
+    await writeFiles(target, protectedFiles);
 
     await replaceDirectoryContents({
       sourceDir: source,
@@ -173,11 +167,7 @@ describe("replaceDirectoryContents", () => {
     });
 
     expect(await fs.readFile(path.join(target, "safe.txt"), "utf8")).toBe("ok");
-    expect(await fs.readFile(path.join(target, "hooks", "trusted"), "utf8")).toBe("trusted");
-    expect(await fs.readFile(path.join(target, "git-hooks", "trusted"), "utf8")).toBe("trusted");
-    expect(await fs.readFile(path.join(target, ".git", "HEAD"), "utf8")).toBe(
-      "ref: refs/heads/main\n",
-    );
+    await expectFiles(target, protectedFiles);
     for (const [directory, expected] of [
       ["hooks", "trusted"],
       ["git-hooks", "trusted"],
@@ -185,24 +175,6 @@ describe("replaceDirectoryContents", () => {
     ] as const) {
       expect(await fs.readdir(path.join(target, directory))).toEqual([expected]);
     }
-  });
-
-  it("skips symbolic links when copying into the host workspace", async () => {
-    const source = await makeTmpDir();
-    const target = await makeTmpDir();
-
-    await fs.writeFile(path.join(source, "safe.txt"), "ok");
-    await fs.mkdir(path.join(source, "nested"), { recursive: true });
-    await fs.writeFile(path.join(source, "nested", "file.txt"), "nested");
-    await fs.symlink("/tmp/host-secret", path.join(source, "escaped-link"));
-    await fs.symlink("/tmp/host-secret-dir", path.join(source, "nested", "escaped-dir"));
-
-    await replaceDirectoryContents({ sourceDir: source, targetDir: target });
-
-    expect(await fs.readFile(path.join(target, "safe.txt"), "utf8")).toBe("ok");
-    expect(await fs.readFile(path.join(target, "nested", "file.txt"), "utf8")).toBe("nested");
-    await expectPathMissing(path.join(target, "escaped-link"));
-    await expectPathMissing(path.join(target, "nested", "escaped-dir"));
   });
 
   it.runIf(process.platform !== "win32")(
@@ -286,22 +258,21 @@ describe("replaceDirectoryContents", () => {
   );
 });
 
-describe("stageDirectoryContents", () => {
-  it("stages upload content without symbolic links", async () => {
-    const source = await makeTmpDir();
-    const staged = await makeTmpDir();
+it.each([
+  ["replace", replaceDirectoryContents],
+  ["stage", stageDirectoryContents],
+] as const)("%s copies content without symbolic links", async (_mode, copy) => {
+  const source = await makeTmpDir();
+  const staged = await makeTmpDir();
 
-    await fs.writeFile(path.join(source, "safe.txt"), "ok");
-    await fs.mkdir(path.join(source, "nested"), { recursive: true });
-    await fs.writeFile(path.join(source, "nested", "file.txt"), "nested");
-    await fs.symlink("/tmp/host-secret", path.join(source, "escaped-link"));
-    await fs.symlink("/tmp/host-secret-dir", path.join(source, "nested", "escaped-dir"));
+  const files = { "safe.txt": "ok", "nested/file.txt": "nested" };
+  await writeFiles(source, files);
+  await fs.symlink("/tmp/host-secret", path.join(source, "escaped-link"));
+  await fs.symlink("/tmp/host-secret-dir", path.join(source, "nested", "escaped-dir"));
 
-    await stageDirectoryContents({ sourceDir: source, targetDir: staged });
+  await copy({ sourceDir: source, targetDir: staged });
 
-    expect(await fs.readFile(path.join(staged, "safe.txt"), "utf8")).toBe("ok");
-    expect(await fs.readFile(path.join(staged, "nested", "file.txt"), "utf8")).toBe("nested");
-    await expectPathMissing(path.join(staged, "escaped-link"));
-    await expectPathMissing(path.join(staged, "nested", "escaped-dir"));
-  });
+  await expectFiles(staged, files);
+  await expectPathMissing(path.join(staged, "escaped-link"));
+  await expectPathMissing(path.join(staged, "nested", "escaped-dir"));
 });

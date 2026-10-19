@@ -101,13 +101,13 @@ export async function runCommand(params: {
           `command failed: ${params.command} ${params.args.join(" ")}`,
           `exit: ${exitCode}`,
         ];
-        const trimmedStdout = stdout.trim();
-        if (trimmedStdout.length > 0) {
-          message.push(`stdout:\n${stdout}`);
-        }
-        const trimmedStderr = stderr.trim();
-        if (trimmedStderr.length > 0) {
-          message.push(`stderr:\n${stderr}`);
+        for (const [label, output] of [
+          ["stdout", stdout],
+          ["stderr", stderr],
+        ] as const) {
+          if (output.trim().length > 0) {
+            message.push(`${label}:\n${output}`);
+          }
         }
         reject(new Error(message.join("\n")));
         return;
@@ -133,23 +133,25 @@ export async function cleanupOpenShellWorkspace(params: {
     }
     return remaining;
   };
+  const run = (args: string[], timeoutMs = remainingMs()) =>
+    runCommand({
+      command: params.command,
+      env: params.env,
+      args,
+      timeoutMs,
+    });
   const ownedNames = new Set(params.sandboxNames);
   const listNames = async () => {
-    const result = await runCommand({
-      command: params.command,
-      args: [
-        "--workspace",
-        params.workspace,
-        "sandbox",
-        "list",
-        "--limit",
-        String(ownedNames.size + 1),
-        "--output",
-        "json",
-      ],
-      env: params.env,
-      timeoutMs: remainingMs(),
-    });
+    const result = await run([
+      "--workspace",
+      params.workspace,
+      "sandbox",
+      "list",
+      "--limit",
+      String(ownedNames.size + 1),
+      "--output",
+      "json",
+    ]);
     remainingMs();
     const sandboxes = z
       .array(z.object({ name: z.string().min(1) }))
@@ -170,12 +172,7 @@ export async function cleanupOpenShellWorkspace(params: {
   const failures: unknown[] = [];
   for (const sandboxName of [...ownedNames].filter((name) => presentNames.includes(name))) {
     try {
-      await runCommand({
-        command: params.command,
-        args: ["--workspace", params.workspace, "sandbox", "delete", sandboxName],
-        env: params.env,
-        timeoutMs: remainingMs(),
-      });
+      await run(["--workspace", params.workspace, "sandbox", "delete", sandboxName]);
       // OpenShell v0.0.109 acknowledges deletion before its controller removes the
       // durable row. Observe absence before deleting the workspace; never retry errors.
       if (failures.length === 0) {
@@ -190,12 +187,7 @@ export async function cleanupOpenShellWorkspace(params: {
   if (failures.length > 0) {
     throw new AggregateError(failures, "OpenShell sandbox cleanup failed");
   }
-  await runCommand({
-    command: params.command,
-    args: ["workspace", "delete", params.workspace],
-    env: params.env,
-    timeoutMs: 30_000,
-  });
+  await run(["workspace", "delete", params.workspace], 30_000);
 }
 
 export async function runBackendExec(params: {

@@ -1,14 +1,15 @@
-// Openshell tests cover backend plugin behavior.
 import fs from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
+import { expectDefined } from "@openclaw/normalization-core";
+import type { CreateSandboxBackendParams, SandboxBackendHandle } from "openclaw/plugin-sdk/sandbox";
 import {
   createSandboxTestContext,
   createSandboxBrowserConfig,
   createSandboxPruneConfig,
   createSandboxSshConfig,
 } from "openclaw/plugin-sdk/test-fixtures";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   buildOpenShellPolicyYaml,
   cleanupOpenShellWorkspace,
@@ -54,11 +55,12 @@ type HostPolicyServer = {
   close(): Promise<void>;
 };
 
-async function commandAvailable(command: string): Promise<boolean> {
+async function commandSucceeds(command: string, args: string[], env?: NodeJS.ProcessEnv) {
   try {
     const result = await runCommand({
       command,
-      args: ["--help"],
+      args,
+      env,
       allowFailure: true,
       timeoutMs: 20_000,
     });
@@ -116,30 +118,11 @@ async function activeOpenShellGateway(
     if (!gateway) {
       return null;
     }
-    const status = await runCommand({
-      command,
-      args: ["--gateway", gateway, "sandbox", "list"],
-      env,
-      allowFailure: true,
-      timeoutMs: 20_000,
-    });
-    return status.code === 0 ? gateway : null;
+    return (await commandSucceeds(command, ["--gateway", gateway, "sandbox", "list"], env))
+      ? gateway
+      : null;
   } catch {
     return null;
-  }
-}
-
-async function dockerReady(): Promise<boolean> {
-  try {
-    const result = await runCommand({
-      command: "docker",
-      args: ["version"],
-      allowFailure: true,
-      timeoutMs: 20_000,
-    });
-    return result.code === 0;
-  } catch {
-    return false;
   }
 }
 
@@ -177,9 +160,27 @@ function openshellEnv(rootDir: string): NodeJS.ProcessEnv {
   };
 }
 
-function trimTrailingNewline(value: string): string {
-  return value.replace(/\r?\n$/, "");
+function createBridge(backend: SandboxBackendHandle, workspaceDir: string) {
+  return expectDefined(
+    backend.createFsBridge?.({
+      sandbox: createSandboxTestContext({
+        overrides: {
+          backendId: "openshell",
+          workspaceDir,
+          agentWorkspaceDir: workspaceDir,
+          runtimeId: backend.runtimeId,
+          runtimeLabel: backend.runtimeLabel,
+          containerName: backend.runtimeId,
+          containerWorkdir: backend.workdir,
+          backend,
+        },
+      }),
+    }),
+    "OpenShell filesystem bridge",
+  );
 }
+
+const readFile = (root: string, file: string) => fs.readFile(path.join(root, file), "utf8");
 
 async function startHostPolicyServer(gatewayName: string): Promise<HostPolicyServer> {
   const port = await allocatePort();
@@ -231,7 +232,7 @@ HTTPServer(("0.0.0.0", 8000), Handler).serve_forever()
     ],
     timeoutMs: 60_000,
   });
-  const containerId = trimTrailingNewline(startResult.stdout.trim());
+  const containerId = startResult.stdout.trim();
   if (!containerId) {
     throw new Error("failed to start docker-backed host policy server");
   }
@@ -320,10 +321,10 @@ describe("openshell sandbox backend e2e", () => {
     "runs remote and mirrored sandboxes in a non-default OpenShell workspace with %s stress",
     { timeout: OPENCLAW_OPENSHELL_E2E_TIMEOUT_MS },
     async (stressMode) => {
-      if (!(await dockerReady())) {
+      if (!(await commandSucceeds("docker", ["version"]))) {
         throw new Error("OpenShell E2E requires a working Docker daemon");
       }
-      if (!(await commandAvailable(OPENCLAW_OPENSHELL_COMMAND))) {
+      if (!(await commandSucceeds(OPENCLAW_OPENSHELL_COMMAND, ["--help"]))) {
         throw new Error(`OpenShell CLI is unavailable: ${OPENCLAW_OPENSHELL_COMMAND}`);
       }
       if (!OPENCLAW_OPENSHELL_CONFIG_HOME) {
@@ -344,9 +345,6 @@ describe("openshell sandbox backend e2e", () => {
       // mirror socket under this root would exceed it.
       const rootDir = await fs.mkdtemp(path.join(await fs.realpath("/tmp"), "oc-osh-e2e-"));
       const env = openshellEnv(rootDir);
-      const previousHome = process.env.HOME;
-      const previousXdgConfigHome = process.env.XDG_CONFIG_HOME;
-      const previousXdgCacheHome = process.env.XDG_CACHE_HOME;
       const workspaceDir = path.join(rootDir, "workspace");
       const mirrorWorkspaceDir = path.join(rootDir, "mirror");
       const overlapWorkspaceDir = path.join(rootDir, "overlap-primary");
@@ -394,66 +392,50 @@ describe("openshell sandbox backend e2e", () => {
         autoProviders: false,
         policy: denyPolicyPath,
       });
-      const backendFactory = createOpenShellSandboxBackendFactory({ pluginConfig });
-      const backend = await backendFactory({
-        sessionKey: scopeKey,
-        scopeKey,
-        workspaceDir,
-        agentWorkspaceDir: workspaceDir,
-        cfg: sandboxCfg,
-      });
-      const mirrorPluginConfig = resolveOpenShellPluginConfig({
-        command: OPENCLAW_OPENSHELL_COMMAND,
-        gateway: gatewayName,
-        workspace: openShellWorkspace,
-        from: dockerfilePath,
-        autoProviders: false,
-        policy: denyPolicyPath,
+      const createBackend = (
+        key: string,
+        localDir: string,
+        config = pluginConfig,
+        agentWorkspaceDir = localDir,
+        cfg: CreateSandboxBackendParams["cfg"] = sandboxCfg,
+      ) =>
+        createOpenShellSandboxBackendFactory({ pluginConfig: config })({
+          sessionKey: key,
+          scopeKey: key,
+          workspaceDir: localDir,
+          agentWorkspaceDir,
+          cfg,
+        });
+      const backend = await createBackend(scopeKey, workspaceDir);
+      const mirrorPluginConfig = {
+        ...pluginConfig,
+        mode: "mirror" as const,
         remoteWorkspaceDir: "/sandbox/project",
         remoteAgentWorkspaceDir: "/sandbox/agent",
-      });
-      const mirrorBackend = await createOpenShellSandboxBackendFactory({
-        pluginConfig: mirrorPluginConfig,
-      })({
-        sessionKey: `session:openshell-e2e-mirror:${scopeSuffix}`,
-        scopeKey: `session:openshell-e2e-mirror:${scopeSuffix}`,
-        workspaceDir: mirrorWorkspaceDir,
-        agentWorkspaceDir: mirrorWorkspaceDir,
-        cfg: sandboxCfg,
-      });
-      const overlapBackend = await createOpenShellSandboxBackendFactory({
-        pluginConfig: resolveOpenShellPluginConfig({
-          command: OPENCLAW_OPENSHELL_COMMAND,
-          gateway: gatewayName,
-          workspace: openShellWorkspace,
-          from: dockerfilePath,
-          autoProviders: false,
-          policy: denyPolicyPath,
+      };
+      const mirrorKey = `session:openshell-e2e-mirror:${scopeSuffix}`;
+      const mirrorBackend = await createBackend(mirrorKey, mirrorWorkspaceDir, mirrorPluginConfig);
+      const overlapBackend = await createBackend(
+        `session:openshell-e2e-overlap:${scopeSuffix}`,
+        overlapWorkspaceDir,
+        {
+          ...mirrorPluginConfig,
           remoteWorkspaceDir: "/sandbox/agent/project",
-          remoteAgentWorkspaceDir: "/sandbox/agent",
-        }),
-      })({
-        sessionKey: `session:openshell-e2e-overlap:${scopeSuffix}`,
-        scopeKey: `session:openshell-e2e-overlap:${scopeSuffix}`,
-        workspaceDir: overlapWorkspaceDir,
-        agentWorkspaceDir: overlapAgentWorkspaceDir,
-        cfg: { ...sandboxCfg, workspaceAccess: "ro" },
-      });
-      const allowBackend = await createOpenShellSandboxBackendFactory({
-        pluginConfig: { ...pluginConfig, policy: allowPolicyPath },
-      })({
-        sessionKey: `session:openshell-e2e-allow:${scopeSuffix}`,
-        scopeKey: `session:openshell-e2e-allow:${scopeSuffix}`,
+        },
+        overlapAgentWorkspaceDir,
+        { ...sandboxCfg, workspaceAccess: "ro" },
+      );
+      const allowBackend = await createBackend(
+        `session:openshell-e2e-allow:${scopeSuffix}`,
         workspaceDir,
-        agentWorkspaceDir: workspaceDir,
-        cfg: sandboxCfg,
-      });
+        { ...pluginConfig, policy: allowPolicyPath },
+      );
 
       const failures: unknown[] = [];
       try {
-        process.env.HOME = env.HOME;
-        process.env.XDG_CONFIG_HOME = env.XDG_CONFIG_HOME;
-        process.env.XDG_CACHE_HOME = env.XDG_CACHE_HOME;
+        for (const key of ["HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME"]) {
+          vi.stubEnv(key, env[key]);
+        }
         hostPolicyServer = await startHostPolicyServer(gatewayName);
         if (!hostPolicyServer) {
           throw new Error("failed to start host policy server");
@@ -577,22 +559,7 @@ describe("openshell sandbox backend e2e", () => {
           configLabelMatch: true,
         });
 
-        const sandbox = createSandboxTestContext({
-          overrides: {
-            backendId: "openshell",
-            workspaceDir,
-            agentWorkspaceDir: workspaceDir,
-            runtimeId: backend.runtimeId,
-            runtimeLabel: backend.runtimeLabel,
-            containerName: backend.runtimeId,
-            containerWorkdir: backend.workdir,
-            backend,
-          },
-        });
-        const bridge = backend.createFsBridge?.({ sandbox });
-        if (!bridge) {
-          throw new Error("openshell backend did not create a filesystem bridge");
-        }
+        const bridge = createBridge(backend, workspaceDir);
 
         await bridge.writeFile({ filePath: "nested/remote-only.txt", data: "hello-remote\n" });
         const hostReadError = await fs
@@ -614,7 +581,7 @@ describe("openshell sandbox backend e2e", () => {
           timeoutMs: 60_000,
         });
         expect(verifyResult.code).toBe(0);
-        expect(trimTrailingNewline(verifyResult.stdout)).toContain("Host ");
+        expect(verifyResult.stdout.replace(/\r?\n$/, "")).toContain("Host ");
 
         const blockedGetResult = await runBackendExec({
           backend,
@@ -647,9 +614,9 @@ describe("openshell sandbox backend e2e", () => {
             code: 0,
             stdout: "primary-preserved\nagent-preserved\n",
           });
-          await expect(
-            fs.readFile(path.join(overlapAgentWorkspaceDir, "agent-only.txt"), "utf8"),
-          ).resolves.toBe("agent-preserved\n");
+          await expect(readFile(overlapAgentWorkspaceDir, "agent-only.txt")).resolves.toBe(
+            "agent-preserved\n",
+          );
         }
         for (const relativePath of hostLinks) {
           await expect(fs.readlink(path.join(mirrorWorkspaceDir, relativePath))).resolves.toBe(
@@ -668,9 +635,9 @@ describe("openshell sandbox backend e2e", () => {
           );
         }
         await expect(fs.readFile(hostLinkTarget, "utf8")).resolves.toBe("host-only-link-target\n");
-        await expect(
-          fs.readFile(path.join(mirrorWorkspaceDir, "links", "hardlinked.txt"), "utf8"),
-        ).resolves.toBe("remote-write");
+        await expect(readFile(mirrorWorkspaceDir, "links/hardlinked.txt")).resolves.toBe(
+          "remote-write",
+        );
         await expect(
           fs.lstat(path.join(mirrorWorkspaceDir, "links", "remote-link")),
         ).rejects.toMatchObject({
@@ -682,33 +649,21 @@ describe("openshell sandbox backend e2e", () => {
           ).resolves.toBe("private\n");
         }
 
-        const mirrorSandbox = createSandboxTestContext({
-          overrides: {
-            backendId: "openshell",
-            workspaceDir: mirrorWorkspaceDir,
-            agentWorkspaceDir: mirrorWorkspaceDir,
-            runtimeId: mirrorBackend.runtimeId,
-            runtimeLabel: mirrorBackend.runtimeLabel,
-            containerName: mirrorBackend.runtimeId,
-            containerWorkdir: mirrorBackend.workdir,
-            backend: mirrorBackend,
-          },
-        });
-        const mirrorBridge = mirrorBackend.createFsBridge?.({ sandbox: mirrorSandbox });
-        if (!mirrorBridge) {
-          throw new Error("openshell mirror backend did not create a filesystem bridge");
-        }
+        const mirrorBridge = createBridge(mirrorBackend, mirrorWorkspaceDir);
         await mirrorBridge.writeFile({
           filePath: "nested/mirror-note.txt",
           data: "mirror-write\n",
           mkdir: true,
         });
-        await expect(
-          fs.readFile(path.join(mirrorWorkspaceDir, "nested", "mirror-note.txt"), "utf8"),
-        ).resolves.toBe("mirror-write\n");
+        await expect(readFile(mirrorWorkspaceDir, "nested/mirror-note.txt")).resolves.toBe(
+          "mirror-write\n",
+        );
         await expect(
           runBackendExec({ backend: mirrorBackend, command: "cat nested/mirror-note.txt" }),
-        ).resolves.toMatchObject({ code: 0, stdout: "mirror-write\n" });
+        ).resolves.toMatchObject({
+          code: 0,
+          stdout: "mirror-write\n",
+        });
 
         const allowedGetResult = await runBackendExec({
           backend: allowBackend,
@@ -736,29 +691,18 @@ describe("openshell sandbox backend e2e", () => {
             throw result.reason;
           }
         }
-        await expect(
-          fs.readFile(path.join(mirrorWorkspaceDir, "overlapping-file.txt"), "utf8"),
-        ).resolves.toBe("file-write\n");
+        await expect(readFile(mirrorWorkspaceDir, "overlapping-file.txt")).resolves.toBe(
+          "file-write\n",
+        );
         await expect(
           runBackendExec({ backend: mirrorBackend, command: "cat overlapping-file.txt" }),
-        ).resolves.toMatchObject({ code: 0, stdout: "file-write\n" });
+        ).resolves.toMatchObject({
+          code: 0,
+          stdout: "file-write\n",
+        });
 
-        const mirrorTwin = await createOpenShellSandboxBackendFactory({
-          pluginConfig: mirrorPluginConfig,
-        })({
-          sessionKey: `session:openshell-e2e-mirror:${scopeSuffix}`,
-          scopeKey: `session:openshell-e2e-mirror:${scopeSuffix}`,
-          workspaceDir: mirrorWorkspaceDir,
-          agentWorkspaceDir: mirrorWorkspaceDir,
-          cfg: sandboxCfg,
-        });
-        const remoteTwin = await backendFactory({
-          sessionKey: scopeKey,
-          scopeKey,
-          workspaceDir,
-          agentWorkspaceDir: workspaceDir,
-          cfg: sandboxCfg,
-        });
+        const mirrorTwin = await createBackend(mirrorKey, mirrorWorkspaceDir, mirrorPluginConfig);
+        const remoteTwin = await createBackend(scopeKey, workspaceDir);
         if (stressMode === "remote") {
           await verifyRemoteExecOverlap({ backend, twin: remoteTwin, bridge });
         }
@@ -788,7 +732,10 @@ describe("openshell sandbox backend e2e", () => {
           await candidateBridge.writeFile({ filePath: "after-failed-exec.txt", data: "recovered" });
           await expect(
             runBackendExec({ backend: candidate, command: "cat after-failed-exec.txt" }),
-          ).resolves.toMatchObject({ code: 0, stdout: "recovered" });
+          ).resolves.toMatchObject({
+            code: 0,
+            stdout: "recovered",
+          });
           await expect(
             candidate.buildExecSpec({
               command: "true",
@@ -878,21 +825,7 @@ describe("openshell sandbox backend e2e", () => {
           } catch (error) {
             failures.push(error);
           } finally {
-            if (previousHome === undefined) {
-              delete process.env.HOME;
-            } else {
-              process.env.HOME = previousHome;
-            }
-            if (previousXdgConfigHome === undefined) {
-              delete process.env.XDG_CONFIG_HOME;
-            } else {
-              process.env.XDG_CONFIG_HOME = previousXdgConfigHome;
-            }
-            if (previousXdgCacheHome === undefined) {
-              delete process.env.XDG_CACHE_HOME;
-            } else {
-              process.env.XDG_CACHE_HOME = previousXdgCacheHome;
-            }
+            vi.unstubAllEnvs();
           }
         }
       }
