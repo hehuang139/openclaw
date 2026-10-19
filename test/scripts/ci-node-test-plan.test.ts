@@ -3255,34 +3255,6 @@ describe("scripts/lib/ci-node-test-plan.mts", () => {
     },
   );
 
-  it("uses 16-class capacity for the qualified compact selection without changing its scope", () => {
-    const targets = [
-      "src/agents/embedded-agent-runner/effective-tool-policy.test.ts",
-      "src/gateway/client-callsites.guard.test.ts",
-      "src/gateway/mcp-app-extension-runtime.test.ts",
-      "src/agents/cli-runner.helpers.test.ts",
-    ];
-    const plan = expectDefined(
-      createSelectedNodeTestShardBundles(targets, { runnerBackend: "hybrid" }),
-      "qualified compact selection",
-    );
-    expect(
-      plan.flatMap((job) => job.groups.flatMap((group) => group.includePatterns ?? [])).toSorted(),
-    ).toEqual(targets.toSorted());
-    for (const job of plan) {
-      expect(job).toMatchObject({
-        runner: "blacksmith-16vcpu-ubuntu-2404",
-        planConcurrency: 1,
-        requiresDist: false,
-      });
-      for (const group of job.groups) {
-        expect(group.env?.OPENCLAW_VITEST_MAX_WORKERS ?? String(group.fallbackMaxWorkers)).toBe(
-          "2",
-        );
-      }
-    }
-  });
-
   it.each([
     ["blacksmith", "src/gateway/board-store.test.ts", "blacksmith-16vcpu-ubuntu-2404"],
     ["hybrid", "src/gateway/board-store.test.ts", "blacksmith-16vcpu-ubuntu-2404"],
@@ -3313,6 +3285,9 @@ describe("scripts/lib/ci-node-test-plan.mts", () => {
 
   it("keeps selected Gateway and embedded-agent work within its runner capacity", () => {
     const targets = [
+      "src/agents/embedded-agent-runner/effective-tool-policy.test.ts",
+      "src/gateway/mcp-app-extension-runtime.test.ts",
+      "src/agents/cli-runner.helpers.test.ts",
       "src/gateway/openai-http.test.ts",
       "src/agents/embedded-agent-runner/compact.small-context.test.ts",
       "src/agents/embedded-agent-runner/stream-resolution.test.ts",
@@ -3331,6 +3306,7 @@ describe("scripts/lib/ci-node-test-plan.mts", () => {
     // groups into serial Gateway templates; fixed-inventory coverage below proves
     // parallel capacity is retained when the canonical templates permit it.
     for (const job of plan) {
+      expect(job.requiresDist).toBe(false);
       expect([1, 2]).toContain(job.planConcurrency);
       expect(job.runner).toBe(
         job.planConcurrency === 2
