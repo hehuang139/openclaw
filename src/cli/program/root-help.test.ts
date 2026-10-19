@@ -30,14 +30,8 @@ vi.mock("./core-command-descriptors.js", () => ({
   getCoreCliCommandsWithSubcommands: () => [],
 }));
 
-vi.mock("./subcli-descriptors.js", () => ({
-  SUB_CLI_DESCRIPTORS: [
-    {
-      name: "config",
-      description: "Manage config",
-      hasSubcommands: true,
-    },
-  ],
+vi.mock("./subcli-descriptors.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./subcli-descriptors.js")>()),
   getSubCliEntriesCore: () => [
     {
       name: "config",
