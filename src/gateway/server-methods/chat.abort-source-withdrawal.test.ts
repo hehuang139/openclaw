@@ -184,15 +184,17 @@ describe("chat.abort exact controller input withdrawal", () => {
         });
         expect(respond).toHaveBeenCalledWith(true, { ok: true, aborted: false, runIds: [] });
       }
-      expect(readSource).toHaveBeenCalledExactlyOnceWith(
-        {
-          agentId: "main",
-          storePath: "/synthetic/withdrawal/sessions.json",
-          sessionKey: "main",
-          sessionId: "main-session",
-        },
-        "source:user",
-        true,
+      expect(readSource.mock.calls).toEqual(
+        ["source:user", " source :user"].map((inputId) => [
+          {
+            agentId: "main",
+            storePath: "/synthetic/withdrawal/sessions.json",
+            sessionKey: "main",
+            sessionId: "main-session",
+          },
+          inputId,
+          true,
+        ]),
       );
       expect(discard).not.toHaveBeenCalled();
       expect(source.input.abortSignal.aborted).toBe(false);

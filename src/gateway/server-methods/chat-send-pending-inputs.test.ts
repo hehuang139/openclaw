@@ -766,6 +766,8 @@ describe("ordinary chat input admission", () => {
     await using fixture = await createBrowserFollowupFixture({ preserveContent: true });
     const resumedRecorder = createDeferred<UserTurnTranscriptRecorder>();
     const resumedRelease = createDeferred();
+    const profile = ensureProfileForEmail("retry-input@example.test");
+    setClientProfile(fixture.client, { ...profile, updatedAt: 1 }, "Input author");
     try {
       const { recorder, original } = await admitPending(fixture);
       recorder.finishPendingInput?.("interrupted");
