@@ -132,7 +132,7 @@ export function ModelProviderLoginView(props: { controller: ModelProviderLogin }
                         </div>
                         <Show when={provider().apiKeyProvider}>
                           <LoginOption
-                            buttonRef={props.controller.setApiKeyChoice}
+                            buttonRef={(element) => props.controller.setApiKeyChoice(element)}
                             label={t("modelProviders.status.apiKey")}
                             hint={t("modelProviders.login.apiKeyHint")}
                             apiKey
