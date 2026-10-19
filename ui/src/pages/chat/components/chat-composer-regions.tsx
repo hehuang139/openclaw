@@ -1,4 +1,4 @@
-import { createMemo, onCleanup, Show } from "solid-js";
+import { createMemo, onCleanup, Show, untrack } from "solid-js";
 import { SessionProgressCard } from "../../../components/session-progress-card-solid.tsx";
 import { PRESENTATION_CHANGED_EVENT } from "../../../lib/presentation.ts";
 import { listen } from "../../../lib/reactive/listener.ts";
@@ -32,7 +32,9 @@ export function ComposerInputScope(props: {
   children: import("@solidjs/web").JSX.Element;
 }) {
   onCleanup(() => props.state.composerInputRef?.());
-  return <>{props.children}</>;
+  // This scope retains one native input subtree, including its focus and undo history.
+  const initialChildren = untrack(() => props.children);
+  return initialChildren;
 }
 
 export function ComposerProgress(view: { composer: ChatComposerProps; shown: boolean }) {
