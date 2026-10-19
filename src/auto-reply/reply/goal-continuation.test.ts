@@ -8,12 +8,23 @@ import {
   createAttemptParams,
   createAttemptResult,
 } from "../../agents/harness/lifecycle.test-support.js";
-import { createRequesterSettleBatchCompletion } from "../../agents/subagents/announce/subagent-announce.requester-settle-state.js";
 import type { SubagentRunRecord } from "../../agents/subagents/registry/subagent-registry.types.js";
 import { readSessionEntryReadOnlyInWorker } from "../../config/sessions/session-entry-read-runtime.js";
 import type { SessionEntry } from "../../config/sessions/types.js";
 import { createChatSendLateFollowupDisposition } from "../../gateway/server-methods/chat-send-late-followup.js";
+import type { WorkerSessionPlacementRecord } from "../../gateway/worker-environments/placement-record.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
+import type { ReplyOperation } from "../../sessions/session-controller.contracts.js";
+import {
+  sessionControllerMailboxes,
+  retireSessionControllerInput,
+} from "../../sessions/session-controller.mailbox.js";
+import { createReplyOperation } from "../../sessions/session-controller.operation.js";
+import {
+  captureSessionControllerStop,
+  stopSession,
+} from "../../sessions/session-controller.stop.js";
+import { captureSessionTarget } from "../../sessions/session-controller.target.js";
 import {
   bindGoalContinuationExecution,
   promoteGoalContinuationYield,
@@ -29,13 +40,10 @@ import {
   isGoalContinuationCurrent,
   createGoalContinuationReturn,
 } from "./goal-continuation.js";
-import { prepareSessionFollowupCleanup } from "./queue/cleanup.js";
 import { enqueueFollowupRun, getFollowupQueueDepth } from "./queue/enqueue.js";
 import type { FollowupRun } from "./queue/types.js";
-import { createReplyOperation } from "./reply-run-registry.operation.js";
-import { testing } from "./reply-run-registry.test-support.js";
 
-// mock-isolation: Only provider execution is replaced; the actual built-in context boundary stays real.
+// mock-isolation: This unit contract observes the actual built-in context consumer without a provider call.
 vi.mock("../../agents/embedded-agent-runner/run/attempt.js", () => ({
   runEmbeddedAttempt: vi.fn(async () => createAttemptResult()),
 }));
@@ -56,6 +64,40 @@ vi.mock("./queue/enqueue.js", () => ({
   getFollowupQueueDepth: vi.fn(() => 0),
 }));
 
+const workerPlacement = vi.hoisted(() => ({
+  current: vi.fn<() => WorkerSessionPlacementRecord | undefined>(),
+  supported: true,
+}));
+// mock-isolation: The live Gateway owner supplies placement facts; RPC proof uses SQLite.
+vi.mock("../../plugins/runtime/gateway-request-scope.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../plugins/runtime/gateway-request-scope.js")>()),
+  getInProcessGatewayRequestContext: () => ({
+    workerSessionPlacementService: {
+      prepareSessionPlacement: async () => ({
+        prepareRead: () => undefined,
+        current: workerPlacement.current,
+        release: () => {},
+      }),
+    },
+  }),
+}));
+// mock-isolation: Only the installed harness's remote-exec support is variable here.
+vi.mock("../../agents/harness/registry.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../agents/harness/registry.js")>()),
+  getRegisteredAgentHarness: () =>
+    workerPlacement.supported
+      ? {
+          harness: {
+            id: "codex",
+            label: "Codex",
+            cloudPlacement: { mode: "remote-exec" },
+            supports: () => ({ supported: true }),
+            runAttempt: async () => normal,
+          },
+        }
+      : undefined,
+}));
+
 const identity = {
   sessionId: "goal-session",
   lifecycleRevision: "revision-2",
@@ -65,6 +107,7 @@ const normal: EmbeddedAgentRunResult = {
   meta: { durationMs: 0, stopReason: "end_turn" },
   payloads: [{ text: "More work remains." }],
 };
+const operations = new Set<ReplyOperation>();
 function entry(): SessionEntry {
   return {
     sessionId: identity.sessionId,
@@ -91,6 +134,7 @@ function fixture() {
     resetTriggered: false,
     upstreamAbortSignal: controller.signal,
   });
+  operations.add(operation);
   const base: FollowupRun = {
     prompt: "Initial user request",
     enqueuedAt: 1000,
@@ -131,12 +175,80 @@ beforeEach(() => {
   vi.mocked(getFollowupQueueDepth).mockReturnValue(0);
   vi.mocked(readSessionEntryReadOnlyInWorker).mockResolvedValue(entry());
 });
-afterEach(() => {
-  testing.resetReplyRunRegistry();
-  vi.useRealTimers();
+afterEach(async () => {
+  for (const mailbox of sessionControllerMailboxes()) {
+    if (mailbox.key === "agent:main:goal") {
+      const inputs = [...mailbox.entries];
+      inputs.forEach(retireSessionControllerInput);
+      await Promise.all(inputs.map((input) => input.settlement.promise));
+    }
+  }
+  try {
+    for (const operation of operations) {
+      operation.complete();
+    }
+    await Promise.all([...operations].map((operation) => operation.ownerSettlement));
+  } finally {
+    operations.clear();
+    vi.useRealTimers();
+  }
 });
 
 describe("Goal continuation eligibility", () => {
+  it.each([
+    "remote-exec",
+    "local",
+    "worker-turn",
+    "wrong-session",
+    "unsupported",
+    "no-authority",
+  ] as const)("binds Codex continuation to supported placement facts (%s)", async (mode) => {
+    const f = fixture();
+    f.params.base.operatorAuthority = {
+      profileId: "operator",
+      scopes: ["operator.admin"],
+      assertCurrent: () => {},
+    };
+    if (mode === "no-authority") {
+      f.params.base.operatorAuthority = undefined;
+    }
+    vi.mocked(readSessionEntryReadOnlyInWorker).mockResolvedValue({
+      ...entry(),
+      agentHarnessId: "codex",
+    });
+    workerPlacement.supported = mode !== "unsupported";
+    workerPlacement.current.mockReturnValue({
+      agentId: "main",
+      sessionKey: mode === "wrong-session" ? "other" : f.params.sessionKey,
+      sessionId: identity.sessionId,
+      state: mode === "local" ? "local" : "requested",
+      executionMode: mode === "worker-turn" ? "worker-turn" : "remote-exec",
+      generation: 1,
+      turnClaim: null,
+      createdAtMs: 1,
+      updatedAtMs: 1,
+      stateChangedAtMs: 1,
+      environmentId: null,
+      activeOwnerEpoch: null,
+      workspaceBaseManifestRef: null,
+      remoteWorkspaceDir: null,
+      workerBundleHash: null,
+      lastTranscriptAckCursor: null,
+      lastLiveEventAckCursor: null,
+      terminalReason: null,
+      terminalAtMs: null,
+      recoveryError: null,
+    });
+    expect(await enqueueGoalContinuation(f.params)).toBe(mode === "remote-exec");
+    if (mode === "remote-exec") {
+      expect(vi.mocked(enqueueFollowupRun).mock.calls[0]![1].goalContinuation).toEqual({
+        ...identity,
+        workerGoal: true,
+      });
+    } else {
+      expect(enqueueFollowupRun).not.toHaveBeenCalled();
+    }
+  });
   it("does not resume paused goals", () => {
     const current = entry();
     current.goal!.status = "paused";
@@ -523,29 +635,6 @@ describe("Goal return from committed child custody", () => {
     expect(enqueueFollowupRun).not.toHaveBeenCalled();
   });
 
-  it("keeps the Goal return through a child message-wait notice", async () => {
-    const f = retainedGoal();
-    f.retain();
-    f.operation.complete();
-    await createRequesterSettleBatchCompletion({
-      claim: () => true,
-      complete: async (_batch, _generation, _delivery, committed) => {
-        await committed?.();
-      },
-      requesterAgentId: "main",
-      requesterSessionKey: f.params.sessionKey,
-      pause: true,
-    })(
-      [f.child],
-      { status: "dispatching", attemptCount: 1, rearmGeneration: 1 },
-      { delivered: true, path: "direct" },
-    );
-    expect(enqueueFollowupRun).not.toHaveBeenCalled();
-    f.publish();
-    await f.finish();
-    expect(enqueueFollowupRun).toHaveBeenCalledOnce();
-  });
-
   it("releases an obsolete return when a newer requester owns the same child cohort", async () => {
     const first = retainedGoal();
     const release = vi.fn();
@@ -568,26 +657,6 @@ describe("Goal return from committed child custody", () => {
     await next.finish();
     expect(release).toHaveBeenCalledTimes(2);
     expect(enqueueFollowupRun).toHaveBeenCalledOnce();
-  });
-
-  it("lets queue Stop revoke only the matching retained conversation incarnation", async () => {
-    const f = retainedGoal();
-    f.retain();
-    f.operation.complete();
-    const target = {
-      keys: [f.params.sessionKey],
-      sessionKey: f.params.sessionKey,
-      agentId: "main",
-      sessionId: identity.sessionId,
-      assertCurrent() {},
-    };
-    expect(prepareSessionFollowupCleanup({ ...target, agentId: "other" })()).toBe(0);
-    expect(prepareSessionFollowupCleanup({ ...target, sessionId: "other-incarnation" })()).toBe(0);
-    expect(f.publish()?.text).toContain("Active goal:");
-    expect(prepareSessionFollowupCleanup(target)()).toBe(1);
-    expect(f.publish()).toBeUndefined();
-    await f.finish();
-    expect(enqueueFollowupRun).not.toHaveBeenCalled();
   });
 
   it.each(["settle-run", "new-attempt"])(
@@ -702,8 +771,26 @@ describe("Goal return from committed child custody", () => {
       });
       const finishing = f.finish();
       await readStarted.promise;
+      let stopped: ReturnType<typeof stopSession> | undefined;
       if (boundary === "Stop") {
-        f.controller.abort();
+        const capture = captureSessionControllerStop({
+          targets: [
+            captureSessionTarget({
+              storeScope: f.params.storePath,
+              sessionKey: f.params.sessionKey,
+              agentId: f.params.base.run.agentId,
+              incarnation: identity.sessionId,
+            }),
+          ],
+        });
+        expect(capture.queuedInputs).toHaveLength(1);
+        stopped = stopSession({
+          source: "client-session",
+          capture,
+          hookContext: { sessionKey: f.params.sessionKey },
+        });
+        expect(await stopped.completed).toMatchObject({ queuedCancelled: 1 });
+        expect(f.controller.signal.aborted).toBe(false);
       }
       if (boundary === "source retirement") {
         revokeGoalContinuationReturn(f.child);
@@ -714,6 +801,7 @@ describe("Goal return from committed child custody", () => {
       }
       read.resolve(entry());
       await finishing;
+      await stopped?.settled;
       expect(enqueueFollowupRun).not.toHaveBeenCalled();
     },
   );

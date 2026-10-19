@@ -1,4 +1,4 @@
-import { createEffect, createSignal, onSettled } from "solid-js";
+import { createSignal, onSettled } from "solid-js";
 import type { CronJob, CronScratchGetResult } from "../../api/types.ts";
 import type { ApplicationContext } from "../../app/context.ts";
 import { hasOperatorReadAccess, readGatewayOperatorAccess } from "../../app/operator-access.ts";
@@ -41,7 +41,8 @@ import {
   subscribeModelCatalogCache,
 } from "../../lib/model-catalog-store.ts";
 import { registerEnglishCatalog, t } from "../../lib/reactive/i18n.ts";
-import { projectSource } from "../../lib/reactive/projection.ts";
+import { listen } from "../../lib/reactive/listener.ts";
+import { projectOwner, projectSource } from "../../lib/reactive/projection.ts";
 import {
   createDeliveryConversations,
   invalidateStaleDeliveryRoute,
@@ -80,6 +81,9 @@ export function createCronPage(context: () => ApplicationContext, host: () => HT
     },
     equality: "revision",
   });
+  const agents = projectOwner(context().agents, (source) => source.state);
+  const channels = projectOwner(context().channels, (source) => source.state);
+  const runtimeConfig = projectOwner(context().runtimeConfig, (source) => source.state);
   const runTranscript = createCronRunTranscript(publish, () => {
     const scope = gateway.capture();
     const current = cron;
@@ -134,10 +138,6 @@ export function createCronPage(context: () => ApplicationContext, host: () => HT
     ensureInitialData();
     publish();
   });
-  function agentsList() {
-    return context().agents.state.agentsList;
-  }
-
   function canManageCron(): boolean {
     return readGatewayOperatorAccess(context().gateway.snapshot).canAdmin;
   }
@@ -148,6 +148,9 @@ export function createCronPage(context: () => ApplicationContext, host: () => HT
     const sourceChanged = boundContext !== null && boundContext.gateway !== currentContext.gateway;
     let first = boundContext === null || sourceChanged;
     boundContext = currentContext;
+    agents.replaceSource(currentContext.agents);
+    channels.replaceSource(currentContext.channels);
+    runtimeConfig.replaceSource(currentContext.runtimeConfig);
     if (sourceChanged) {
       gateway.invalidate();
     }
@@ -181,12 +184,10 @@ export function createCronPage(context: () => ApplicationContext, host: () => HT
       gatewayAvailable = nextAvailable;
       publish();
     };
+    // Gateway receipts retire requests and privileged editor state before reconnecting or losing access.
     cleanups.push(currentContext.gateway.subscribe(applySnapshot));
     applySnapshot();
     cleanups.push(
-      currentContext.agents.subscribe(() => publish()),
-      currentContext.channels.subscribe(() => publish()),
-      currentContext.runtimeConfig.subscribe(() => publish()),
       observeAgentScope(currentContext.agentSelection),
       watchSelectedAgent(currentContext.agentSelection, (agentId) => {
         if (modelSuggestionsRequest?.agentId !== agentId) {
@@ -219,12 +220,12 @@ export function createCronPage(context: () => ApplicationContext, host: () => HT
         ensureInitialData();
       }
     });
-    document.addEventListener("visibilitychange", onActivation);
-    globalThis.addEventListener("focus", onActivation);
+    const stopVisibility = listen(document, "visibilitychange", onActivation);
+    const stopFocus = listen(globalThis, "focus", onActivation);
     return () => {
       active = false;
-      document.removeEventListener("visibilitychange", onActivation);
-      globalThis.removeEventListener("focus", onActivation);
+      stopVisibility();
+      stopFocus();
       cleanups.splice(0).forEach((stop) => stop());
       gateway.dispose();
       stopModelSuggestions?.();
@@ -244,6 +245,12 @@ export function createCronPage(context: () => ApplicationContext, host: () => HT
     preparePanel();
     eventSource.sync();
     notify?.();
+    // The state writer owns route admission; its DOM requests follow this publication's commit.
+    onSettled(() => {
+      if (active) {
+        afterRender();
+      }
+    });
   }
 
   function resetGatewayState(snapshot: ApplicationContext["gateway"]["snapshot"]) {
@@ -286,7 +293,7 @@ export function createCronPage(context: () => ApplicationContext, host: () => HT
     if (!canRefreshCron() || !cron.connected || !cron.client) {
       return;
     }
-    if (!agentsList() && !context().agents.state.agentsLoading) {
+    if (!context().agents.state.agentsList && !context().agents.state.agentsLoading) {
       void context().agents.ensureList();
     }
     if (forceRefresh || (!cron.cronStatus && !cron.cronLoading)) {
@@ -345,15 +352,9 @@ export function createCronPage(context: () => ApplicationContext, host: () => HT
   }
 
   function afterRender() {
+    routeSelection.resolveLoadedSession(cron, selectJob);
     const routeData = routeSelection.target;
     const client = cron.client;
-    if (routeData?.session && cron.cronJobsSnapshotRevision && !cron.cronLoading) {
-      routeSelection.target = null;
-      const [job] = cron.cronJobs;
-      if (cron.cronJobsTotal === 1 && job) {
-        selectJob(job);
-      }
-    }
     if (routeData?.jobId && client && cron.connected && !routeSelection.requested) {
       void runCronTask((current) =>
         routeSelection.resolve(
@@ -722,11 +723,10 @@ export function createCronPage(context: () => ApplicationContext, host: () => HT
       }),
     onViewRunTranscript: (entry, trigger) => void runTranscript.open(entry, trigger),
   } satisfies Pick<CronProps, Extract<keyof CronProps, `on${string}`>>;
-  createEffect(projection.revision, afterRender);
   return {
     context,
+    inventories: { agents, channels, runtimeConfig },
     cron: projection.read,
-    agentsList,
     canManageCron,
     cronModelSuggestions,
     modelSuggestionsError,

@@ -1,10 +1,7 @@
 import { vi } from "vitest";
 import type { SubagentRunRecord } from "../registry/subagent-registry.types.js";
 import type { SubagentAnnounceDeliveryResult as Result } from "./subagent-announce-dispatch.js";
-import type {
-  RequesterSettleWakeBatchCallbacks,
-  RequesterSettleWakeBatchState,
-} from "./subagent-announce.requester-settle-state.js";
+import type { RequesterSettleWakeBatchState } from "./subagent-announce.requester-settle-state.js";
 
 export const REQUESTER = "agent:main:main";
 export const requesterSettleKey = (suffix: string) =>
@@ -36,32 +33,14 @@ export function makeSettledChild(overrides: SettledChildOverrides): SubagentRunR
   };
 }
 
-export const transitionBatchSpy = vi.fn();
 export const completeBatchSpy = vi.fn();
 
-export function transitionBatch(
+export async function completeBatch(
   batch: readonly SubagentRunRecord[],
-  state: RequesterSettleWakeBatchState,
-  onPublished: (entries: readonly SubagentRunRecord[]) => void,
-): void {
-  transitionBatchSpy(batch.map((entry) => entry.runId).toSorted(), state);
-  for (const entry of batch) {
-    if (entry.requesterSettleWake) {
-      entry.requesterSettleWake = {
-        ...state,
-        ...(entry.requesterSettleWake.retireAfterSettle ? { retireAfterSettle: true } : {}),
-      };
-    }
-  }
-  onPublished(batch);
-}
-
-export const completeBatch: RequesterSettleWakeBatchCallbacks["completeBatch"] = async (
-  batch,
-  rearmGeneration,
-  outcome,
-  onCommitted,
-) => {
+  rearmGeneration?: number,
+  outcome?: Result,
+  onCommitted?: () => void | Promise<void>,
+): Promise<void> {
   const runIds = batch.map((entry) => entry.runId).toSorted();
   if (outcome) {
     completeBatchSpy(runIds, rearmGeneration, outcome);
@@ -76,7 +55,7 @@ export const completeBatch: RequesterSettleWakeBatchCallbacks["completeBatch"] =
     }
   }
   await onCommitted?.();
-};
+}
 
 export const deliverSpy = vi.fn(async (_params: Record<string, unknown>): Promise<Result> => ({
   delivered: true,
@@ -89,4 +68,15 @@ export function deliveredCallArg(): Record<string, unknown> {
     throw new Error("expected deliverSubagentAnnouncement call");
   }
   return call;
+}
+
+export function publishWakeTransition(
+  batch: readonly SubagentRunRecord[],
+  state: RequesterSettleWakeBatchState,
+  onPublished?: (entries: readonly SubagentRunRecord[]) => void,
+): void {
+  for (const entry of batch) {
+    entry.requesterSettleWake = structuredClone(state);
+  }
+  onPublished?.(batch);
 }

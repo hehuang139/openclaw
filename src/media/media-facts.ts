@@ -257,15 +257,6 @@ export function stripLegacyMediaContextFields(ctx: Record<string, unknown>): voi
   }
 }
 
-export function readRuntimePromptImageOrder(message: object): PromptImageOrderEntry[] | undefined {
-  const imageOrder = (
-    readRuntimePromptMediaFacts(message) as
-      | (MediaFact[] & { imageOrder?: PromptImageOrderEntry[] })
-      | undefined
-  )?.imageOrder;
-  return Array.isArray(imageOrder) ? (imageOrder as PromptImageOrderEntry[]) : undefined;
-}
-
 /** Returns whether a declared MIME only describes otherwise unclassified binary bytes. */
 function isGenericBinaryMediaContentType(contentType?: string | null): boolean {
   const normalizedContentType = normalizeMimeType(contentType);
@@ -368,7 +359,7 @@ function normalizeMediaFact<TInput extends MediaFactInput>(
     url: normalizeOptionalString(input.url),
     contentType,
     kind:
-      input.kind ??
+      (typeof input.kind === "string" ? input.kind : undefined) ??
       defaults.kind ??
       (isGenericBinaryMediaContentType(contentType) ? undefined : kindFromMime(contentType)),
     fileName: normalizeOptionalString(input.fileName),

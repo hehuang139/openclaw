@@ -67,6 +67,7 @@ import {
   loadAgentEntryReadOperations,
   loadAgentEntryPatchOperations,
   loadAgentCompoundOperations,
+  loadAgentEntryDeletionOperations,
   loadAgentPurgeOperations,
   loadAgentMaintenanceFinalizationOperations,
   loadAgentNativeBindingOperations,
@@ -83,7 +84,6 @@ import {
   loadAgentArchivePruningOperations,
   loadSessionRowBackfillOperations,
   loadAgentAuthProfileOperations,
-  loadAgentSchemaInspectionOperations,
   type RegisteredAgentWorkerOperations,
 } from "./openclaw-agent-execution-operations.js";
 import {
@@ -405,6 +405,7 @@ function openAgentDatabaseBackend(
     owner: string,
     write: (current: OpenClawAgentDatabase) => T,
     diagnosticContext?: SqliteTransactionOptions["diagnosticContext"],
+    singleStatement = false,
   ): T => {
     const opened = openWriter();
     return runOpenClawAgentWriteTransaction(
@@ -412,11 +413,13 @@ function openAgentDatabaseBackend(
         if (current.db !== opened.db) {
           throw new Error(`${owner} lost its canonical database owner`);
         }
-        admit("transaction");
+        if (!singleStatement) {
+          admit("transaction");
+        }
         return write(current);
       },
       options,
-      { operationLabel, diagnosticContext },
+      { operationLabel, diagnosticContext, singleStatement },
     );
   };
   const maintenance = createAgentDatabaseMaintenanceOwner({
@@ -431,7 +434,6 @@ function openAgentDatabaseBackend(
     keyof RegisteredAgentWorkerOperations
   >({
     "authProfiles.read": loadAgentAuthProfileOperations,
-    "database.schema.inspect": loadAgentSchemaInspectionOperations,
     "session.entry.read": loadAgentEntryReadOperations,
     "session.entry.readResult": loadAgentEntryReadOperations,
     "voice.session.read": loadAgentVoiceSessionOperations,
@@ -442,6 +444,8 @@ function openAgentDatabaseBackend(
     "session.turn.commit": loadAgentCompoundOperations,
     "session.lifecycle.reset": loadAgentCompoundOperations,
     "session.lifecycle.project": loadAgentCompoundOperations,
+    "session.lifecycle.deletePlan": loadAgentEntryDeletionOperations,
+    "session.lifecycle.delete": loadAgentEntryDeletionOperations,
     "session.agentPurge.prepare": loadAgentPurgeOperations,
     "session.agentPurge.commit": loadAgentPurgeOperations,
     "session.maintenance.finalize": loadAgentMaintenanceFinalizationOperations,
@@ -479,7 +483,6 @@ function openAgentDatabaseBackend(
     "session.archivePruning.reclaimPages": loadAgentArchivePruningOperations,
     "session.maintenance.prepare": loadMaintenanceOperations,
     "session.maintenance.metadata": loadMaintenanceOperations,
-    "session.maintenance.release": loadMaintenanceOperations,
     "usageCache.writeRollup": loadUsageCacheOperations,
     "usageCache.prune": loadUsageCacheOperations,
     "usageCache.retireLegacy": loadUsageCacheOperations,
@@ -512,8 +515,7 @@ function openAgentDatabaseBackend(
     databasePath: input.databasePath,
     assertCurrent() {
       assertOpen();
-      const current = openWriter();
-      return current.db;
+      return openWriter().db;
     },
     assertCleanupCurrent() {
       if (
@@ -544,6 +546,9 @@ function openAgentDatabaseBackend(
     if (isSessionActorCommand(command)) {
       return expectDefined(actor, "Session actor command was not prepared").execute(command);
     }
+    if (command.type === "session.turn.prepare" && actor) {
+      return actor.prepareTurn(command.input);
+    }
     if (
       command.type === "database.domain.bind" ||
       command.type === "database.domain.publish" ||
@@ -553,7 +558,15 @@ function openAgentDatabaseBackend(
       return domain.execute(command);
     }
     if (command.type === "database.prepareWrite") {
-      openWriter(true);
+      try {
+        openWriter(true);
+      } catch (error) {
+        // Factory refusal markers must not hide typed causes during lazy preparation.
+        if (!preparingCreation && error instanceof SqliteWorkerOpenRefusedError) {
+          throw error.originalError;
+        }
+        throw error;
+      }
       return undefined;
     }
     if (command.type === "database.walMaintenance") {
@@ -619,7 +632,8 @@ function openAgentDatabaseBackend(
             ? command.input.nativeBindings
             : command.type === "session.entries.replace" ||
                 command.type === "session.agentPurge.commit" ||
-                command.type === "session.maintenance.finalize"
+                command.type === "session.maintenance.finalize" ||
+                command.type === "session.lifecycle.delete"
               ? command.input.nativeBindings
               : undefined;
       if (nativeBindings) {

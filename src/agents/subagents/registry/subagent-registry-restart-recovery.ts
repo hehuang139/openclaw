@@ -5,10 +5,11 @@ import type { GatewayRecoveryRuntime } from "../../../gateway/server-instance-ru
 import * as agentEvents from "../../../infra/agent-events.js";
 import { listAgentRunsForSession } from "../../../infra/agent-run-registry.js";
 import { getGatewayContextResolver } from "../../../plugins/runtime/gateway-request-scope.js";
-import { isSessionWorkAdmissionActive } from "../../../sessions/session-lifecycle-admission.js";
+import { isSessionControllerWorkActive } from "../../../sessions/session-controller.lifecycle.js";
 import type { OpenClawStateWorkerContext } from "../../../state/openclaw-state-worker-context.types.js";
 import { resolveSubagentChildAuthority } from "./subagent-child-owner-match.js";
 import { isQuietSubagentRestartContinuation } from "./subagent-recovery-state.js";
+import { getUnrestorableSubagentCompletionSourceReason } from "./subagent-registry-gateway-owner.js";
 import {
   getSubagentRunsForRequesterSession,
   getSubagentRunsForChildSession,
@@ -60,6 +61,7 @@ function findRequesterSettleWakeRecoveryBatch(
     const wake = child.requesterSettleWake;
     if (
       !(wake?.status === "dispatching" || (allowPending && wake?.status === "pending")) ||
+      wake.attemptCount < 1 ||
       !(hasRequesterCompletionCohort(child) || isQuietSubagentRestartContinuation(child)) ||
       !isRequesterSettleWakeForRun({
         entry: child,
@@ -115,13 +117,19 @@ function findRequesterSettleWakeRecoveryBatch(
   return undefined;
 }
 
-export function captureRequesterSettleWakeRecoverySource(
-  params: RequesterSettleWakeRecoveryTarget & { context: OpenClawStateWorkerContext },
-): SessionSourceAssertion | undefined {
+export async function captureRequesterSettleWakeRecoverySource(
+  params: RequesterSettleWakeRecoveryTarget & {
+    context: OpenClawStateWorkerContext;
+    requesterOperatorSourceMissing?: true;
+  },
+): Promise<
+  | { status: "ready"; source: SessionSourceAssertion }
+  | { status: "unrestorable"; reason: string }
+  | undefined
+> {
   assertSubagentRegistryWriteSourceCurrent(params.context);
   const lifecycleGeneration = agentEvents.getAgentEventLifecycleGeneration();
-  // Observing the admitted recovery can put its wake into backoff. That progress
-  // transition does not revoke the still-executing input's source custody.
+  // A retry can return the wake to pending without revoking its admitted source.
   const batch = findRequesterSettleWakeRecoveryBatch(params, true, true);
   if (!batch) {
     if (findRequesterSettleWakeRecoveryBatch(params, false, true)) {
@@ -129,7 +137,7 @@ export function captureRequesterSettleWakeRecoverySource(
     }
     return undefined;
   }
-  const assertCurrent = () => {
+  const assertBatchCurrent = () => {
     assertSubagentRegistryWriteSourceCurrent(params.context);
     const current = findRequesterSettleWakeRecoveryBatch(params, true, true);
     if (
@@ -150,18 +158,53 @@ export function captureRequesterSettleWakeRecoverySource(
     ) {
       throw new Error("Requester settle recovery lost its exact dispatched cohort");
     }
+    return current;
+  };
+  const unavailableReason = params.requesterOperatorSourceMissing
+    ? "The original operator source was not saved for this requester continuation"
+    : batch
+        .map(getUnrestorableSubagentCompletionSourceReason)
+        .find((reason) => reason !== undefined);
+  if (unavailableReason) {
+    const { mutateRequesterCompletionBatch } =
+      await import("../completion/subagent-completion-admission.store.js");
+    const settled = await mutateRequesterCompletionBatch({
+      entries: batch,
+      context: params.context,
+      assertCurrent: assertBatchCurrent,
+      operation: {
+        kind: "settle",
+        outcome: {
+          delivered: false,
+          path: "none",
+          disposition: "permanent_failure",
+          reason: "operator_authority_unavailable",
+          error: unavailableReason,
+        },
+      },
+    });
+    if (!settled.applied || settled.publication !== "published") {
+      throw new Error("Requester settle recovery awaits terminal cohort settlement");
+    }
+    return { status: "unrestorable", reason: unavailableReason };
+  }
+  const assertCurrent = () => {
+    const current = assertBatchCurrent();
     // This checks retained cohort custody; the durable operator source restores
     // its principal separately when the Gateway admits the recovery run.
     subagentRuns.runWithCompletionBatchAuthority(current, () => {});
   };
   assertCurrent();
-  return Object.assign(assertCurrent, {
-    nativeSource: true,
-    async prepareSessionSource() {
-      assertCurrent();
-      return { nativeSource: true, checks: [], assertCurrent };
-    },
-  });
+  return {
+    status: "ready",
+    source: Object.assign(assertCurrent, {
+      nativeSource: true,
+      async prepareSessionSource() {
+        assertCurrent();
+        return { nativeSource: true, checks: [], assertCurrent };
+      },
+    }),
+  };
 }
 
 export async function recoverInterruptedSubagentRow(
@@ -305,7 +348,7 @@ export async function recoverInterruptedSubagentRow(
         !storePath ||
         !isGatewayCurrent() ||
         listAgentRunsForSession(target).length !== 0 ||
-        isSessionWorkAdmissionActive(storePath, [childSessionKey, sessionId])
+        isSessionControllerWorkActive(storePath, [childSessionKey, sessionId])
       ) {
         throw new Error("Subagent child session effects owner changed");
       }

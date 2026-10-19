@@ -1,12 +1,12 @@
-import { createEffect, createMemo, onCleanup, Show } from "solid-js";
+import { createMemo, onCleanup, Show } from "solid-js";
 import type { AgentIdentityResult } from "../api/types.ts";
 import { resolveAgentTextAvatar } from "../lib/agents/display.ts";
 import { resolveAgentAvatarUrl } from "../lib/avatar.ts";
 import { createIdentityAvatars } from "../lib/identity-avatar-loader.ts";
 import { t } from "../lib/reactive/i18n.ts";
 import { projectOwner } from "../lib/reactive/projection.ts";
+import { defineSolidBridge, type SolidBridgeElement } from "../lib/solid-bridge.ts";
 import { generateUUID } from "../lib/uuid.ts";
-import { defineSolidBridge, type SolidBridgeElement } from "../lit/solid-bridge.ts";
 import type { AgentSelectOption } from "./agent-select-types.ts";
 import { revealInScrollRegion } from "./scroll-state.ts";
 import { Icon } from "./solid/icon.tsx";
@@ -155,14 +155,6 @@ defineSolidBridge<AgentSelectProps>(
           ]
         : []),
     ]);
-    createEffect(
-      () => props.disabled,
-      (disabled) => {
-        if (disabled) {
-          menu?.close();
-        }
-      },
-    );
     return (
       <Menu
         id={id}
@@ -182,8 +174,10 @@ defineSolidBridge<AgentSelectProps>(
         placement="bottom-start"
         onAfterShow={() => {
           const surface = menu?.overlay.surface;
-          const option = surface?.querySelector<HTMLElement>(":focus");
-          if (surface && option) {
+          const root = surface?.getRootNode();
+          const option =
+            root instanceof ShadowRoot ? root.activeElement : surface?.ownerDocument.activeElement;
+          if (surface && option instanceof HTMLElement && surface.contains(option)) {
             revealInScrollRegion(surface, option);
           }
         }}

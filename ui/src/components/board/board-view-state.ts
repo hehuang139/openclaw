@@ -1,5 +1,5 @@
 import type { BoardGetParams } from "@openclaw/gateway-protocol";
-import { createMemo, createStore, onCleanup, untrack } from "solid-js";
+import { createMemo, createStore, onCleanup } from "solid-js";
 import {
   BOARD_GRID_COLUMNS,
   BOARD_GRID_GAP,
@@ -15,9 +15,15 @@ import {
 import type { BoardOp, BoardSnapshot, BoardWidget } from "../../lib/board/types.ts";
 import type { BoardViewCallbacks, BoardWidgetFrameUrl } from "../../lib/board/view-types.ts";
 import { t } from "../../lib/reactive/i18n.ts";
-import type { SolidBridgeElement } from "../../lit/solid-bridge.ts";
+import { listen } from "../../lib/reactive/listener.ts";
+import type { SolidBridgeElement } from "../../lib/solid-bridge.ts";
 import { orderedBoardTabs } from "./board-tabs.tsx";
-import type { BoardWidgetCellCallbacks } from "./board-widget-cell.ts";
+import type { BoardWidgetCellMethods } from "./board-widget-cell-options.ts";
+import {
+  boardWidgetPresentationReady,
+  type BoardWidgetCellCallbacks,
+  type BoardWidgetCellProps,
+} from "./board-widget-cell.ts";
 
 type BoardPointerGesture = {
   mode: "move" | "resize";
@@ -58,9 +64,14 @@ export type BoardViewMethods = {
 };
 export type BoardViewElement = SolidBridgeElement<BoardViewProps, BoardViewMethods>;
 
-export function createBoardViewState(props: BoardViewProps, host: BoardViewElement) {
+export function createBoardViewState(
+  props: BoardViewProps,
+  host: BoardViewElement,
+  cells: () => SolidBridgeElement<BoardWidgetCellProps, BoardWidgetCellMethods>[],
+) {
   // Pointer identity and mutation admission must be visible within the same event turn.
   let gesture: BoardPointerGesture | null = null;
+  let gestureListeners: (() => void)[] = [];
   let grid: HTMLElement | undefined;
   let mutationPending = false;
   let mutationRequestId = 0;
@@ -143,26 +154,21 @@ export function createBoardViewState(props: BoardViewProps, host: BoardViewEleme
 
   async function teardown(): Promise<void> {
     update(clearGesture);
-    await Promise.all(
-      [...host.querySelectorAll("openclaw-board-widget-cell")].map((cell) => cell.teardown()),
-    );
+    await Promise.all(cells().map((cell) => cell.teardown()));
   }
 
   // Readiness is sampled after a cell commit; this callback owns no subscription.
-  const reconcileInitialPresentation = (): void =>
-    untrack(() => {
-      if (
-        presentation.initialLoading &&
-        props.snapshot &&
-        [...host.querySelectorAll("openclaw-board-widget-cell")].every(
-          (cell) => cell.hidden || cell.presentationReady,
-        )
-      ) {
-        update((local) => {
-          local.initialLoading = false;
-        });
-      }
-    });
+  const reconcileInitialPresentation = (): void => {
+    if (
+      presentation.initialLoading &&
+      props.snapshot &&
+      cells().every((cell) => cell.hidden || boardWidgetPresentationReady(cell))
+    ) {
+      update((local) => {
+        local.initialLoading = false;
+      });
+    }
+  };
   function announce(message: string): void {
     update((local) => {
       local.announcement = message;
@@ -326,10 +332,8 @@ export function createBoardViewState(props: BoardViewProps, host: BoardViewEleme
         local.focusName = target.name;
       });
       queueMicrotask(() => {
-        const cell = [...host.querySelectorAll("openclaw-board-widget-cell")].find(
-          (entry) => entry.widget?.name === target.name,
-        );
-        cell?.querySelector<HTMLElement>(".board-widget")?.focus();
+        const cell = cells().find((entry) => entry.widget?.name === target.name);
+        cell?.focusWidget();
       });
     },
     focusChanged: (name) => {
@@ -361,9 +365,7 @@ export function createBoardViewState(props: BoardViewProps, host: BoardViewEleme
     ) {
       return;
     }
-    const cell = [...host.querySelectorAll("openclaw-board-widget-cell")].find(
-      (entry) => entry.pageChrome && entry.widget === widget,
-    );
+    const cell = cells().find((entry) => entry.pageChrome && entry.widget === widget);
     cell?.selectMenuItem(value);
   }
 
@@ -408,9 +410,11 @@ export function createBoardViewState(props: BoardViewProps, host: BoardViewEleme
       local.previewItems = items;
       local.gesture = { name: widget.name, mode };
     });
-    window.addEventListener("pointermove", handlePointerMove);
-    window.addEventListener("pointerup", handlePointerUp);
-    window.addEventListener("pointercancel", handlePointerCancel);
+    gestureListeners = [
+      listen(window, "pointermove", handlePointerMove),
+      listen(window, "pointerup", handlePointerUp),
+      listen(window, "pointercancel", handlePointerCancel),
+    ];
   }
 
   function pointerPreview(
@@ -519,9 +523,8 @@ export function createBoardViewState(props: BoardViewProps, host: BoardViewEleme
   };
 
   function stopGesture(): void {
-    window.removeEventListener("pointermove", handlePointerMove);
-    window.removeEventListener("pointerup", handlePointerUp);
-    window.removeEventListener("pointercancel", handlePointerCancel);
+    gestureListeners.forEach((stop) => stop());
+    gestureListeners = [];
     gesture = null;
   }
 

@@ -74,7 +74,7 @@ import { createAcpDispatchDeliveryCoordinator } from "./dispatch-acp-delivery.js
 import type { AcpDispatchDeliveryParams } from "./dispatch-acp-delivery.types.js";
 import { finalizeAcpTurnOutput } from "./dispatch-acp-finalize.js";
 import { resolveAcpTurnText } from "./dispatch-acp-prompt.js";
-import type { InboundMessageAuditTerminalRecorder } from "./dispatch-from-config.audit.js";
+import type { InboundMessageAuditTerminalRecorder } from "./dispatch-from-config.types.js";
 import { appendRecentHistoryImageContext } from "./history-media.js";
 import { hasInboundMediaForUnderstanding } from "./inbound-media.js";
 import type { ReplyDispatchKind } from "./reply-dispatcher.types.js";
@@ -316,7 +316,6 @@ export async function tryDispatchAcpReplyCore(
     accountId: effectiveDispatchAccountId,
   });
 
-  const acpDispatchStartedAt = Date.now();
   const finishAttempt = (
     finalQueued: boolean,
     error?: AcpRuntimeError,
@@ -326,10 +325,6 @@ export async function tryDispatchAcpReplyCore(
     const suppressionReason = hasQueuedDelivery
       ? undefined
       : delivery.getDeliverySuppressionReason();
-    const acpStats = acpManager.getObservabilitySnapshot();
-    logVerbose(
-      `acp-dispatch: session=${sessionKey} outcome=${error ? `error code=${error.code}` : "ok"} latencyMs=${Date.now() - acpDispatchStartedAt} queueDepth=${acpStats.turns.queueDepth} activeRuntimes=${acpStats.runtimeCache.activeSessions}`,
-    );
     params.recordProcessed("completed", {
       reason: error
         ? `acp_error:${normalizeLowercaseStringOrEmpty(error.code)}`

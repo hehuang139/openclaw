@@ -1,5 +1,6 @@
+import { dynamic, type JSX } from "@solidjs/web";
 import { For, Show, createEffect, createMemo, onCleanup, refresh } from "solid-js";
-import { McpAppUnmountGate } from "../../../components/mcp-app-unmount.ts";
+import { createMcpAppUnmountGate } from "../../../components/mcp-app-unmount.ts";
 import {
   notifyPanelHostedTabsChanged,
   type PanelHostedTab,
@@ -8,8 +9,8 @@ import { PanelTabStrip } from "../../../components/panel-tab-strip-solid.tsx";
 import { Icon } from "../../../components/solid/icon.tsx";
 import { PanelLoadingSkeleton } from "../../../components/solid/panel-loading-skeleton.tsx";
 import { t } from "../../../lib/reactive/i18n.ts";
-import { defineSolidBridge, type SolidBridgeElement } from "../../../lit/solid-bridge.ts";
-import { LitContent } from "../../../lit/solid-content.tsx";
+import { defineSolidBridge, type SolidBridgeElement } from "../../../lib/solid-bridge.ts";
+import { nativeListener } from "../../../lib/solid-native-listener.ts";
 import { AttachmentFileIcon } from "./chat-attachment-file-icon-solid.tsx";
 import type { SessionWorkspacePreview } from "./chat-session-workspace-types.ts";
 import type { SidebarContent } from "./chat-sidebar-content-types.ts";
@@ -18,9 +19,8 @@ type Props = {
   previews: SessionWorkspacePreview[];
   activeId: string | null;
   tabsInHeader: boolean;
-  /** Opaque output of the retained workspace renderer, consumed only by LitContent. */
-  browser: unknown;
-  renderDetail: ((content: SidebarContent) => unknown) | null;
+  browser: JSX.Element;
+  renderDetail: ((props: { content: SidebarContent }) => JSX.Element) | null;
   onSelect: (id: string | null) => void;
   onClose: (id: string) => void;
 };
@@ -37,9 +37,10 @@ defineSolidBridge<Props, Methods>(
   "openclaw-chat-files-panel",
   (props, host) => {
     const contentId = `chat-files-content-${++filesPanelSequence}`;
+    const pages = new Map<string, HTMLElement>();
     let completeCommit = () => {};
-    const appUnmount = new McpAppUnmountGate<Props>(
-      { requestUpdate: () => void refresh(rendered) },
+    const appUnmount = createMcpAppUnmountGate<Props>(
+      () => void refresh(rendered),
       () =>
         new Promise<void>((resolve) => {
           completeCommit = resolve;
@@ -64,11 +65,12 @@ defineSolidBridge<Props, Methods>(
         JSON.stringify([...appKeys]),
         () => snapshot,
         () =>
-          [...host.querySelectorAll<HTMLElement>("[data-app-tab-id]")].filter(
-            (element) => !appKeys.has(element.dataset.appTabId ?? ""),
+          [...pages].flatMap(([id, element]) =>
+            element.hasAttribute("data-app-tab-id") && !appKeys.has(id) ? [element] : [],
           ),
       );
     });
+    const Detail = dynamic(() => rendered().renderDetail ?? (() => null));
     createEffect(rendered, () => completeCommit());
     // Disposal also settles the gate; it restarts only views that remain connected.
     onCleanup(() => completeCommit());
@@ -77,12 +79,13 @@ defineSolidBridge<Props, Methods>(
         id,
         label,
         title: content.kind === "file" ? content.path : label,
-        icon:
-          content.kind === "mcp-app" ? (
+        get icon() {
+          return content.kind === "mcp-app" ? (
             <Icon name="puzzle" />
           ) : (
             <AttachmentFileIcon filename={label} mode="preview-with-favicon" />
-          ),
+          );
+        },
         className: content.kind === "loading" ? "is-connecting" : undefined,
       }));
       return props.activeId === null && tabs.length
@@ -106,12 +109,10 @@ defineSolidBridge<Props, Methods>(
     );
     let browseAction!: HTMLButtonElement;
     const showBrowser = () => props.onSelect(null);
+    // The hosted header moves this action outside the panel's delegated event root.
+    const browseClick = nativeListener("click", showBrowser);
     <button
-      ref={(element) => {
-        browseAction = element;
-        // The Lit header hosts this action outside Solid's delegated event root.
-        browseAction.addEventListener("click", showBrowser);
-      }}
+      ref={[(element) => (browseAction = element), browseClick]}
       class="rail-header__action"
       type="button"
       aria-label={t("chat.sidePanel.files")}
@@ -119,7 +120,6 @@ defineSolidBridge<Props, Methods>(
     >
       <Icon name="folder" />
     </button>;
-    onCleanup(() => browseAction.removeEventListener("click", showBrowser));
     const hostedActions = () => browseAction;
     Object.defineProperties(host, {
       hostedTabs: { configurable: true, get: hostedTabs },
@@ -164,24 +164,24 @@ defineSolidBridge<Props, Methods>(
         </Show>
         <div id={contentId} class="chat-files-panel__content">
           <div class="chat-files-panel__page" hidden={rendered().activeId !== null}>
-            <span class="lit-content" style={{ display: "contents" }}>
-              <LitContent value={rendered().browser} />
-            </span>
+            {rendered().browser}
           </div>
           <For each={rendered().previews} keyed={(preview) => preview.id}>
             {(preview) => {
+              onCleanup(() => pages.delete(preview().id));
               const entry = () => {
                 rendered();
                 return preview();
               };
-              const renderDetail = () => {
+              const detail = () => {
                 const content = entry().content;
                 return content.kind === "loading" || content.kind === "unavailable"
                   ? undefined
-                  : rendered().renderDetail?.(content);
+                  : content;
               };
               return (
                 <div
+                  ref={(element) => pages.set(preview().id, element)}
                   class="chat-files-panel__page"
                   data-app-tab-id={entry().content.kind === "mcp-app" ? entry().id : undefined}
                   hidden={rendered().activeId !== entry().id}
@@ -196,9 +196,7 @@ defineSolidBridge<Props, Methods>(
                       })()}
                     </div>
                   ) : (
-                    <span class="lit-content" style={{ display: "contents" }}>
-                      <LitContent value={renderDetail()} />
-                    </span>
+                    <Show when={detail()}>{(content) => <Detail content={content()} />}</Show>
                   )}
                 </div>
               );
