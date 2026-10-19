@@ -107,7 +107,9 @@ const withContext = <T>(
     run,
   );
 async function expectPrepared(
-  expected: Partial<PreparedPairedComputerUse>,
+  expected: Partial<Omit<PreparedPairedComputerUse, "gateway">> & {
+    gateway?: Partial<NonNullable<PreparedPairedComputerUse["gateway"]>>;
+  },
   context?: GatewayRequestContext,
 ) {
   const result = await (context ? withContext(context, load) : load());

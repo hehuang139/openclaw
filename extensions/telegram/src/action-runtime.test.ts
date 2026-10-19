@@ -259,6 +259,7 @@ it("retains account- and topic-bound historical authority after the cache restar
       chat: { id: -1001, type: "supergroup", title: "QA", is_forum: true },
       text: "historical context",
       from: { id: 1, is_bot: false, first_name: "QA" },
+      reply_to_message: undefined,
     }) satisfies Message.TextMessage;
   for (const [id, thread, providerObserved] of [
     [900, 77, true],

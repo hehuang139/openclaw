@@ -252,7 +252,7 @@ describe("projects vitest config", () => {
     ["fake-timer unit-fast", createUnitFastFakeTimersVitestConfig, ["src/utils.test.ts"]],
   ] as const)(
     "limits %s include files to the project's owned tests",
-    (_, createConfig, owned, expected = owned) => {
+    (_, createConfig, owned, expected) => {
       const unrelated = "src/gateway/worker-environments/workspace-sync-scripts.test.ts";
       const mixed = includeEnv([
         ...owned,
@@ -262,7 +262,7 @@ describe("projects vitest config", () => {
         "src/gateway/openresponses-http.test.ts",
         unrelated,
       ]);
-      expect(configFor(createConfig, mixed).include).toEqual(expected);
+      expect(configFor(createConfig, mixed).include).toEqual(expected ?? owned);
       expect(configFor(createConfig, includeEnv([unrelated])).include).toEqual([]);
     },
   );

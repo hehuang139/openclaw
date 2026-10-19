@@ -127,7 +127,9 @@ it.each(["src/gateway/config-reload.telegram-policy.test.ts", "src/gateway"])(
             ),
           },
     ]);
-    const env = includeEnv(plans[0]!.includePatterns);
+    const includePatterns = plans[0]!.includePatterns;
+    assert(includePatterns);
+    const env = includeEnv(includePatterns);
     const selected = gatewayProjectFiles([], env);
     expect(selected).toEqual(selectProjects(canonicalGatewayFiles, filters));
     expect(selected["gateway-database-workers"]).toEqual(

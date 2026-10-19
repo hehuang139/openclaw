@@ -1,8 +1,13 @@
 import { once } from "node:events";
-import type { IncomingMessage, ServerResponse } from "node:http";
+import fs from "node:fs";
+import { request as httpRequest, type IncomingMessage, type ServerResponse } from "node:http";
 import { createServer as createHttpsServer, type Server } from "node:https";
+import type { Socket } from "node:net";
+import path from "node:path";
 import type { Worker } from "node:worker_threads";
-import { afterAll, afterEach, beforeAll, beforeEach, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
+import { ensureSecretEgressProxyCa, generateLocalProxyLeaf } from "../../proxy-capture/ca.js";
 import { createDeferredCore } from "../../shared/deferred.js";
 import { reserveTestPortListener, type TestPortClaim } from "../../test-utils/port-claims.js";
 import { sealSecretSentinel } from "../sentinel.js";
@@ -11,19 +16,17 @@ import {
   startSecretEgressProxyWorker,
   type SecretEgressProxyWorkerHandle,
 } from "./proxy-worker.js";
-import * as egress from "./proxy.test-support.js";
 
-const secret = "synthetic-worker-key";
+const secret = "synthetic-worker-egress-credential";
 const sentinel = sealSecretSentinel(secret, { label: "WORKER_API_KEY" });
-const bindings = [egress.binding(sentinel, ["localhost"], "WORKER_API_KEY")];
-const seed = egress.useCaSeed("openclaw-egress-worker-");
+const bindings = [{ name: "WORKER_API_KEY", sentinel, allowedHosts: ["localhost"] }];
 const proxies: SecretEgressProxyWorkerHandle[] = [];
 const grants = new Set<SecretEgressProcessGrant>();
-const sockets = egress.socketTracker();
+const sockets = new Set<Socket>();
 const auditEvents: SecretEgressProxyAuditEvent[] = [];
 const observed: Array<{ authorization: string | undefined; body: string }> = [];
-const authorized = { authorization: `Bearer ${secret}`, body: "" };
 const failure = vi.fn();
+let seedDir: string;
 let origin: Server;
 let originPort: number;
 let originClaim: TestPortClaim;
@@ -31,25 +34,39 @@ let closeOrigin: (() => Promise<void>) | undefined;
 let proxy: SecretEgressProxyWorkerHandle;
 let nativeWorker: Worker;
 let streamingResponse: ServerResponse | undefined;
-afterAll(async () => {
-  sockets.destroy();
-  await Promise.all(proxies.map((owned) => owned.stop()));
-  expect(nativeWorker.threadId).toBe(-1);
-  expect(failure).not.toHaveBeenCalled();
-  await expect(proxy.registerProcess(bindings)).rejects.toThrow("stopped");
-  origin?.closeAllConnections();
-  await closeOrigin?.();
-  await originClaim?.release();
-  seed.cleanup();
-});
+const dirs = useAutoCleanupTempDirTracker((cleanup) =>
+  afterAll(async () => {
+    for (const socket of sockets) {
+      socket.destroy();
+    }
+    await Promise.all(proxies.map((owned) => owned.stop()));
+    expect(nativeWorker.threadId).toBe(-1);
+    expect(failure).not.toHaveBeenCalled();
+    await expect(proxy.registerProcess(bindings)).rejects.toThrow("stopped");
+    origin?.closeAllConnections();
+    await closeOrigin?.();
+    await originClaim?.release();
+    cleanup();
+  }),
+);
+
+function trackSocket(socket: Socket): void {
+  sockets.add(socket);
+  socket.once("close", () => sockets.delete(socket));
+  socket.on("error", () => {});
+}
 
 async function startWorker(onFailure = failure) {
+  const caDir = dirs.make("openclaw-egress-worker-");
+  for (const file of ["root-ca.pem", "root-ca-key.pem", "leaf-key.pem"]) {
+    fs.copyFileSync(path.join(seedDir, file), path.join(caDir, file));
+  }
   const created = createDeferredCore<Worker>();
   const onWorker = (worker: Worker) => created.resolve(worker);
   process.once("worker", onWorker);
   try {
     const handle = await startSecretEgressProxyWorker({
-      caDir: seed.make(),
+      caDir,
       allowedHosts: ["localhost"],
       onAudit: (event) => auditEvents.push(event),
       onFailure,
@@ -61,8 +78,8 @@ async function startWorker(onFailure = failure) {
   }
 }
 
-async function register(owner = proxy, scopedBindings = bindings) {
-  const grant = await owner.registerProcess(scopedBindings);
+async function register(owner = proxy, withBinding = true) {
+  const grant = await owner.registerProcess(withBinding ? bindings : []);
   grants.add(grant);
   return grant;
 }
@@ -74,43 +91,58 @@ function openRequest(
     host?: string;
     body?: string;
     authorization?: string;
+    owner?: SecretEgressProxyWorkerHandle;
   } = {},
 ): Promise<IncomingMessage> {
+  const owner = options.owner ?? proxy;
+  const proxyUrl = new URL(owner.proxyOrigin);
+  const credentials = new URL(grant.env.HTTPS_PROXY!);
   const body = options.body ?? "";
-  return egress.proxyRequest(
-    grant.env,
-    {
-      method: body ? "POST" : "GET",
-      path: `https://${options.host ?? "localhost"}:${originPort}${options.path ?? "/"}`,
-      headers: {
-        Authorization: options.authorization ?? `Bearer ${sentinel}`,
-        "Content-Length": Buffer.byteLength(body),
+  return new Promise((resolve, reject) => {
+    const request = httpRequest(
+      {
+        hostname: proxyUrl.hostname,
+        port: proxyUrl.port,
+        agent: false,
+        method: body ? "POST" : "GET",
+        path: `https://${options.host ?? "localhost"}:${originPort}${options.path ?? "/"}`,
+        headers: {
+          "Proxy-Authorization": `Basic ${Buffer.from(`openclaw:${credentials.password}`).toString("base64")}`,
+          Authorization: options.authorization ?? `Bearer ${sentinel}`,
+          "Content-Length": Buffer.byteLength(body),
+        },
       },
-      chunks: [body],
-    },
-    sockets.track,
-  );
+      resolve,
+    );
+    request.once("socket", trackSocket);
+    request.once("error", reject);
+    request.end(body);
+  });
 }
 
-type RequestOptions = Parameters<typeof openRequest>[1];
-async function request(grant: SecretEgressProcessGrant, options?: RequestOptions, status = 200) {
-  const result = await egress.readResponse(await openRequest(grant, options));
-  expect(result.status).toBe(status);
-  return result;
+async function readResponse(response: IncomingMessage) {
+  const chunks: Buffer[] = [];
+  for await (const chunk of response) {
+    chunks.push(Buffer.from(chunk));
+  }
+  return { status: response.statusCode, body: Buffer.concat(chunks).toString() };
 }
 
 beforeAll(async () => {
+  seedDir = dirs.make("openclaw-egress-worker-seed-");
+  const ca = await ensureSecretEgressProxyCa(seedDir);
+  const leaf = await generateLocalProxyLeaf({ certDir: seedDir, ca, hostname: "localhost" });
   const reservation = await reserveTestPortListener({
     offsets: [0],
     createListener: () =>
-      createHttpsServer(seed.leaf, (incoming, response) => {
-        const record = { authorization: incoming.headers.authorization, body: "" };
+      createHttpsServer(leaf, (request, response) => {
+        const record = { authorization: request.headers.authorization, body: "" };
         observed.push(record);
-        incoming.on("data", (chunk: Buffer) => {
+        request.on("data", (chunk: Buffer) => {
           record.body += chunk.toString();
         });
-        incoming.once("end", () => {
-          if (incoming.url === "/sse") {
+        request.once("end", () => {
+          if (request.url === "/sse") {
             streamingResponse = response;
             response.writeHead(200, { "Content-Type": "text/event-stream" });
             response.write("data: first\n\n");
@@ -122,11 +154,13 @@ beforeAll(async () => {
       }),
   });
   origin = reservation.listener;
-  origin.on("connection", sockets.track);
+  origin.on("connection", trackSocket);
   originClaim = reservation.claim;
   originPort = reservation.claim.port;
   closeOrigin = reservation.releaseListener;
-  ({ handle: proxy, worker: nativeWorker } = await startWorker());
+  const started = await startWorker();
+  proxy = started.handle;
+  nativeWorker = started.worker;
 });
 
 beforeEach(() => {
@@ -146,93 +180,140 @@ afterEach(async () => {
   await proxy.getCertificateStatus();
 });
 
-it("scopes multi-secret Basic credentials to their grant", async () => {
-  const password = sealSecretSentinel("password", { label: "WORKER_PASSWORD" });
-  const unrelated = sealSecretSentinel("synthetic-unrelated", { label: "UNRELATED" });
-  const grant = await register(proxy, [
-    ...bindings,
-    egress.binding(password, ["localhost"], "WORKER_PASSWORD"),
-  ]);
-  const authorization = egress.basic(`${sentinel}:${password}`);
-  await request(grant, { authorization });
-  expect(observed).toEqual([{ authorization: egress.basic(`${secret}:password`), body: "" }]);
-  await request(grant, { authorization: egress.basic(`user:${unrelated}`) }, 502);
-  grant.revoke();
-  await request(grant, { authorization }, 407);
-  expect(observed).toHaveLength(1);
-});
-it("acknowledges grants with scoped bindings, hosts, and payload-free audits", async () => {
-  const grant = await register();
-  expect(await request(grant, { body: `${sentinel}:body` })).toEqual({ status: 200, body: "ok" });
-  expect(observed).toEqual([{ authorization: `Bearer ${secret}`, body: `${secret}:body` }]);
-  await request(await register(proxy, []), {}, 502);
-  await request(grant, { host: "127.0.0.1" }, 403);
-  expect(observed).toHaveLength(1);
-  expect(await proxy.getCertificateStatus()).toMatchObject({
-    state: "ready",
-    failedCertificates: 0,
+describe("secret egress Worker boundary", () => {
+  it("keeps a multi-secret job's Basic credentials scoped to its registered grant", async () => {
+    const password = sealSecretSentinel("synthetic-worker-password", { label: "WORKER_PASSWORD" });
+    const unrelated = sealSecretSentinel("synthetic-unrelated-worker-secret", {
+      label: "UNRELATED_SECRET",
+    });
+    const grant = await proxy.registerProcess([
+      ...bindings,
+      { name: "WORKER_PASSWORD", sentinel: password, allowedHosts: ["localhost"] },
+    ]);
+    grants.add(grant);
+    const authorization = `Basic ${Buffer.from(`${sentinel}:${password}`).toString("base64")}`;
+    expect((await readResponse(await openRequest(grant, { authorization }))).status).toBe(200);
+    expect(observed).toEqual([
+      {
+        authorization: `Basic ${Buffer.from(`${secret}:synthetic-worker-password`).toString("base64")}`,
+        body: "",
+      },
+    ]);
+    expect(
+      (
+        await readResponse(
+          await openRequest(grant, {
+            authorization: `Basic ${Buffer.from(`user:${unrelated}`).toString("base64")}`,
+          }),
+        )
+      ).status,
+    ).toBe(502);
+    grant.revoke();
+    expect((await readResponse(await openRequest(grant, { authorization }))).status).toBe(407);
+    expect(observed).toHaveLength(1);
   });
-  expect(auditEvents).toEqual([
-    { kind: "forwarded", host: "localhost", substituted: true },
-    { kind: "refused", host: "localhost", substituted: false, reason: "unresolved-sentinel" },
-    { kind: "refused", host: "127.0.0.1", substituted: false, reason: "host-not-allowed" },
-  ]);
-  expect(JSON.stringify(auditEvents)).not.toContain(secret);
-  expect(JSON.stringify(auditEvents)).not.toContain(sentinel);
-});
+  it("acknowledges usable grants while keeping bindings, host policy, and audit data scoped", async () => {
+    const grant = await register();
+    expect(await readResponse(await openRequest(grant, { body: `${sentinel}:body` }))).toEqual({
+      status: 200,
+      body: "ok",
+    });
+    expect(observed).toEqual([{ authorization: `Bearer ${secret}`, body: `${secret}:body` }]);
+    const unbound = await register(proxy, false);
+    expect((await readResponse(await openRequest(unbound))).status).toBe(502);
+    expect((await readResponse(await openRequest(grant, { host: "127.0.0.1" }))).status).toBe(403);
+    expect(observed).toHaveLength(1);
+    expect(await proxy.getCertificateStatus()).toMatchObject({
+      state: "ready",
+      failedCertificates: 0,
+    });
+    expect(auditEvents).toEqual([
+      { kind: "forwarded", host: "localhost", substituted: true },
+      { kind: "refused", host: "localhost", substituted: false, reason: "unresolved-sentinel" },
+      { kind: "refused", host: "127.0.0.1", substituted: false, reason: "host-not-allowed" },
+    ]);
+    expect(JSON.stringify(auditEvents)).not.toContain(secret);
+    expect(JSON.stringify(auditEvents)).not.toContain(sentinel);
+  });
 
-it("revokes before cleanup delivery without revoking a sibling", async () => {
-  const [revoked, sibling] = await Promise.all([register(), register()]);
-  const response = await openRequest(revoked, { path: "/sse" });
-  const sse = egress.capture(response);
-  response.on("error", () => {});
-  await sse.until("data: first\n\n");
-  const send = nativeWorker.postMessage.bind(nativeWorker);
-  const held = vi.spyOn(nativeWorker, "postMessage").mockImplementation(() => {});
-  revoked.revoke();
-  const messages = held.mock.calls.slice();
-  held.mockRestore();
-  try {
-    streamingResponse!.end("data: after revoke\n\n");
-    await sse.closed;
-    expect(sse.text()).toBe("data: first\n\n");
-    expect(response.complete).toBe(false);
-    await request(revoked, {}, 407);
-    expect(await request(sibling)).toEqual({ status: 200, body: "ok" });
-    expect(observed).toEqual([authorized, authorized]);
-  } finally {
-    for (const args of messages) {
-      send(...args);
+  it("revokes authority before its cleanup message arrives without revoking a sibling", async () => {
+    const [revoked, sibling] = await Promise.all([register(), register()]);
+    const response = await openRequest(revoked, { path: "/sse" });
+    const first = createDeferredCore();
+    const closed = new Promise<void>((resolve) => {
+      response.once("close", resolve);
+    });
+    let received = "";
+    response.on("error", () => {});
+    response.on("data", (chunk: Buffer) => {
+      received += chunk.toString();
+      if (received.includes("data: first\n\n")) {
+        first.resolve();
+      }
+    });
+    await first.promise;
+    const send = nativeWorker.postMessage.bind(nativeWorker);
+    const held = vi.spyOn(nativeWorker, "postMessage").mockImplementation(() => {});
+    revoked.revoke();
+    const messages = held.mock.calls.slice();
+    held.mockRestore();
+    try {
+      streamingResponse!.end("data: after revoke\n\n");
+      await closed;
+      expect(received).toBe("data: first\n\n");
+      expect(response.complete).toBe(false);
+      expect((await readResponse(await openRequest(revoked))).status).toBe(407);
+      expect(await readResponse(await openRequest(sibling))).toEqual({ status: 200, body: "ok" });
+      expect(observed).toEqual([
+        { authorization: `Bearer ${secret}`, body: "" },
+        { authorization: `Bearer ${secret}`, body: "" },
+      ]);
+    } finally {
+      for (const args of messages) {
+        send(...args);
+      }
     }
-  }
-});
+  });
 
-it("delivers SSE data before the upstream completes its response", async () => {
-  const response = await openRequest(await register(), { path: "/sse" });
-  const sse = egress.capture(response);
-  const ended = once(response, "end");
-  await sse.until("data: first\n\n");
-  expect(response.readableEnded).toBe(false);
-  expect(streamingResponse?.writableEnded).toBe(false);
-  streamingResponse!.end("data: final\n\n");
-  await ended;
-  expect(sse.text()).toBe("data: first\n\ndata: final\n\n");
-});
+  it("delivers SSE data before the upstream completes its response", async () => {
+    const response = await openRequest(await register(), { path: "/sse" });
+    const first = createDeferredCore();
+    const ended = once(response, "end");
+    let received = "";
+    response.on("data", (chunk: Buffer) => {
+      received += chunk.toString();
+      if (received.includes("data: first\n\n")) {
+        first.resolve();
+      }
+    });
+    await first.promise;
+    expect(response.readableEnded).toBe(false);
+    expect(streamingResponse?.writableEnded).toBe(false);
+    streamingResponse!.end("data: final\n\n");
+    await ended;
+    expect(received).toBe("data: first\n\ndata: final\n\n");
+  });
 
-it("fails closed on Worker exit, settling pending control and network work", async () => {
-  const failed = vi.fn();
-  const isolated = await startWorker(failed);
-  const response = await openRequest(await register(isolated.handle), { path: "/sse" });
-  const closed = egress.onClose(response);
-  response.on("error", () => {});
-  response.resume();
-  const holdStatus = vi.spyOn(isolated.worker, "postMessage").mockImplementationOnce(() => {});
-  const pending = expect(isolated.handle.getCertificateStatus()).rejects.toThrow("unavailable");
-  holdStatus.mockRestore();
-  await isolated.worker.terminate();
-  await Promise.all([pending, closed]);
-  expect(failed).toHaveBeenCalledTimes(1);
-  await expect(isolated.handle.registerProcess(bindings)).rejects.toThrow("unavailable");
-  await isolated.handle.stop();
-  expect(isolated.worker.threadId).toBe(-1);
+  it("fails closed on native Worker exit and settles pending control and network work", async () => {
+    const failed = vi.fn();
+    const isolated = await startWorker(failed);
+    const response = await openRequest(await register(isolated.handle), {
+      owner: isolated.handle,
+      path: "/sse",
+    });
+    const closed = new Promise<void>((resolve) => {
+      response.once("close", resolve);
+    });
+    response.on("error", () => {});
+    response.resume();
+    const holdStatus = vi.spyOn(isolated.worker, "postMessage").mockImplementationOnce(() => {});
+    const pending = expect(isolated.handle.getCertificateStatus()).rejects.toThrow("unavailable");
+    holdStatus.mockRestore();
+    await isolated.worker.terminate();
+    await Promise.all([pending, closed]);
+    expect(failed).toHaveBeenCalledTimes(1);
+    await expect(isolated.handle.registerProcess(bindings)).rejects.toThrow("unavailable");
+    await isolated.handle.stop();
+    expect(isolated.worker.threadId).toBe(-1);
+  });
 });

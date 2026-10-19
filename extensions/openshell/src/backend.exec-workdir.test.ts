@@ -599,7 +599,8 @@ it("serializes initial seed publication across handles without serializing later
   });
   const firstPreparation = prepare(first, "first");
   let secondPreparation: typeof firstPreparation | undefined;
-  let preparationsSettled = Promise.allSettled([firstPreparation]);
+  let preparationsSettled: Promise<PromiseSettledResult<Awaited<typeof firstPreparation>>[]> =
+    Promise.allSettled([firstPreparation]);
   try {
     await Promise.race([seedStarted.promise, firstPreparation]);
     let secondStarted = false;

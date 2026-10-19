@@ -1,35 +1,48 @@
 import { execFile } from "node:child_process";
 import { once } from "node:events";
 import fs from "node:fs";
-import { createServer, type Server } from "node:http";
+import { createServer, request as httpRequest, type Server } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
 import net, { type Socket } from "node:net";
+import os from "node:os";
 import path from "node:path";
 import tls from "node:tls";
 import { promisify } from "node:util";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
+import {
+  createTempDirTracker,
+  useAutoCleanupTempDirTracker,
+} from "../../../test/helpers/temp-dir.js";
 import { gitNullConfigPath } from "../../infra/git-exec.js";
+import { generateLocalProxyLeaf } from "../../proxy-capture/ca.js";
 import { createDeferredCore } from "../../shared/deferred.js";
 import {
   mintSecretSentinel,
   SECRET_SENTINEL_MAX_LENGTH,
   SECRET_SENTINEL_PREFIX,
 } from "../sentinel.js";
-import type { SecretEgressProxyAuditEvent, SecretEgressProxyHandle } from "./proxy-server.js";
-import * as egress from "./proxy.test-support.js";
+import { startSecretEgressProxyServer, type SecretEgressProxyHandle } from "./proxy-server.js";
+
+type SecretEgressProxyAuditEvent = Parameters<
+  typeof startSecretEgressProxyServer
+>[0]["onAudit"] extends (event: infer Event) => void
+  ? Event
+  : never;
 
 describe("secret egress proxy", () => {
   type OriginRequest = {
+    bytes: Buffer;
     body: string;
     headers: Record<string, string | string[] | undefined>;
     url: string;
   };
 
-  let origin: Server;
+  const servers: Server[] = [];
   const proxies: SecretEgressProxyHandle[] = [];
   const sockets = new Set<Socket>();
-  const seed = egress.useCaSeed("openclaw-egress-proxy-test-");
+  const tempDirs: string[] = [];
+  const seedDirs = createTempDirTracker();
+  let seed: { dir: string; leaf: Awaited<ReturnType<typeof generateLocalProxyLeaf>> } | undefined;
   let caDir: string;
   let auditEvents: SecretEgressProxyAuditEvent[];
   let originRequests: OriginRequest[];
@@ -37,12 +50,60 @@ describe("secret egress proxy", () => {
   let proxy: SecretEgressProxyHandle;
   let proxyEnv: Record<string, string>;
 
-  function registerSentinel(sentinel: string, allowedHosts = ["localhost"], targetProxy = proxy) {
-    return targetProxy.registerProcess([egress.binding(sentinel, allowedHosts)]).env;
+  function registerSentinel(params: {
+    sentinel: string;
+    allowedHosts: readonly string[];
+    name?: string;
+    targetProxy?: SecretEgressProxyHandle;
+  }): Record<string, string> {
+    return (params.targetProxy ?? proxy).registerProcess([
+      {
+        name: params.name ?? "SERVICE_API_KEY",
+        sentinel: params.sentinel,
+        allowedHosts: params.allowedHosts,
+      },
+    ]).env;
   }
 
-  function proxyAuth(env = proxyEnv): string {
-    return egress.basicAuth(new URL(env.HTTPS_PROXY!).password);
+  function copyInitialCa(sourceDir: string, targetDir: string): void {
+    for (const file of ["root-ca.pem", "root-ca-key.pem", "leaf-key.pem"]) {
+      fs.copyFileSync(path.join(sourceDir, file), path.join(targetDir, file));
+    }
+  }
+
+  async function listen(server: Server): Promise<number> {
+    servers.push(server);
+    return await new Promise<number>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", () => {
+        server.off("error", reject);
+        const address = server.address();
+        if (!address || typeof address === "string") {
+          reject(new Error("test server did not bind a TCP port"));
+          return;
+        }
+        resolve(address.port);
+      });
+    });
+  }
+
+  async function closeServer(server: Server): Promise<void> {
+    server.closeAllConnections?.();
+    await new Promise<void>((resolve) => {
+      server.close(() => resolve());
+    });
+  }
+
+  function basicProxyAuth(password: string): string {
+    return `Basic ${Buffer.from(`openclaw:${password}`).toString("base64")}`;
+  }
+
+  function registeredPassword(env: Record<string, string>): string {
+    const proxyUrl = env.HTTPS_PROXY;
+    if (!proxyUrl) {
+      throw new Error("test proxy environment is missing HTTPS_PROXY");
+    }
+    return new URL(proxyUrl).password;
   }
 
   async function rawConnect(params: {
@@ -53,7 +114,10 @@ describe("secret egress proxy", () => {
     const socket = net.connect(Number(proxyUrl.port), proxyUrl.hostname);
     sockets.add(socket);
     socket.once("close", () => sockets.delete(socket));
-    await once(socket, "connect");
+    await new Promise<void>((resolve, reject) => {
+      socket.once("connect", resolve);
+      socket.once("error", reject);
+    });
     const authLine = params.auth ? `Proxy-Authorization: ${params.auth}\r\n` : "";
     socket.write(
       `CONNECT localhost:${originPort} HTTP/1.1\r\nHost: localhost:${originPort}\r\n${authLine}\r\n`,
@@ -74,29 +138,41 @@ describe("secret egress proxy", () => {
     return { response, socket };
   }
 
-  // Preserve raw UTF-8 bytes and Content-Length before Content-Disposition.
-  const RAW_UPSTREAM_RESPONSES: Record<string, string> = {
-    "/cjk-attachment":
-      'HTTP/1.1 200 OK\r\nContent-Length: 4\r\nContent-Disposition: attachment; filename="附件_2026-09-21.log"\r\nConnection: close\r\n\r\nfile',
-    "/invalid-trailer":
-      "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nTrailer: Expires\r\nConnection: close\r\n\r\nfile",
-  };
+  // Raw upstream bytes: Node's own server cannot emit a Content-Length before a
+  // UTF-8 Content-Disposition, which is the order real upstreams commonly send.
+  const RAW_UPSTREAM_RESPONSES = new Map<string, Buffer>([
+    [
+      "/cjk-attachment",
+      Buffer.concat([
+        Buffer.from("HTTP/1.1 200 OK\r\nContent-Length: 4\r\nContent-Disposition: attachment; "),
+        Buffer.from('filename="附件_2026-09-21.log"', "utf8"),
+        Buffer.from("\r\nConnection: close\r\n\r\nfile"),
+      ]),
+    ],
+    [
+      "/invalid-trailer",
+      Buffer.from(
+        "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nTrailer: Expires\r\nConnection: close\r\n\r\nfile",
+      ),
+    ],
+  ]);
 
-  async function requestThroughTunnel(
-    params: {
-      path?: string;
-      headers?: Record<string, string>;
-      bodyChunks?: readonly (string | Buffer)[];
-      contentLength?: number;
-      caPath?: string;
-      proxyEnv?: Record<string, string>;
-    },
-    expectedStatus = 200,
-  ): Promise<{ body: string; head: string }> {
+  async function requestThroughTunnel(params: {
+    path?: string;
+    headers?: Record<string, string>;
+    bodyChunks?: readonly (string | Buffer)[];
+    contentLength?: number;
+    caPath?: string;
+    proxyEnv?: Record<string, string>;
+  }): Promise<{ body: string; head: string; status: number }> {
     const env = params.proxyEnv ?? proxyEnv;
+    const configuredProxy = env.HTTPS_PROXY;
+    if (!configuredProxy) {
+      throw new Error("test proxy environment is missing HTTPS_PROXY");
+    }
     const connected = await rawConnect({
-      auth: proxyAuth(env),
-      proxyOrigin: new URL(env.HTTPS_PROXY!).origin,
+      auth: basicProxyAuth(registeredPassword(env)),
+      proxyOrigin: new URL(configuredProxy).origin,
     });
     expect(connected.response).toContain("200 Connection Established");
     const secureSocket = tls.connect({
@@ -104,7 +180,10 @@ describe("secret egress proxy", () => {
       servername: "localhost",
       ca: fs.readFileSync(params.caPath ?? proxy.caCertPath),
     });
-    await once(secureSocket, "secureConnect");
+    await new Promise<void>((resolve, reject) => {
+      secureSocket.once("secureConnect", resolve);
+      secureSocket.once("error", reject);
+    });
     expect(secureSocket.authorized).toBe(true);
     const continued = createDeferredCore();
     const received = new Promise<string>((resolve, reject) => {
@@ -158,8 +237,7 @@ describe("secret egress proxy", () => {
     const raw = (await received).replace(/^(?:HTTP\/1\.1 100 Continue\r\n\r\n)+/u, "");
     const [head = "", body = ""] = raw.split("\r\n\r\n", 2);
     const status = Number(/^HTTP\/1\.1 (\d{3})/u.exec(head)?.[1]);
-    expect(status).toBe(expectedStatus);
-    return { body, head };
+    return { body, head, status };
   }
 
   async function forwardedRequest(
@@ -169,14 +247,25 @@ describe("secret egress proxy", () => {
     requestTarget?: string,
   ): Promise<number> {
     const proxyUrl = new URL(proxyOrigin);
-    const response = await egress.openRequest({
-      hostname: proxyUrl.hostname,
-      port: proxyUrl.port,
-      path: requestTarget ?? `${protocol}://localhost:${originPort}/forwarded-auth`,
-      method: "GET",
-      headers: auth ? { "Proxy-Authorization": auth } : undefined,
+    return await new Promise<number>((resolve, reject) => {
+      const request = httpRequest(
+        {
+          hostname: proxyUrl.hostname,
+          port: proxyUrl.port,
+          path: requestTarget ?? `${protocol}://localhost:${originPort}/forwarded-auth`,
+          method: "GET",
+          // Exercise this fixture directly even when Node enables environment proxies.
+          agent: false,
+          headers: auth ? { "Proxy-Authorization": auth } : undefined,
+        },
+        (response) => {
+          response.resume();
+          response.once("end", () => resolve(response.statusCode ?? 0));
+        },
+      );
+      request.once("error", reject);
+      request.end();
     });
-    return (await egress.readResponse(response)).status;
   }
 
   function tamperSentinel(sentinel: string): string {
@@ -188,54 +277,82 @@ describe("secret egress proxy", () => {
   beforeEach(async () => {
     auditEvents = [];
     originRequests = [];
-    caDir = seed.make();
-    proxy = await egress.createProxy(caDir, auditEvents);
-    proxies.push(proxy);
-    origin = createHttpsServer(seed.leaf, (request, response) => {
-      const chunks: Buffer[] = [];
-      request.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
-      request.on("end", () => {
-        originRequests.push({
-          body: Buffer.concat(chunks).toString("utf8"),
-          headers: { ...request.headers },
-          url: request.url ?? "",
-        });
-        const rawResponse = RAW_UPSTREAM_RESPONSES[request.url ?? ""];
-        if (rawResponse) {
-          request.socket.end(Buffer.from(rawResponse));
-          return;
-        }
-        if (request.url === "/redirect") {
-          response.writeHead(307, {
-            Location: `https://127.0.0.1:${originPort}/redirected`,
-            Connection: "close",
-            "Content-Length": 0,
-          });
-          response.end();
-          return;
-        }
-        if (request.url?.startsWith("/git/")) {
-          response.writeHead(200, { "Content-Type": "text/plain", Connection: "close" });
-          response.end(
-            request.url === "/git/HEAD"
-              ? "ref: refs/heads/main\n"
-              : `${"a".repeat(40)}\trefs/heads/main\n`,
-          );
-          return;
-        }
-        const status =
-          request.url === "/fixed-length" && request.headers["content-length"] === undefined
-            ? 411
-            : 200;
-        response.writeHead(status, { Connection: "close", "Content-Length": 2 });
-        response.end("ok");
-      });
+    caDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-egress-proxy-test-"));
+    tempDirs.push(caDir);
+    if (seed) {
+      copyInitialCa(seed.dir, caDir);
+    }
+    proxy = await startSecretEgressProxyServer({
+      caDir,
+      onAudit: (event) => auditEvents.push(event),
     });
-    originPort = await egress.listen(origin);
+    proxies.push(proxy);
+    const leaf = seed
+      ? { cert: Buffer.from(seed.leaf.cert), key: Buffer.from(seed.leaf.key) }
+      : await generateLocalProxyLeaf({
+          certDir: caDir,
+          ca: { certPath: proxy.caCertPath, keyPath: path.join(caDir, "root-ca-key.pem") },
+          hostname: "localhost",
+        });
+    originPort = await listen(
+      createHttpsServer(leaf, (request, response) => {
+        const chunks: Buffer[] = [];
+        request.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+        request.on("end", () => {
+          const bytes = Buffer.concat(chunks);
+          originRequests.push({
+            bytes,
+            body: bytes.toString("utf8"),
+            headers: { ...request.headers },
+            url: request.url ?? "",
+          });
+          const rawResponse = RAW_UPSTREAM_RESPONSES.get(request.url ?? "");
+          if (rawResponse) {
+            request.socket.end(rawResponse);
+            return;
+          }
+          if (request.url === "/redirect") {
+            response.writeHead(307, {
+              Location: `https://127.0.0.1:${originPort}/redirected`,
+              Connection: "close",
+              "Content-Length": 0,
+            });
+            response.end();
+            return;
+          }
+          if (request.url?.startsWith("/git/")) {
+            response.writeHead(200, { "Content-Type": "text/plain", Connection: "close" });
+            response.end(
+              request.url === "/git/HEAD"
+                ? "ref: refs/heads/main\n"
+                : `${"a".repeat(40)}\trefs/heads/main\n`,
+            );
+            return;
+          }
+          const status =
+            request.url === "/fixed-length" && request.headers["content-length"] === undefined
+              ? 411
+              : 200;
+          response.writeHead(status, { Connection: "close", "Content-Length": 2 });
+          response.end("ok");
+        });
+      }),
+    );
     proxyEnv = proxy.registerProcess().env;
+    if (!seed) {
+      // Capture after cold setup succeeds, before a case can mutate its files.
+      const dir = seedDirs.make("openclaw-egress-proxy-seed-");
+      try {
+        copyInitialCa(caDir, dir);
+        seed = { dir, leaf: { cert: Buffer.from(leaf.cert), key: Buffer.from(leaf.key) } };
+      } catch (error) {
+        seedDirs.cleanup();
+        throw error;
+      }
+    }
   });
 
-  afterAll(seed.cleanup);
+  afterAll(() => seedDirs.cleanup());
 
   afterEach(async () => {
     for (const socket of sockets) {
@@ -245,37 +362,40 @@ describe("secret egress proxy", () => {
     for (const currentProxy of proxies.splice(0)) {
       await currentProxy.stop();
     }
-    origin?.closeAllConnections();
-    if (origin) {
-      await egress.closeServer(origin);
+    for (const server of servers.splice(0)) {
+      await closeServer(server);
     }
-    fs.rmSync(caDir, { recursive: true, force: true });
+    for (const dir of tempDirs.splice(0)) {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
-  it("substitutes Basic credentials without decoding unrelated base64", async () => {
+  it("substitutes multiple sentinels in Basic username and password without decoding other base64", async () => {
     const username = mintSecretSentinel("synthetic-user", { label: "basic-user" });
     const password = mintSecretSentinel("synthetic-password", { label: "basic-password" });
     proxyEnv = proxy.registerProcess([
-      egress.binding(username, ["localhost"], "USERNAME"),
-      egress.binding(password, ["localhost"], "PASSWORD"),
+      { name: "USERNAME", sentinel: username, allowedHosts: ["localhost"] },
+      { name: "PASSWORD", sentinel: password, allowedHosts: ["localhost"] },
     ]).env;
     const encoded = Buffer.from(`${username}:${password}`).toString("base64");
-    await requestThroughTunnel({
-      headers: {
-        Authorization: `Basic ${encoded}`,
-        "X-Encoded": encoded,
-        "Proxy-Authorization": `Basic ${encoded}`,
-      },
-      bodyChunks: [encoded],
-    });
-    expect(originRequests[0]).toMatchObject({
-      body: encoded,
-      headers: {
-        authorization: egress.basic("synthetic-user:synthetic-password"),
-        "x-encoded": encoded,
-        "proxy-authorization": undefined,
-      },
-    });
+    expect(
+      (
+        await requestThroughTunnel({
+          headers: {
+            Authorization: `Basic ${encoded}`,
+            "X-Encoded": encoded,
+            "Proxy-Authorization": `Basic ${encoded}`,
+          },
+          bodyChunks: [encoded],
+        })
+      ).status,
+    ).toBe(200);
+    expect(originRequests[0]?.headers.authorization).toBe(
+      `Basic ${Buffer.from("synthetic-user:synthetic-password").toString("base64")}`,
+    );
+    expect(originRequests[0]?.headers["x-encoded"]).toBe(encoded);
+    expect(originRequests[0]?.headers["proxy-authorization"]).toBeUndefined();
+    expect(originRequests[0]?.body).toBe(encoded);
   });
 
   it.each([
@@ -290,7 +410,10 @@ describe("secret egress proxy", () => {
     const sentinel = mintSecretSentinel("synthetic-refused-secret", { label: "basic-refusal" });
     const candidate = kind === "tampered" ? tamperSentinel(sentinel) : sentinel;
     if (kind !== "unregistered") {
-      proxyEnv = registerSentinel(candidate);
+      proxyEnv = registerSentinel({
+        sentinel: candidate,
+        allowedHosts: ["localhost"],
+      });
     }
     const decoded =
       kind === "no-colon" ? candidate : `user:${candidate}${kind === "control-byte" ? "\n" : ""}`;
@@ -306,7 +429,13 @@ describe("secret egress proxy", () => {
           ? encoded.replace(/=+$/u, "") + (encoded.endsWith("==") ? "=" : "==")
           : encoded;
     const authorization = `Basic ${credential}`;
-    await requestThroughTunnel({ headers: { Authorization: authorization } }, 502);
+    expect(
+      (
+        await requestThroughTunnel({
+          headers: { Authorization: authorization },
+        })
+      ).status,
+    ).toBe(502);
     expect(originRequests).toEqual([]);
     expect(auditEvents.at(-1)?.reason).toBe("unresolved-sentinel");
   });
@@ -314,23 +443,28 @@ describe("secret egress proxy", () => {
   it.each(["bAsIc dXNlcjpwYXNz", "Basic malformed!"])(
     "preserves ordinary Basic headers byte-for-byte: %s",
     async (authorization) => {
-      await requestThroughTunnel({ headers: { Authorization: authorization } });
+      expect(
+        (await requestThroughTunnel({ headers: { Authorization: authorization } })).status,
+      ).toBe(200);
       expect(originRequests[0]?.headers.authorization).toBe(authorization);
       expect(auditEvents.at(-1)?.substituted).toBe(false);
     },
   );
 
-  it("returns redirects without following and reauthorizes their destinations", async () => {
+  it("does not follow redirects and reauthorizes Basic credentials on a redirected destination", async () => {
     const sentinel = mintSecretSentinel("synthetic-redirect-secret", { label: "basic-redirect" });
-    proxyEnv = registerSentinel(sentinel);
-    const headers = { Authorization: egress.basic(`user:${sentinel}`) };
-    const redirected = await requestThroughTunnel({ path: "/redirect", headers }, 307);
+    proxyEnv = registerSentinel({ sentinel, allowedHosts: ["localhost"] });
+    const headers = {
+      Authorization: `Basic ${Buffer.from(`user:${sentinel}`).toString("base64")}`,
+    };
+    const redirected = await requestThroughTunnel({ path: "/redirect", headers });
+    expect(redirected.status).toBe(307);
     expect(redirected.head).toContain(`https://127.0.0.1:${originPort}/redirected`);
     expect(originRequests).toHaveLength(1);
-    await requestThroughTunnel(
-      { path: `https://127.0.0.1:${originPort}/redirected`, headers },
-      502,
-    );
+    expect(
+      (await requestThroughTunnel({ path: `https://127.0.0.1:${originPort}/redirected`, headers }))
+        .status,
+    ).toBe(502);
     expect(originRequests).toHaveLength(1);
     expect(auditEvents.at(-1)?.reason).toBe("destination-not-allowed");
   });
@@ -341,29 +475,49 @@ describe("secret egress proxy", () => {
     process.on("uncaughtException", onUncaught);
     try {
       const attachment = await requestThroughTunnel({ path: "/cjk-attachment" });
+      expect(attachment.status).toBe(200);
       expect(attachment.body).toBe("file");
       expect(attachment.head.toLowerCase()).toContain(
         "content-disposition: attachment; filename=\"___2026-09-21.log\"; filename*=utf-8''%e9%99%84%e4%bb%b6_2026-09-21.log",
       );
 
-      const rejected = await requestThroughTunnel({ path: "/invalid-trailer" }, 502);
+      const rejected = await requestThroughTunnel({ path: "/invalid-trailer" });
+      expect(rejected.status).toBe(502);
       expect(rejected.body).toBe("Secret egress proxy could not forward the upstream response.\n");
 
-      expect((await requestThroughTunnel({ path: "/after" })).body).toBe("ok");
+      await expect(requestThroughTunnel({ path: "/after" })).resolves.toMatchObject({
+        body: "ok",
+        status: 200,
+      });
       expect(uncaught).toEqual([]);
     } finally {
       process.off("uncaughtException", onUncaught);
     }
   });
 
+  it("preserves fixed-length binary upload bytes and framing", async () => {
+    const bytes = Buffer.from(Array.from({ length: 8192 }, (_, index) => index % 256));
+    const result = await requestThroughTunnel({
+      path: "/fixed-length",
+      headers: { "Content-Type": "application/octet-stream" },
+      contentLength: bytes.length,
+      bodyChunks: [bytes.subarray(0, 11), bytes.subarray(11)],
+    });
+    expect(originRequests).toHaveLength(1);
+    expect(originRequests[0]?.bytes).toEqual(bytes);
+    expect(result.status).toBe(200);
+    expect(originRequests[0]?.headers["content-length"]).toBe(String(bytes.length));
+    expect(originRequests[0]?.headers["transfer-encoding"]).toBeUndefined();
+  });
+
   it.each(["overlong", "wrong-host"] as const)(
     "refuses %s sentinels inside fixed-length binary content",
     async (kind) => {
       const sentinel = mintSecretSentinel("synthetic-body-credential", { label: kind });
-      proxyEnv = registerSentinel(
+      proxyEnv = registerSentinel({
         sentinel,
-        kind === "wrong-host" ? ["other.example"] : ["localhost"],
-      );
+        allowedHosts: kind === "wrong-host" ? ["other.example"] : ["localhost"],
+      });
       const body = Buffer.concat([
         Buffer.from([0, 255, 128]),
         Buffer.from(
@@ -372,14 +526,12 @@ describe("secret egress proxy", () => {
             : sentinel,
         ),
       ]);
-      await requestThroughTunnel(
-        {
-          headers: { "Content-Type": "application/octet-stream" },
-          contentLength: body.length,
-          bodyChunks: [body],
-        },
-        502,
-      );
+      const result = await requestThroughTunnel({
+        headers: { "Content-Type": "application/octet-stream" },
+        contentLength: body.length,
+        bodyChunks: [body],
+      });
+      expect(result.status).toBe(502);
       expect(originRequests).toEqual([]);
       expect(auditEvents.at(-1)).toMatchObject({
         kind: "refused",
@@ -389,18 +541,18 @@ describe("secret egress proxy", () => {
   );
 
   it("rejects conflicting content-length and chunked request framing", async () => {
-    await requestThroughTunnel(
-      { headers: { "Content-Length": "1", "Transfer-Encoding": "chunked" } },
-      400,
-    );
+    const result = await requestThroughTunnel({
+      headers: { "Content-Length": "1", "Transfer-Encoding": "chunked" },
+    });
+    expect(result.status).toBe(400);
     expect(originRequests).toEqual([]);
   });
 
-  it("refuses malformed direct/TLS targets and keeps serving", async () => {
+  it("refuses malformed targets on direct and TLS requests without escaping the handler", async () => {
     const target = "https://bad_host/";
-    const auth = proxyAuth();
+    const auth = basicProxyAuth(registeredPassword(proxyEnv));
     await expect(forwardedRequest(auth, "https", proxy.proxyOrigin, target)).resolves.toBe(400);
-    await requestThroughTunnel({ path: target }, 400);
+    await expect(requestThroughTunnel({ path: target })).resolves.toMatchObject({ status: 400 });
     expect(originRequests).toEqual([]);
     expect(auditEvents).toEqual([
       expect.objectContaining({ kind: "refused", substituted: false }),
@@ -435,7 +587,8 @@ describe("secret egress proxy", () => {
     expect(auditEvents).toContainEqual(expect.objectContaining({ kind: "forwarded" }));
   });
 
-  it("keeps serving after a client resets a refused tunnel", async () => {
+  it("survives a client that resets a refused tunnel instead of crashing the Gateway", async () => {
+    // curl resets refused CONNECT tunnels; wait for the refusal before resetting.
     const refused = await rawConnect({});
     expect(refused.response).toContain("407 Proxy Authentication Required");
     const closed = new Promise<void>((resolve) => {
@@ -444,44 +597,54 @@ describe("secret egress proxy", () => {
     refused.socket.resetAndDestroy();
     await closed;
 
-    const stillAlive = await rawConnect({ auth: proxyAuth() });
+    // The listener must still serve traffic after the reset.
+    const stillAlive = await rawConnect({ auth: basicProxyAuth(registeredPassword(proxyEnv)) });
     expect(stillAlive.response).toContain("200 Connection Established");
     stillAlive.socket.destroy();
   });
 
   it.each([
-    [undefined, "missing-proxy-auth"],
-    [egress.basicAuth("wrong-token"), "invalid-proxy-auth"],
-  ] as const)("refuses %s credentials on CONNECT and forwarding (%s)", async (auth, reason) => {
-    const connect = await rawConnect({ auth });
+    { label: "missing", auth: undefined, expectedReason: "missing-proxy-auth" },
+    {
+      label: "malformed",
+      auth: basicProxyAuth("wrong-token"),
+      expectedReason: "invalid-proxy-auth",
+    },
+  ])("refuses $label authentication on CONNECT and forwarded requests", async (testCase) => {
+    const connect = await rawConnect({ auth: testCase.auth });
     expect(connect.response).toContain("407 Proxy Authentication Required");
     connect.socket.destroy();
 
-    await expect(forwardedRequest(auth)).resolves.toBe(407);
+    await expect(forwardedRequest(testCase.auth)).resolves.toBe(407);
     expect(originRequests).toEqual([]);
     expect(auditEvents).toEqual([
-      expect.objectContaining({ kind: "refused", reason }),
-      expect.objectContaining({ kind: "refused", reason }),
+      expect.objectContaining({ kind: "refused", reason: testCase.expectedReason }),
+      expect.objectContaining({ kind: "refused", reason: testCase.expectedReason }),
     ]);
   });
 
-  it("keeps secret bindings narrower than the traffic allowlist", async () => {
+  it("keeps per-secret destination bindings narrower than the traffic allowlist", async () => {
     const restrictedEvents: SecretEgressProxyAuditEvent[] = [];
-    const restrictedProxy = await egress.createProxy(caDir, restrictedEvents, {
+    const restrictedProxy = await startSecretEgressProxyServer({
+      caDir,
       allowedHosts: ["localhost"],
+      onAudit: (event) => restrictedEvents.push(event),
     });
     proxies.push(restrictedProxy);
     const secret = "wrong-destination-secret";
     const sentinel = mintSecretSentinel(secret, { label: "egress-wrong-destination" });
 
-    const result = await requestThroughTunnel(
-      {
-        caPath: restrictedProxy.caCertPath,
-        headers: { Authorization: `Bearer ${sentinel}` },
-        proxyEnv: registerSentinel(sentinel, ["api.example.com"], restrictedProxy),
-      },
-      502,
-    );
+    const result = await requestThroughTunnel({
+      caPath: restrictedProxy.caCertPath,
+      headers: { Authorization: `Bearer ${sentinel}` },
+      proxyEnv: registerSentinel({
+        sentinel,
+        allowedHosts: ["api.example.com"],
+        targetProxy: restrictedProxy,
+      }),
+    });
+
+    expect(result.status).toBe(502);
     expect(result.body).toContain("--allow-host localhost");
     expect(originRequests).toEqual([]);
     expect(restrictedEvents.at(-1)).toMatchObject({
@@ -493,9 +656,18 @@ describe("secret egress proxy", () => {
 
   it("refuses an unresolved sentinel in a streamed body", async () => {
     const unknown = tamperSentinel(mintSecretSentinel("unknown-body", { label: "egress-body" }));
-    await requestThroughTunnel({ path: "/refuse", bodyChunks: [unknown] }, 502);
-    expect(originRequests).toEqual([]);
-    expect(auditEvents.at(-1)).toMatchObject({ kind: "refused", reason: "unresolved-sentinel" });
+    const before = originRequests.length;
+    const result = await requestThroughTunnel({
+      path: "/refuse",
+      bodyChunks: [unknown],
+    });
+
+    expect(result.status).toBe(502);
+    expect(originRequests).toHaveLength(before);
+    expect(auditEvents.at(-1)).toMatchObject({
+      kind: "refused",
+      reason: "unresolved-sentinel",
+    });
   });
 
   it.each(["chunked", "fixed-length"] as const)(
@@ -503,51 +675,70 @@ describe("secret egress proxy", () => {
     async (framing) => {
       const secret = "stream-boundary-🦞-secret";
       const sentinel = mintSecretSentinel(secret, { label: "egress-stream" });
-      proxyEnv = registerSentinel(sentinel);
+      proxyEnv = registerSentinel({ sentinel, allowedHosts: ["localhost"] });
       const split = SECRET_SENTINEL_PREFIX.length + 3;
       const prefix = "x".repeat(SECRET_SENTINEL_MAX_LENGTH + 1024);
       const suffix = "y".repeat(2048);
-      const fixed = framing === "fixed-length";
 
-      await requestThroughTunnel({
-        path: fixed ? "/fixed-length" : "/",
-        headers: fixed ? { Expect: "100-continue", Trailer: "X-Checksum" } : undefined,
-        contentLength: fixed ? Buffer.byteLength(prefix + sentinel + suffix) : undefined,
-        bodyChunks: [prefix, sentinel.slice(0, split), sentinel.slice(split), suffix],
-      });
+      await expect(
+        requestThroughTunnel({
+          path: framing === "fixed-length" ? "/fixed-length" : "/",
+          headers:
+            framing === "fixed-length"
+              ? { Expect: "100-continue", Trailer: "X-Checksum" }
+              : undefined,
+          contentLength:
+            framing === "fixed-length" ? Buffer.byteLength(prefix + sentinel + suffix) : undefined,
+          bodyChunks: [prefix, sentinel.slice(0, split), sentinel.slice(split), suffix],
+        }),
+      ).resolves.toMatchObject({ status: 200 });
 
-      expect(originRequests.at(-1)).toMatchObject({
-        body: `${prefix}${secret}${suffix}`,
-        headers: {
-          expect: undefined,
-          trailer: undefined,
-          "content-length": fixed ? String(Buffer.byteLength(prefix + secret + suffix)) : undefined,
-          "transfer-encoding": framing === "chunked" ? "chunked" : undefined,
-        },
-      });
+      expect(originRequests.at(-1)?.body).toBe(`${prefix}${secret}${suffix}`);
+      expect(originRequests.at(-1)?.body).not.toContain(sentinel);
+      expect(originRequests.at(-1)?.headers.expect).toBeUndefined();
+      expect(originRequests.at(-1)?.headers.trailer).toBeUndefined();
+      expect(originRequests.at(-1)?.headers["content-length"]).toBe(
+        framing === "fixed-length"
+          ? String(Buffer.byteLength(prefix + secret + suffix))
+          : undefined,
+      );
+      expect(originRequests.at(-1)?.headers["transfer-encoding"]).toBe(
+        framing === "chunked" ? "chunked" : undefined,
+      );
     },
   );
 
-  it("revokes only the owning process and keeps audits payload-free", async () => {
+  it("revokes only the owning process's Basic authorization and keeps audits payload-free", async () => {
     const secret = "audit-secret-value";
     const sentinel = mintSecretSentinel(secret, { label: "egress-audit" });
-    const grant = proxy.registerProcess([egress.binding(sentinel)]);
+    const grant = proxy.registerProcess([
+      { name: "SERVICE_API_KEY", sentinel, allowedHosts: ["localhost"] },
+    ]);
     proxyEnv = grant.env;
     const sibling = proxy.registerProcess();
     await requestThroughTunnel({ headers: { "X-Secret": sentinel } });
     await expect(
-      forwardedRequest(proxyAuth(), "http", proxy.proxyOrigin, "http://example.com/"),
+      forwardedRequest(
+        basicProxyAuth(registeredPassword(proxyEnv)),
+        "http",
+        proxy.proxyOrigin,
+        "http://example.com/",
+      ),
     ).resolves.toBe(502);
     expect(auditEvents).toContainEqual(
       expect.objectContaining({ kind: "refused", reason: "non-https-request" }),
     );
 
     grant.revoke();
-    const refused = await rawConnect({ auth: proxyAuth() });
+    const refused = await rawConnect({
+      auth: basicProxyAuth(registeredPassword(proxyEnv)),
+    });
     expect(refused.response).toContain("407 Proxy Authentication Required");
     refused.socket.destroy();
-    await expect(forwardedRequest(proxyAuth())).resolves.toBe(407);
-    await expect(forwardedRequest(proxyAuth(sibling.env))).resolves.toBe(200);
+    await expect(forwardedRequest(basicProxyAuth(registeredPassword(proxyEnv)))).resolves.toBe(407);
+    await expect(forwardedRequest(basicProxyAuth(registeredPassword(sibling.env)))).resolves.toBe(
+      200,
+    );
 
     const auditText = JSON.stringify(auditEvents);
     expect(auditText).not.toContain(secret);
@@ -559,26 +750,37 @@ describe("secret egress plain HTTP", () => {
   const tempDirs = useAutoCleanupTempDirTracker(afterAll);
   const servers: Server[] = [];
   const audit: SecretEgressProxyAuditEvent[] = [];
-  const observed: Array<string | undefined> = [];
+  const observed: Array<{ url: string | undefined; body: string; port: number | undefined }> = [];
   let proxy: SecretEgressProxyHandle;
   let port: number;
   let ipv6Port: number;
 
   async function listen(host: string): Promise<number> {
     const server = createServer((incoming, response) => {
-      incoming.resume();
+      const chunks: Buffer[] = [];
+      incoming.on("data", (chunk: Buffer) => chunks.push(chunk));
       incoming.on("end", () => {
-        observed.push(incoming.url);
+        observed.push({
+          url: incoming.url,
+          body: Buffer.concat(chunks).toString(),
+          port: incoming.socket.remotePort,
+        });
         response.end("loopback-ok");
       });
     });
     servers.push(server);
-    return egress.listen(server, host);
+    server.listen(0, host);
+    await once(server, "listening");
+    const address = server.address();
+    if (!address || typeof address === "string") {
+      throw new Error("HTTP fixture did not bind a TCP port");
+    }
+    return address.port;
   }
 
   beforeAll(async () => {
     const caDir = tempDirs.make("openclaw-egress-http-");
-    proxy = await egress.createProxy(caDir, audit);
+    proxy = await startSecretEgressProxyServer({ caDir, onAudit: (event) => audit.push(event) });
     port = await listen("127.0.0.1");
     ipv6Port = await listen("::1");
   });
@@ -592,7 +794,9 @@ describe("secret egress plain HTTP", () => {
     await proxy.stop();
     for (const server of servers) {
       server.closeAllConnections();
-      await egress.closeServer(server);
+      await new Promise<void>((resolve) => {
+        server.close(() => resolve());
+      });
     }
   });
 
@@ -603,24 +807,50 @@ describe("secret egress plain HTTP", () => {
       chunks?: string[];
     } = {},
   ): Promise<{ status: number; body: string }> {
-    const response = await egress.proxyRequest(params.env ?? proxy.registerProcess().env, {
-      path: params.target ?? `http://localhost:${port}/ok`,
-      method: params.chunks ? "POST" : "GET",
-      chunks: params.chunks,
+    const env = params.env ?? proxy.registerProcess().env;
+    const endpoint = new URL(env.HTTP_PROXY!);
+    return await new Promise((resolve, reject) => {
+      const outgoing = httpRequest(
+        {
+          hostname: endpoint.hostname,
+          port: endpoint.port,
+          path: params.target ?? `http://localhost:${port}/ok`,
+          method: params.chunks ? "POST" : "GET",
+          agent: false,
+          headers: {
+            "Proxy-Authorization": `Basic ${Buffer.from(`openclaw:${endpoint.password}`).toString("base64")}`,
+          },
+        },
+        (response) => {
+          let body = "";
+          response.setEncoding("utf8");
+          response.on("data", (chunk: string) => {
+            body += chunk;
+          });
+          response.once("error", reject);
+          response.once("end", () => resolve({ status: response.statusCode ?? 0, body }));
+        },
+      );
+      outgoing.once("error", reject);
+      for (const chunk of params.chunks ?? []) {
+        outgoing.write(chunk);
+      }
+      outgoing.end();
     });
-    return egress.readResponse(response);
   }
 
   // Node's HTTP client honors NODE_USE_ENV_PROXY and uses absolute-form HTTP forwarding.
   // fetch's CONNECT transport exercises a different proxy entry point.
   const CHILD_REQUEST = `
   const http = require('node:http');
+  let port;
   const request = http.get(process.argv[1], response => {
     let body = '';
     response.setEncoding('utf8');
     response.on('data', chunk => body += chunk);
-    response.on('end', () => console.log(JSON.stringify({ status: response.statusCode, body })));
+    response.on('end', () => console.log(JSON.stringify({ status: response.statusCode, body, port })));
   });
+  request.on('socket', socket => socket.on('connect', () => { port = socket.localPort; }));
   request.on('error', error => { console.error(error.message); process.exitCode = 1; });
 `;
 
@@ -636,7 +866,8 @@ describe("secret egress plain HTTP", () => {
         : { status: 502, body: "Secret egress proxy refused the request.\n" },
     );
     if (permitted) {
-      expect(observed).toEqual(["/ok"]);
+      expect(observed).toHaveLength(1);
+      expect(observed[0]?.url).toBe("/ok");
       expect(audit).toEqual([
         { kind: "forwarded", host: host === "[::1]" ? "::1" : host, substituted: false },
       ]);
@@ -650,7 +881,9 @@ describe("secret egress plain HTTP", () => {
 
   it("refuses a loopback HTTP sentinel split across body chunks", async () => {
     const sentinel = mintSecretSentinel("synthetic-http-secret", { label: "http-refusal" });
-    const grant = proxy.registerProcess([egress.binding(sentinel)]);
+    const grant = proxy.registerProcess([
+      { name: "SERVICE_API_KEY", sentinel, allowedHosts: ["localhost"] },
+    ]);
     try {
       expect(
         await request({
@@ -668,11 +901,11 @@ describe("secret egress plain HTTP", () => {
   });
 
   it("refuses a real HTTP child outside the lockdown allowlist", async () => {
-    const lockdown = await egress.createProxy(
-      tempDirs.make("openclaw-egress-http-lockdown-"),
-      audit,
-      { allowedHosts: [] },
-    );
+    const lockdown = await startSecretEgressProxyServer({
+      caDir: tempDirs.make("openclaw-egress-http-lockdown-"),
+      allowedHosts: [],
+      onAudit: (event) => audit.push(event),
+    });
     const grant = lockdown.registerProcess();
     try {
       const result = await promisify(execFile)(
@@ -681,9 +914,10 @@ describe("secret egress plain HTTP", () => {
         { env: { SystemRoot: process.env.SystemRoot, ...grant.env } },
       );
       const response = JSON.parse(result.stdout);
-      const refusal =
-        'Host "127.0.0.1" is not in the secret egress proxy traffic allowlist. Add it to secrets.egressProxy.allowedHosts or bind a store secret to it with: openclaw secrets store set <NAME> --allow-host 127.0.0.1, then restart the Gateway.\n';
-      expect(response).toMatchObject({ status: 403, body: refusal });
+      expect(response.status).toBe(403);
+      expect(response.body).toBe(
+        'Host "127.0.0.1" is not in the secret egress proxy traffic allowlist. Add it to secrets.egressProxy.allowedHosts or bind a store secret to it with: openclaw secrets store set <NAME> --allow-host 127.0.0.1, then restart the Gateway.\n',
+      );
       expect(observed).toEqual([]);
       expect(audit).toEqual([
         { kind: "refused", host: "127.0.0.1", substituted: false, reason: "host-not-allowed" },

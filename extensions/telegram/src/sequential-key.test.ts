@@ -1,5 +1,5 @@
 import type { Chat, Message } from "grammy/types";
-import { describe, expect, it } from "vitest";
+import { assert, describe, expect, it } from "vitest";
 import { buildTelegramApprovalCallbackData } from "./approval-callback-data.js";
 import { resolveTelegramForumFlag } from "./bot/helpers.js";
 import { getTelegramSequentialConstraints, getTelegramSequentialKey } from "./sequential-key.js";
@@ -22,9 +22,10 @@ const forumMessage = (text: string) =>
   });
 const groupMessage = (id: number, extra: Partial<Message> = {}) =>
   mockMessage({ chat: mockChat({ id, type: "supergroup" }), ...extra });
-const callback = (id: number, data: string) => ({
-  update: { callback_query: { message: mockMessage({ chat: mockChat({ id }) }), data } },
-});
+const callback = (id: number, data: string | undefined) => {
+  assert(data, "expected callback data");
+  return { update: { callback_query: { message: mockMessage({ chat: mockChat({ id }) }), data } } };
+};
 
 const addressed = (text: string) => ({
   me: { username: "openclaw_bot" } as never,

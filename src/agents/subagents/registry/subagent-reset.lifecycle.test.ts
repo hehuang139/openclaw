@@ -68,7 +68,11 @@ function expectResetResponse(respond: ReturnType<typeof vi.fn>, ok: boolean) {
   );
 }
 
-function resetRpc(respond: ReturnType<typeof vi.fn>) {
+function resetRpc(
+  respond: Parameters<
+    NonNullable<(typeof sessionMutationHandlers)["sessions.reset"]>
+  >[0]["respond"],
+) {
   return sessionMutationHandlers["sessions.reset"]!({
     params: { key: parentKey },
     context: createChatAbortContext({

@@ -208,7 +208,7 @@ it("preserves non-interactive updater failures", async () => {
 
 it("exports the final managed failure after cleanup without launching triage", async () => {
   const { target, contextPath } = await createManagedTriageTarget();
-  const result = {
+  const result: ReturnType<typeof resultFixture> = {
     ...failedUpdate,
     after: { version: "2026.9.1" },
     recovery: { serviceRestartSafe: true, version: "2026.9.1" },
@@ -265,7 +265,7 @@ it("leaves the outer managed export untouched in a post-core child", async () =>
 
 it("leaves triage to the owner for a managed helper child", async () => {
   const target = await createInstalledTriage();
-  target.env.OPENCLAW_UPDATE_RUN_HANDOFF = "1";
+  Object.assign(target.env, { OPENCLAW_UPDATE_RUN_HANDOFF: "1" });
   await expect(
     failUpdate(target, {}, new UpdateCommandFailure(failedUpdate, 80)),
   ).rejects.toMatchObject({ code: 80 });
