@@ -3084,6 +3084,39 @@ describe("scripts/lib/ci-node-test-plan.mts", () => {
     }
   });
 
+  it("keeps full locale finalizer proof in manual plans and fast locale contracts in PR plans", () => {
+    const proof = "test/scripts/control-ui-locale-finalizer.test.ts";
+    const fast = "test/scripts/control-ui-locale-refresh.test.ts";
+    const direct = buildVitestRunPlans([proof]);
+    expect(direct).toHaveLength(1);
+    expect([...(direct[0]?.forwardedArgs ?? []), ...(direct[0]?.includePatterns ?? [])]).toContain(
+      proof,
+    );
+    const owners = (plan: ReturnType<typeof createNodeTestShards>, file: string) => {
+      const rawConfig = expectDefined(buildVitestRunPlans([file])[0]?.config, file);
+      const config = resolveCanonicalNodeTestConfig(file, rawConfig) ?? rawConfig;
+      return plan.filter(
+        (shard) =>
+          shard.configs.includes(config) &&
+          (!shard.includePatterns ||
+            shard.includePatterns.some((pattern) => matchesGlob(file, pattern))),
+      );
+    };
+    expect(owners(defaultShards, proof)).toHaveLength(1);
+    const pr = createNodeTestShards({ compactMode: "pull-request", changedPaths: [proof, fast] });
+    expect(owners(pr, proof)).toHaveLength(0);
+    expect(owners(pr, fast)).toHaveLength(1);
+    const selected = expectDefined(
+      createSelectedNodeTestShardBundles([proof, fast], {
+        runnerBackend: "github",
+      }),
+      "precise locale PR plan",
+    );
+    expect(
+      selected.flatMap((job) => job.groups.flatMap((group) => group.includePatterns ?? [])),
+    ).toEqual([fast]);
+  });
+
   it("retains recovery contracts in their main, PR, and manual Node tiers", () => {
     const proofFiles = ["src/gateway/server.codex-failure-recovery.test.ts"];
     const files = (mode: "push" | "pull-request") =>
@@ -3378,7 +3411,7 @@ describe("scripts/lib/ci-node-test-plan.mts", () => {
     expect(groups.flatMap((group) => group.includePatterns ?? []).toSorted()).toEqual(
       targets.toSorted(),
     );
-    // Selection retains full-plan concurrency. Unrelated inventory may move these
+    // Selection retains overlap only for multiple groups. Unrelated inventory may move these
     // groups into serial Gateway templates; fixed-inventory coverage below proves
     // parallel capacity is retained when the canonical templates permit it.
     for (const job of plan) {
@@ -3618,6 +3651,110 @@ describe("scripts/lib/ci-node-test-plan.mts", () => {
     }
   });
 
+  it("serializes a selected singleton without expanding its worker allowance", async () => {
+    const target = "src/gateway/client-callsites.guard.test.ts";
+    const config = "test/vitest/vitest.gateway-client.config.ts";
+    const infraConfig = "test/vitest/vitest.infra.config.ts";
+    const gatewayFiles = [
+      "src/gateway/client.fixture-a.test.ts",
+      target,
+      "src/gateway/client.fixture-b.test.ts",
+    ];
+    const infraFiles = ["src/infra/env.test.ts"];
+    vi.resetModules();
+    vi.doMock("../vitest/vitest.test-shards.mjs", async (importOriginal) => ({
+      ...(await importOriginal<typeof import("../vitest/vitest.test-shards.mjs")>()),
+      fullSuiteVitestShards: [
+        { name: "core-runtime", config: infraConfig, projects: [infraConfig] },
+        { name: "agentic", config, projects: [config] },
+      ],
+    }));
+    vi.doMock("../../scripts/lib/list-test-files.mts", async (importOriginal) => ({
+      ...(await importOriginal<typeof import("../../scripts/lib/list-test-files.mts")>()),
+      listTrackedTestFiles: (root: string) =>
+        root === "src/gateway"
+          ? gatewayFiles
+          : root === "src/infra"
+            ? infraFiles
+            : root === "." || root === "src"
+              ? [...gatewayFiles, ...infraFiles]
+              : [],
+    }));
+    vi.doMock("../../scripts/lib/ci-test-timings.mts", async (importOriginal) => ({
+      ...(await importOriginal<typeof import("../../scripts/lib/ci-test-timings.mts")>()),
+      readCompactGroupTimings: () => ({
+        "agentic-gateway-core-1": 128,
+        "agentic-gateway-core-2": 128,
+        "agentic-gateway-core-3": 128,
+        "core-runtime-infra-env-auth": 128,
+      }),
+      readRuntimePlacementTimings: () => [],
+    }));
+    vi.doMock("../../scripts/lib/vitest-shard-metadata.mts", async (importOriginal) => ({
+      ...(await importOriginal<typeof import("../../scripts/lib/vitest-shard-metadata.mts")>()),
+      estimateVitestTestFileSeconds: () => 3,
+    }));
+    vi.doMock("../../scripts/lib/vitest-build-prerequisites.mts", async (importOriginal) => ({
+      ...(await importOriginal<
+        typeof import("../../scripts/lib/vitest-build-prerequisites.mts")
+      >()),
+      resolveVitestPretestBuildMode: () => undefined,
+    }));
+    try {
+      const {
+        createSelectedNodeTestShardBundles: createSelected,
+        createNodeTestShardBundles: createBundles,
+      } = await import("../../scripts/lib/ci-node-test-plan.mts");
+      const options = {
+        runnerBackend: "hybrid",
+        includeReleaseOnlyPluginShards: false,
+        includeProofTests: false,
+        changedPaths: [target],
+      };
+      const full = createBundles({ ...options, compactMode: "pull-request" });
+      const original = expectDefined(
+        full.find((job) => job.groups.some((group) => group.includePatterns?.includes(target))),
+        "parallel canonical owner",
+      );
+      expect(original.planConcurrency).toBe(2);
+      expect(original.groups).toHaveLength(2);
+      const owner = expectDefined(
+        original.groups.find((group) => group.includePatterns?.includes(target)),
+        "fallback worker owner",
+      );
+      expect(owner.fallbackMaxWorkers).toBe(2);
+      expect(owner.env?.OPENCLAW_VITEST_MAX_WORKERS).toBeUndefined();
+      const selected = expectDefined(createSelected([target], options), "selected singleton");
+      expect(selected).toHaveLength(1);
+      expect(selected[0]).toMatchObject({
+        runner: "blacksmith-16vcpu-ubuntu-2404",
+        planConcurrency: 1,
+        requiresDist: false,
+        env: { OPENCLAW_VITEST_MAX_WORKERS: "2" },
+      });
+      expect(selected[0]!.groups).toHaveLength(1);
+      expect(selected[0]!.groups[0]).toMatchObject({
+        configs: [config],
+        includePatterns: [target],
+        fallbackMaxWorkers: 2,
+      });
+      expect(selected[0]!.groups[0]!.env).toEqual(owner.env);
+      expect(selected[0]!.groups[0]!.minTotalMemoryBytes).toBe(owner.minTotalMemoryBytes);
+      expect(selected[0]!.pretestBuildMode).toBe(original.pretestBuildMode);
+      expect(selected[0]!.timeoutMinutes).toBe(original.timeoutMinutes);
+      // Retain the existing conservative rounding of the canonical group price.
+      expect(selected[0]!.predictedSeconds).toBe(129);
+      expect(selected[0]!.predictedTestSeconds).toBe(129);
+    } finally {
+      vi.doUnmock("../../scripts/lib/vitest-build-prerequisites.mts");
+      vi.doUnmock("../../scripts/lib/vitest-shard-metadata.mts");
+      vi.doUnmock("../../scripts/lib/ci-test-timings.mts");
+      vi.doUnmock("../../scripts/lib/list-test-files.mts");
+      vi.doUnmock("../vitest/vitest.test-shards.mjs");
+      vi.resetModules();
+    }
+  });
+
   it.each(["blacksmith", "hybrid"])(
     "retains parallel capacity and ordered wall budgets for selected %s files",
     async (runnerBackend) => {
@@ -3678,7 +3815,10 @@ describe("scripts/lib/ci-node-test-plan.mts", () => {
         );
         // The selected 170/170/160 envelopes fit the aggregate limit but need 330 seconds together.
         expect(selected).toHaveLength(2);
-        expect(selected.every((job) => job.planConcurrency === 2)).toBe(true);
+        expect(selected.map((job) => job.groups.length).toSorted((a, b) => a - b)).toEqual([1, 2]);
+        expect(
+          selected.map((job) => job.planConcurrency).toSorted((a, b) => (a ?? 0) - (b ?? 0)),
+        ).toEqual([1, 2]);
         for (const job of selected) {
           expect(job.runner).toBe("blacksmith-32vcpu-ubuntu-2404");
           for (const group of job.groups) {
@@ -3692,7 +3832,12 @@ describe("scripts/lib/ci-node-test-plan.mts", () => {
               original.groups.find((entry) => entry.shard_name === group.shard_name),
               "canonical group",
             );
-            expect(job.planConcurrency).toBe(original.planConcurrency);
+            expect(job.planConcurrency).toBe(
+              job.groups.length === 1 ? 1 : original.planConcurrency,
+            );
+            expect(job.env).toEqual(
+              job.groups.length === 1 ? { OPENCLAW_VITEST_MAX_WORKERS: "2" } : original.env,
+            );
             expect(group.env).toEqual(owner.env);
             expect(group.fallbackMaxWorkers).toBe(owner.fallbackMaxWorkers);
           }
