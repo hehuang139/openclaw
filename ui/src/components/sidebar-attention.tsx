@@ -1,4 +1,4 @@
-import { createEffect, createMemo, createSignal, flush, onCleanup, Show } from "solid-js";
+import { createMemo, createSignal, flush, onCleanup, Show } from "solid-js";
 import type { NavigationRouteId } from "../app-navigation.ts";
 import type { ApplicationContext } from "../app/context-types.ts";
 import type { ExecApprovalDecision } from "../app/exec-approval.ts";
@@ -10,6 +10,7 @@ import { projectGateway, projectSidebarAttention } from "../lib/reactive/applica
 import { useApplication, useOptionalApplication } from "../lib/reactive/context.ts";
 import { registerEnglishCatalog, t } from "../lib/reactive/i18n.ts";
 import { listen } from "../lib/reactive/listener.ts";
+import { createScrollStateRef } from "../lib/reactive/scroll-state.ts";
 import { defineSolidBridge } from "../lib/solid-bridge.ts";
 import "../styles/sidebar-attention-floating.css";
 import { CUSTODIAN_PANEL_TOGGLE_EVENT } from "./panel-toggle-contract.ts";
@@ -87,10 +88,16 @@ function renderSidebarAttentionContent(props: SidebarAttentionProps, host: HTMLE
     return wasOpen;
   });
 
-  const syncOverflowCue = () => {
-    setOverflowAbove(Boolean(list && list.scrollTop > 2));
-    setOverflowBelow(Boolean(list && list.scrollHeight - list.scrollTop - list.clientHeight > 2));
+  const syncOverflowCue = (element: HTMLElement | null) => {
+    setOverflowAbove(Boolean(element && element.scrollTop > 2));
+    setOverflowBelow(
+      Boolean(element && element.scrollHeight - element.scrollTop - element.clientHeight > 2),
+    );
   };
+  const observeListScroll = createScrollStateRef(syncOverflowCue, {
+    presented: panelOpen,
+    content: () => [selectedTab(), attention.read()],
+  });
   const preloadPanel = () => {
     void panelLoad.load().catch(() => undefined);
   };
@@ -130,7 +137,7 @@ function renderSidebarAttentionContent(props: SidebarAttentionProps, host: HTMLE
       if (list) {
         list.scrollTop = 0;
       }
-      syncOverflowCue();
+      syncOverflowCue(list);
     });
   }
   async function open(item: SidebarAttentionItem) {
@@ -213,14 +220,6 @@ function renderSidebarAttentionContent(props: SidebarAttentionProps, host: HTMLE
     remaining[Math.min(Math.max(rowIndex, 0), remaining.length - 1)]?.focus();
   }
 
-  createEffect(
-    () => [panelOpen(), selectedTab(), attention.read()],
-    ([isOpen]) => {
-      if (isOpen) {
-        syncOverflowCue();
-      }
-    },
-  );
   onCleanup(listen(document, "pointerdown", handleOutsideInteraction, true));
   onCleanup(listen(document, "keydown", handleOutsideInteraction, true));
   onCleanup(listen(window, "blur", handleWindowBlur));
@@ -276,8 +275,12 @@ function renderSidebarAttentionContent(props: SidebarAttentionProps, host: HTMLE
               (props.onNavigate ?? context.navigate)(route, options);
             }}
             onOpen={(item) => void open(item)}
-            onScroll={syncOverflowCue}
-            listRef={(element) => (list = element)}
+            listRef={(element) => {
+              list = element;
+              if (element) {
+                observeListScroll(element);
+              }
+            }}
             focusRef={(registry) => (panelFocus = registry)}
             onSelectTab={selectTab}
             overflowAbove={overflowAbove()}
