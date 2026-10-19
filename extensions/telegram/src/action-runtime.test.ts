@@ -50,6 +50,13 @@ describe("Telegram registered action authority and input contracts", () => {
       conversationReadOrigin: "direct-operator",
       ...context,
     });
+  const poll = { question: "Ready?", answers: ["Yes", "No"] };
+  const react = (
+    params: Record<string, unknown> = {},
+    context: Partial<ChannelMessageActionContext> = {},
+  ) => invoke("react", { chatId: "123", messageId: 456, emoji: "👍", ...params }, context);
+  const expectMethods = (methods: string[]) =>
+    expect(requests.map(({ method }) => method)).toEqual(methods);
 
   beforeEach(async () => {
     env = captureEnv(["TELEGRAM_BOT_TOKEN"]);
@@ -74,25 +81,15 @@ describe("Telegram registered action authority and input contracts", () => {
   });
 
   it.for([
-    {
-      action: "poll",
-      params: { question: "Ready?", answers: ["Yes", "No"] },
-      method: "sendPoll",
-      revoke: false,
-    },
-    {
-      action: "poll",
-      params: { question: "Ready?", answers: ["Yes", "No"] },
-      method: "sendPoll",
-      revoke: true,
-    },
-    { action: "sticker", params: { fileId: "fixture-sticker" }, revoke: true },
-    { action: "topic-create", params: { name: "Guarded topic" }, revoke: true },
-    { action: "topic-edit", params: { threadId: 77, name: "Guarded topic" }, revoke: true },
-    { action: "react", params: { messageId: 456, emoji: "👍" }, revoke: true },
+    ["poll", poll, false],
+    ["poll", poll, true],
+    ["sticker", { fileId: "fixture-sticker" }, true],
+    ["topic-create", { name: "Guarded topic" }, true],
+    ["topic-edit", { threadId: 77, name: "Guarded topic" }, true],
+    ["react", { messageId: 456, emoji: "👍" }, true],
   ] as const)(
-    "retains host authority after $action chat lookup (revoked: $revoke)",
-    async (testCase, { signal }) => {
+    "retains host authority after chat lookup: %j",
+    async ([action, params, revoke], { signal }) => {
       cfg.channels!.telegram!.actions = {
         sticker: true,
         createForumTopic: true,
@@ -108,8 +105,8 @@ describe("Telegram registered action authority and input contracts", () => {
       fixture.requestHold = held;
       let current = true;
       const pending = invoke(
-        testCase.action,
-        { to: "@retirement_fixture", ...testCase.params },
+        action,
+        { to: "@retirement_fixture", ...params },
         {
           assertDirectAdapterHandoff: () => {
             signal.throwIfAborted();
@@ -127,15 +124,15 @@ describe("Telegram registered action authority and input contracts", () => {
         expect(requests).toEqual([
           { method: "getChat", fields: { chat_id: "@retirement_fixture" } },
         ]);
-        current = !testCase.revoke;
+        current = !revoke;
         held.release.resolve();
-        if (!testCase.revoke) {
+        if (!revoke) {
           await expect(pending).resolves.toMatchObject({ details: { ok: true } });
-          expect(requests.map(({ method }) => method)).toEqual(["getChat", testCase.method]);
+          expectMethods(["getChat", "sendPoll"]);
         } else {
           await pending.catch(() => undefined);
           const requestDescription = `Observed Telegram endpoints: ${requests.map(({ method }) => method).join(", ")}`;
-          if (testCase.action === "react") {
+          if (action === "react") {
             await expect(pending, requestDescription).resolves.toMatchObject({
               details: { ok: false, reason: "error", hint: "Reaction failed. Do not retry." },
             });
@@ -144,7 +141,7 @@ describe("Telegram registered action authority and input contracts", () => {
               "Telegram action owner retired",
             );
           }
-          expect(requests.map(({ method }) => method)).toEqual(["getChat"]);
+          expectMethods(["getChat"]);
         }
       } finally {
         current = false;
@@ -254,7 +251,7 @@ describe("Telegram registered action authority and input contracts", () => {
     ).rejects.toThrow(/provider-observed binding/);
     expect(requests).toEqual([]);
     await invoke("delete", params, trusted);
-    expect(requests.map(({ method }) => method)).toEqual(["deleteMessage"]);
+    expectMethods(["deleteMessage"]);
   });
 
   it("retains account- and topic-bound historical authority after the cache restarts", async () => {
@@ -359,7 +356,7 @@ describe("Telegram registered action authority and input contracts", () => {
       actions: { reactions: false },
       accounts: { kitt: { botToken: "654321:default-kitt", actions: { reactions: true } } },
     };
-    await invoke("react", { chatId: "123", messageId: 456, emoji: "👍" });
+    await react();
     expect(endpoints).toEqual(["/bot654321:default-kitt/setMessageReaction"]);
   });
 
@@ -380,13 +377,13 @@ describe("Telegram registered action authority and input contracts", () => {
             ],
           }
         : undefined;
-    const result = await invoke("react", { chatId: "123", messageId: 456, emoji: "✅" });
+    const result = await react({ emoji: "✅" });
     expect(result.details).toMatchObject({ ok: false });
     const details = JSON.stringify(result.details);
     expect(details).toContain("👍");
     expect(details).toContain("9018");
     expect(details).not.toContain("9019");
-    expect(requests.map(({ method }) => method)).toEqual(["setMessageReaction", "getChat"]);
+    expectMethods(["setMessageReaction", "getChat"]);
   });
 
   it.each([false, true])(
@@ -396,7 +393,7 @@ describe("Telegram registered action authority and input contracts", () => {
         "Bad Request: REACTION_INVALID",
         ...(failed ? ["Bad Request: chat not found"] : []),
       );
-      const result = await invoke("react", { chatId: "123", messageId: 456, emoji: "✅" });
+      const result = await react({ emoji: "✅" });
       expect(result.details).toMatchObject({ ok: false });
       expect(JSON.stringify(result.details).includes("This chat allows:")).toBe(!failed);
     },
@@ -445,35 +442,25 @@ describe("Telegram registered action authority and input contracts", () => {
   });
 
   it.each([
-    { action: "send", params: { to: "123" }, error: /content required/i },
-    {
-      action: "poll",
-      params: {
-        to: "123",
-        question: "Ready?",
-        answers: ["Yes", "No"],
-        pollAnonymous: true,
-        pollPublic: true,
-      },
-      error: /mutually exclusive/i,
-    },
-    {
-      action: "send",
-      params: {
+    ["send", { to: "123" }, /content required/i],
+    ["poll", { to: "123", ...poll, pollAnonymous: true, pollPublic: true }, /mutually exclusive/i],
+    [
+      "send",
+      {
         to: "123",
         location: { latitude: 1, longitude: 2 },
         presentation: { blocks: [{ type: "text", text: "caption" }] },
       },
-      error: /cannot be combined/,
-    },
-    {
-      action: "send",
-      params: { to: "123", message: "choose", buttons: '[[{"text":"Yes","callback_data":"yes"}]]' },
-      error: /native "buttons" is unsupported/,
-    },
+      /cannot be combined/,
+    ],
+    [
+      "send",
+      { to: "123", message: "choose", buttons: '[[{"text":"Yes","callback_data":"yes"}]]' },
+      /native "buttons" is unsupported/,
+    ],
   ] as const)(
-    "rejects invalid external $action input before network delivery: $error",
-    async ({ action, params, error }) => {
+    "rejects invalid external %s input before network delivery: %j",
+    async (action, params, error) => {
       cfg.channels!.telegram!.actions = { sticker: true };
       await expect(invoke(action, params)).rejects.toThrow(error);
       expect(requests).toEqual([]);
@@ -490,9 +477,9 @@ describe("Telegram registered action authority and input contracts", () => {
   });
 
   it.each([undefined, 456.5])("soft-fails invalid reaction message ids (%s)", async (messageId) => {
-    await expect(invoke("react", { chatId: "123", messageId, emoji: "👍" })).resolves.toMatchObject(
-      { details: { ok: false, reason: "missing_message_id" } },
-    );
+    await expect(react({ messageId })).resolves.toMatchObject({
+      details: { ok: false, reason: "missing_message_id" },
+    });
     expect(requests).toEqual([]);
   });
 
@@ -504,26 +491,20 @@ describe("Telegram registered action authority and input contracts", () => {
         reactionLevel: policy === "action" ? "minimal" : policy,
         actions: { reactions: policy !== "action" },
       };
-      await expect(
-        invoke("react", { chatId: "123", messageId: 456, emoji: "👍" }),
-      ).resolves.toMatchObject({ details: { ok: false, reason: "disabled" } });
+      await expect(react()).resolves.toMatchObject({ details: { ok: false, reason: "disabled" } });
       expect(requests).toEqual([]);
     },
   );
 
   it.each([
-    { action: "send", params: { to: "123", message: "hello" }, gate: "sendMessage" },
-    {
-      action: "poll",
-      params: { to: "123", question: "Ready?", answers: ["Yes", "No"] },
-      gate: "poll",
-    },
-    { action: "delete", params: { chatId: "123", messageId: 456 }, gate: "deleteMessage" },
-    { action: "emoji-list", params: { chatId: "123" }, gate: "reactions" },
-    { action: "sticker", params: { to: "123", fileId: "sticker" }, gate: "sticker" },
+    ["send", { to: "123", message: "hello" }, "sendMessage"],
+    ["poll", { to: "123", ...poll }, "poll"],
+    ["delete", { chatId: "123", messageId: 456 }, "deleteMessage"],
+    ["emoji-list", { chatId: "123" }, "reactions"],
+    ["sticker", { to: "123", fileId: "sticker" }, "sticker"],
   ] as const)(
-    "enforces registered $action gates before provider execution",
-    async ({ action, params, gate }) => {
+    "enforces registered %s gates before provider execution",
+    async (action, params, gate) => {
       cfg.channels!.telegram!.actions = { [gate]: false };
       await expect(invoke(action, params)).rejects.toThrow(/disabled/i);
       expect(requests).toEqual([]);

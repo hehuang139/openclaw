@@ -1,6 +1,6 @@
-// Telegram tests cover account throttler plugin behavior.
 import { createRequire } from "node:module";
 import { Api } from "grammy";
+import { createDeferred as deferred } from "openclaw/plugin-sdk/extension-shared";
 import { assert, beforeEach, describe, expect, it, vi } from "vitest";
 import { getOrCreateAccountThrottler, runReplaceableTelegramRequest } from "./account-throttler.js";
 import { asTelegramClientFetch } from "./client-fetch.js";
@@ -32,12 +32,58 @@ function callLooseSendMessage(
   return loose(prev, "sendMessage", payload, undefined);
 }
 
-function deferred<T>() {
-  let resolve: (value: T) => void;
-  const promise = new Promise<T>((innerResolve) => {
-    resolve = innerResolve;
+const response = (body: unknown) => new Response(JSON.stringify(body));
+const messageBody = (
+  chatId: number,
+  text: string | undefined,
+  messageId: number,
+  privateChat = false,
+) => ({
+  ok: true,
+  result: {
+    message_id: messageId,
+    date: 0,
+    text,
+    chat: privateChat
+      ? { id: chatId, type: "private", first_name: "Fixture" }
+      : { id: chatId, type: "supergroup", title: "Topics" },
+  },
+});
+const messageResponse = (...args: Parameters<typeof messageBody>) => response(messageBody(...args));
+
+function createApi(
+  token: string,
+  directUrl: boolean,
+  fetch: Parameters<typeof asTelegramClientFetch>[0],
+) {
+  const api = new Api(`123:${token}`, {
+    fetch: asTelegramClientFetch(fetch),
+    ...(directUrl
+      ? { buildUrl: (root: string, _token: string, method: string) => `${root}/${method}` }
+      : {}),
   });
-  return { promise, resolve: resolve! };
+  api.config.use(getOrCreateAccountThrottler(token).transformer);
+  return api;
+}
+function laneProbe(
+  token: string,
+  format: (payload: { message_id?: number; message_thread_id?: string; text?: string }) => string,
+) {
+  const firstGate = deferred<void>();
+  const entered: string[] = [];
+  const throttler = getOrCreateAccountThrottler(
+    token,
+    () => async (prev, method, payload, signal) => prev(method, payload, signal),
+  ).transformer;
+  const prev = vi.fn(async (_method: string, payload: unknown) => {
+    const request = payload as Parameters<typeof format>[0];
+    entered.push(format(request));
+    if (entered.length === 1) {
+      await firstGate.promise;
+    }
+    return { ok: true, result: request.text ?? "" };
+  }) as unknown as TelegramPreviousCall;
+  return { firstGate, entered, throttler, prev };
 }
 
 describe("getOrCreateAccountThrottler", () => {
@@ -48,30 +94,24 @@ describe("getOrCreateAccountThrottler", () => {
   it("preserves the group message budget while sending topic actions", async () => {
     vi.useFakeTimers();
     const sent: string[] = [];
-    const api = new Api("123:typing-budget", {
-      buildUrl: (root, _token, method) => `${root}/${method}`,
-      fetch: asTelegramClientFetch(async (input: unknown) => {
-        assert(typeof input === "string");
-        const url = input;
-        const method = url.slice(url.lastIndexOf("/") + 1);
-        sent.push(method);
-        return new Response(
-          JSON.stringify({
-            ok: true,
-            result:
-              method === "sendChatAction"
-                ? true
-                : {
-                    message_id: sent.length,
-                    date: 0,
-                    chat: { id: -100123, type: "supergroup", title: "Topics" },
-                    text: "Complete",
-                  },
-          }),
-        );
-      }),
+    const api = createApi("typing-budget", true, async (input: unknown) => {
+      assert(typeof input === "string");
+      const url = input;
+      const method = url.slice(url.lastIndexOf("/") + 1);
+      sent.push(method);
+      return response({
+        ok: true,
+        result:
+          method === "sendChatAction"
+            ? true
+            : {
+                message_id: sent.length,
+                date: 0,
+                chat: { id: -100123, type: "supergroup", title: "Topics" },
+                text: "Complete",
+              },
+      });
     });
-    api.config.use(getOrCreateAccountThrottler("typing-budget").transformer);
     const actions = Array.from({ length: 21 }, (_, index) =>
       api.sendChatAction(-100123, "typing", { message_thread_id: index + 1 }),
     );
@@ -96,12 +136,10 @@ describe("getOrCreateAccountThrottler", () => {
     let sent = 0;
     const fetch = asTelegramClientFetch(async () => {
       sent++;
-      return new Response(
-        JSON.stringify(
-          sent <= 10
-            ? { ok: false, error_code: 401, description: "Unauthorized" }
-            : { ok: true, result: true },
-        ),
+      return response(
+        sent <= 10
+          ? { ok: false, error_code: 401, description: "Unauthorized" }
+          : { ok: true, result: true },
       );
     });
     const first = new Api("123:shared-failures", { fetch });
@@ -146,17 +184,15 @@ describe("getOrCreateAccountThrottler", () => {
     const api = new Api("123:queued-failure", {
       fetch: asTelegramClientFetch(async () => {
         sent.push(Date.now() - startedAt);
-        return new Response(
-          JSON.stringify(
-            sent.length === 1
-              ? {
-                  ok: false,
-                  error_code: errorCode,
-                  description: errorCode === 429 ? "Too Many Requests" : "Unauthorized",
-                  ...(errorCode === 429 ? { parameters: { retry_after: 20 } } : {}),
-                }
-              : { ok: true, result: true },
-          ),
+        return response(
+          sent.length === 1
+            ? {
+                ok: false,
+                error_code: errorCode,
+                description: errorCode === 429 ? "Too Many Requests" : "Unauthorized",
+                ...(errorCode === 429 ? { parameters: { retry_after: 20 } } : {}),
+              }
+            : { ok: true, result: true },
         );
       }),
     });
@@ -197,19 +233,14 @@ describe("getOrCreateAccountThrottler", () => {
   it("releases a topic action canceled during authorization backoff", async () => {
     vi.useFakeTimers();
     let sent = 0;
-    const api = new Api("123:canceled-backoff", {
-      fetch: asTelegramClientFetch(async () => {
-        sent++;
-        return new Response(
-          JSON.stringify(
-            sent === 1
-              ? { ok: false, error_code: 401, description: "Unauthorized" }
-              : { ok: true, result: true },
-          ),
-        );
-      }),
+    const api = createApi("canceled-backoff", false, async () => {
+      sent++;
+      return response(
+        sent === 1
+          ? { ok: false, error_code: 401, description: "Unauthorized" }
+          : { ok: true, result: true },
+      );
     });
-    api.config.use(getOrCreateAccountThrottler("canceled-backoff").transformer);
     const first = api.sendChatAction(-100123, "typing", { message_thread_id: 1 });
     const failed = expect(first).rejects.toThrow("Unauthorized");
     await vi.advanceTimersByTimeAsync(0);
@@ -247,21 +278,16 @@ describe("getOrCreateAccountThrottler", () => {
       const authorization = queue === "authorization queue";
       const held = deferred<Response>();
       let sent = 0;
-      const api = new Api("123:queued-wait", {
-        fetch: asTelegramClientFetch(async () => {
-          sent++;
-          if (authorization && sent === 1) {
-            return new Response(
-              JSON.stringify({ ok: false, error_code: 401, description: "Unauthorized" }),
-            );
-          }
-          if (sent === (authorization ? 2 : 1)) {
-            return held.promise;
-          }
-          return new Response(JSON.stringify({ ok: true, result: true }));
-        }),
+      const api = createApi("queued-wait", false, async () => {
+        sent++;
+        if (authorization && sent === 1) {
+          return response({ ok: false, error_code: 401, description: "Unauthorized" });
+        }
+        if (sent === (authorization ? 2 : 1)) {
+          return held.promise;
+        }
+        return response({ ok: true, result: true });
       });
-      api.config.use(getOrCreateAccountThrottler("queued-wait").transformer);
       if (authorization) {
         const failed = expect(api.sendChatAction(-100123, "typing")).rejects.toThrow(
           "Unauthorized",
@@ -289,12 +315,12 @@ describe("getOrCreateAccountThrottler", () => {
         await vi.advanceTimersByTimeAsync(0);
         expect(settled).toHaveBeenCalledOnce();
         expect(sent).toBe(authorization ? 2 : 1);
-        held.resolve(new Response(JSON.stringify({ ok: true, result: true })));
+        held.resolve(response({ ok: true, result: true }));
         await vi.advanceTimersByTimeAsync(2_000);
         await Promise.all([predecessor, successor]);
         expect(sent).toBe(authorization ? 3 : 2);
       } finally {
-        held.resolve(new Response(JSON.stringify({ ok: true, result: true })));
+        held.resolve(response({ ok: true, result: true }));
         await vi.advanceTimersByTimeAsync(10_000);
         await Promise.all([predecessor, outcome, successor]);
         vi.useRealTimers();
@@ -308,7 +334,7 @@ describe("getOrCreateAccountThrottler", () => {
     const api = new Api("123:canceled-actions", {
       fetch: asTelegramClientFetch(async () => {
         sent.push(Date.now());
-        return new Response(JSON.stringify({ ok: true, result: true }));
+        return response({ ok: true, result: true });
       }),
     });
     api.config.use((prev, method, payload, signal) => {
@@ -348,34 +374,24 @@ describe("getOrCreateAccountThrottler", () => {
     vi.useFakeTimers();
     const startedAt = Date.now();
     const sent: Array<{ chatId: number; text: string; at: number }> = [];
-    const api = new Api("123:flood-gate", {
-      buildUrl: (root, _token, method) => `${root}/${method}`,
-      fetch: asTelegramClientFetch(async (_input: unknown, init?: { body?: unknown }) => {
+    const api = createApi(
+      "flood-gate",
+      true,
+      async (_input: unknown, init?: { body?: unknown }) => {
         const body = JSON.parse(String(init?.body)) as { chat_id: number; text: string };
         sent.push({ chatId: body.chat_id, text: body.text, at: Date.now() - startedAt });
-        return new Response(
-          JSON.stringify(
-            sent.length === 1
-              ? {
-                  ok: false,
-                  error_code: 429,
-                  description: "Too Many Requests: retry after 7",
-                  parameters: { retry_after: 7 },
-                }
-              : {
-                  ok: true,
-                  result: {
-                    message_id: sent.length,
-                    date: 0,
-                    chat: { id: body.chat_id, type: "supergroup", title: "Topics" },
-                    text: body.text,
-                  },
-                },
-          ),
+        return response(
+          sent.length === 1
+            ? {
+                ok: false,
+                error_code: 429,
+                description: "Too Many Requests: retry after 7",
+                parameters: { retry_after: 7 },
+              }
+            : messageBody(body.chat_id, body.text, sent.length),
         );
-      }),
-    });
-    api.config.use(getOrCreateAccountThrottler("flood-gate").transformer);
+      },
+    );
     const final = api.sendMessage(-100111, "final answer", { message_thread_id: 5 });
     await vi.advanceTimersByTimeAsync(100);
     expect(sent.map(({ text }) => text)).toEqual(["final answer"]);
@@ -408,36 +424,26 @@ describe("getOrCreateAccountThrottler", () => {
     vi.useFakeTimers();
     const startedAt = Date.now();
     const sent: Array<{ method: string; at: number }> = [];
-    const api = new Api("123:typing-flood", {
-      buildUrl: (root, _token, method) => `${root}/${method}`,
-      fetch: asTelegramClientFetch(async (input: unknown, init?: { body?: unknown }) => {
+    const api = createApi(
+      "typing-flood",
+      true,
+      async (input: unknown, init?: { body?: unknown }) => {
         assert(typeof input === "string");
         const method = input.slice(input.lastIndexOf("/") + 1);
         const body = JSON.parse(String(init?.body)) as { chat_id: number; text?: string };
         sent.push({ method, at: Date.now() - startedAt });
-        return new Response(
-          JSON.stringify(
-            method === "sendChatAction"
-              ? {
-                  ok: false,
-                  error_code: 429,
-                  description: "Too Many Requests: retry after 6",
-                  parameters: { retry_after: 6 },
-                }
-              : {
-                  ok: true,
-                  result: {
-                    message_id: sent.length,
-                    date: 0,
-                    chat: { id: body.chat_id, type: "supergroup", title: "Topics" },
-                    text: body.text,
-                  },
-                },
-          ),
+        return response(
+          method === "sendChatAction"
+            ? {
+                ok: false,
+                error_code: 429,
+                description: "Too Many Requests: retry after 6",
+                parameters: { retry_after: 6 },
+              }
+            : messageBody(body.chat_id, body.text, sent.length),
         );
-      }),
-    });
-    api.config.use(getOrCreateAccountThrottler("typing-flood").transformer);
+      },
+    );
     try {
       await expect(api.sendChatAction(-100111, "typing")).rejects.toMatchObject({
         error_code: 429,
@@ -459,29 +465,19 @@ describe("getOrCreateAccountThrottler", () => {
     vi.useFakeTimers();
     const startedAt = Date.now();
     const sent: number[] = [];
-    const api = new Api("123:flood-bare", {
-      buildUrl: (root, _token, method) => `${root}/${method}`,
-      fetch: asTelegramClientFetch(async (_input: unknown, init?: { body?: unknown }) => {
+    const api = createApi(
+      "flood-bare",
+      true,
+      async (_input: unknown, init?: { body?: unknown }) => {
         const body = JSON.parse(String(init?.body)) as { chat_id: number; text: string };
         sent.push(Date.now() - startedAt);
-        return new Response(
-          JSON.stringify(
-            sent.length <= 2
-              ? { ok: false, error_code: 429, description: "Too Many Requests" }
-              : {
-                  ok: true,
-                  result: {
-                    message_id: sent.length,
-                    date: 0,
-                    chat: { id: body.chat_id, type: "supergroup", title: "Topics" },
-                    text: body.text,
-                  },
-                },
-          ),
+        return response(
+          sent.length <= 2
+            ? { ok: false, error_code: 429, description: "Too Many Requests" }
+            : messageBody(body.chat_id, body.text, sent.length),
         );
-      }),
-    });
-    api.config.use(getOrCreateAccountThrottler("flood-bare").transformer);
+      },
+    );
     const final = api.sendMessage(-100333, "final answer", { message_thread_id: 1 });
     try {
       await vi.advanceTimersByTimeAsync(100);
@@ -514,17 +510,16 @@ describe("getOrCreateAccountThrottler", () => {
     const shortFlood = deferred<Response>();
     const sentAt = new Map<number, number>();
     const flood = (retryAfter: number) =>
-      new Response(
-        JSON.stringify({
-          ok: false,
-          error_code: 429,
-          description: `Too Many Requests: retry after ${retryAfter}`,
-          parameters: { retry_after: retryAfter },
-        }),
-      );
-    const api = new Api("123:flood-overlap", {
-      buildUrl: (root, _token, method) => `${root}/${method}`,
-      fetch: asTelegramClientFetch(async (_input: unknown, init?: { body?: unknown }) => {
+      response({
+        ok: false,
+        error_code: 429,
+        description: `Too Many Requests: retry after ${retryAfter}`,
+        parameters: { retry_after: retryAfter },
+      });
+    const api = createApi(
+      "flood-overlap",
+      true,
+      async (_input: unknown, init?: { body?: unknown }) => {
         const body = JSON.parse(String(init?.body)) as { chat_id: number; text: string };
         if (!sentAt.has(body.chat_id)) {
           sentAt.set(body.chat_id, Date.now() - startedAt);
@@ -535,20 +530,9 @@ describe("getOrCreateAccountThrottler", () => {
             return await shortFlood.promise;
           }
         }
-        return new Response(
-          JSON.stringify({
-            ok: true,
-            result: {
-              message_id: 1,
-              date: 0,
-              chat: { id: body.chat_id, type: "private", first_name: "Fixture" },
-              text: body.text,
-            },
-          }),
-        );
-      }),
-    });
-    api.config.use(getOrCreateAccountThrottler("flood-overlap").transformer);
+        return messageResponse(body.chat_id, body.text, 1, true);
+      },
+    );
     const first = api.sendMessage(111, "first");
     const second = api.sendMessage(222, "second");
     try {
@@ -575,20 +559,10 @@ describe("getOrCreateAccountThrottler", () => {
   });
 
   it("uses edited message ids as lanes when Telegram omits topic ids", async () => {
-    const firstGate = deferred<void>();
-    const entered: string[] = [];
-    const throttler = getOrCreateAccountThrottler(
+    const { firstGate, entered, throttler, prev } = laneProbe(
       "edited-message",
-      () => async (prev, method, payload, signal) => prev(method, payload, signal),
-    ).transformer;
-    const prev = vi.fn(async (_method: string, payload: unknown) => {
-      const request = payload as { message_id?: number; text?: string };
-      entered.push(`${request.message_id}:${request.text}`);
-      if (entered.length === 1) {
-        await firstGate.promise;
-      }
-      return { ok: true, result: request.text ?? "" };
-    }) as unknown as TelegramPreviousCall;
+      (request) => `${request.message_id}:${request.text}`,
+    );
 
     const first = throttler(
       prev,
@@ -620,20 +594,10 @@ describe("getOrCreateAccountThrottler", () => {
   });
 
   it("does not group-throttle fractional chat ids", async () => {
-    const firstGate = deferred<void>();
-    const entered: string[] = [];
-    const throttler = getOrCreateAccountThrottler(
+    const { firstGate, entered, throttler, prev } = laneProbe(
       "direct-topic",
-      () => async (prev, method, payload, signal) => prev(method, payload, signal),
-    ).transformer;
-    const prev = vi.fn(async (_method: string, payload: unknown) => {
-      const request = payload as { text?: string };
-      entered.push(request.text ?? "");
-      if (entered.length === 1) {
-        await firstGate.promise;
-      }
-      return { ok: true, result: request.text ?? "" };
-    }) as unknown as TelegramPreviousCall;
+      (request) => request.text ?? "",
+    );
 
     const first = throttler(
       prev,
@@ -656,20 +620,10 @@ describe("getOrCreateAccountThrottler", () => {
   });
 
   it("uses strict decimal string ids for fair group lanes", async () => {
-    const firstGate = deferred<void>();
-    const entered: string[] = [];
-    const throttler = getOrCreateAccountThrottler(
+    const { firstGate, entered, throttler, prev } = laneProbe(
       "private-chat",
-      () => async (prev, method, payload, signal) => prev(method, payload, signal),
-    ).transformer;
-    const prev = vi.fn(async (_method: string, payload: unknown) => {
-      const request = payload as { message_thread_id?: string; text?: string };
-      entered.push(`${request.message_thread_id}:${request.text}`);
-      if (entered.length === 1) {
-        await firstGate.promise;
-      }
-      return { ok: true, result: request.text ?? "" };
-    }) as unknown as TelegramPreviousCall;
+      (request) => `${request.message_thread_id}:${request.text}`,
+    );
 
     const first = callLooseSendMessage(throttler, prev, {
       chat_id: "-100123",
