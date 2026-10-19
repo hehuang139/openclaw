@@ -808,21 +808,25 @@ suite.define(() => {
       // before measuring edits to an already-present draft.
       await waitForCommittedComposerDraft(page, scopeKey, "seed", 0);
       const scrollDuringWait = scrollAwayAndBack
-        ? page.locator(".chat-pane-cache__pane--active .chat-thread").evaluate(async (element) => {
-            const thread = element as HTMLElement;
-            const originalTop = thread.scrollTop;
+        ? (async () => {
+            const thread = page.locator(".chat-pane-cache__pane--active .chat-thread");
+            await thread.hover();
+            const originalTop = await thread.evaluate((element) => element.scrollTop);
             // Move during the stability sample, then restore its original geometry.
             await new Promise<void>((resolve) => {
-              globalThis.setTimeout(resolve, 100);
+              setTimeout(resolve, 100);
             });
-            thread.scrollTo({ top: originalTop - 8, behavior: "instant" });
-            await new Promise<void>((resolve) => {
-              requestAnimationFrame(() => resolve());
-            });
-            const awayTop = thread.scrollTop;
-            thread.scrollTo({ top: originalTop, behavior: "instant" });
-            return { originalTop, awayTop, restoredTop: thread.scrollTop };
-          })
+            // Reader input cancels pending composer end-follow before the native scroll.
+            await page.mouse.wheel(0, -8);
+            await expect
+              .poll(() => thread.evaluate((element) => element.scrollTop))
+              .toBeLessThan(originalTop);
+            return thread.evaluate((element, originalTop) => {
+              const awayTop = element.scrollTop;
+              element.scrollTo({ top: originalTop, behavior: "instant" });
+              return { originalTop, awayTop, restoredTop: element.scrollTop };
+            }, originalTop);
+          })()
         : Promise.resolve(null);
       // Finish startup scrolling before measuring steady-state composer invalidations.
       await waitForChatScrollIdle(page);
