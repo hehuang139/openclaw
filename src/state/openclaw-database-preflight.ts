@@ -24,12 +24,14 @@ import {
   recordAgentDatabaseAdmissions,
 } from "./agent-database-admission.js";
 import { getAgentDatabaseStartupAdmission } from "./agent-database-startup.js";
+import { readAgentDeletionRecoveryHoldsInWorker } from "./agent-deletion-journal.read.js";
 import type {
   AgentDeletionJournalDisposition,
   AgentDeletionJournalPurpose,
 } from "./agent-deletion-journal.types.js";
 import { isArtifactPreservingStateRead } from "./artifact-preserving-state-reads.js";
 import { OPENCLAW_AGENT_SCHEMA_VERSION } from "./openclaw-agent-db-contract.js";
+import { isSameOpenClawAgentDatabasePath } from "./openclaw-agent-db.paths.js";
 import { createAgentSchemaInspectionWorker } from "./openclaw-agent-schema-inspection-worker.js";
 import type { AgentSchemaInspection } from "./openclaw-agent-schema-inspection.js";
 import { preflightAgentDatabasesBounded } from "./openclaw-database-preflight-agent-scheduler.js";
@@ -133,11 +135,12 @@ export async function assertOpenClawDatabasesReady(
   const failures: unknown[] = [];
   for (const refusal of schemas.agentRefusals ?? []) {
     if (
-      !options.config ||
-      ((refusal.code === "agent-database-ownership-mismatch" ||
-        (options.operation === "gateway-startup" &&
-          refusal.code !== "agent-database-inspection-pending")) &&
-        !canIsolateAgentDatabase(options.config, refusal.agentId))
+      refusal.code !== "agent-database-recovery-held" &&
+      (!options.config ||
+        ((refusal.code === "agent-database-ownership-mismatch" ||
+          (options.operation === "gateway-startup" &&
+            refusal.code !== "agent-database-inspection-pending")) &&
+          !canIsolateAgentDatabase(options.config, refusal.agentId)))
     ) {
       failures.push(new AgentDatabaseAdmissionError(refusal));
     }
@@ -439,6 +442,7 @@ export async function preflightOpenClawDatabaseSchemas(
     return true;
   };
   const skipped = new Set<string>();
+  let recoveryHolds: ReturnType<typeof readAgentDeletionRecoveryHoldsInWorker> | undefined;
   const inspectionTargets = candidates
     .filter((row) => {
       if (
@@ -564,6 +568,34 @@ export async function preflightOpenClawDatabaseSchemas(
           }
         }
         if (agentVersion < supportedVersions.agent) {
+          // Healthy held stores retain runtime access; only Doctor may migrate a held store.
+          if (
+            purpose === "runtime" &&
+            row.agentId &&
+            (
+              await (recoveryHolds ??= readAgentDeletionRecoveryHoldsInWorker({
+                env: options.env,
+              }))
+            ).some(
+              (held) =>
+                held.agentId === row.agentId &&
+                isSameOpenClawAgentDatabasePath(held.path, realAgentPath),
+            )
+          ) {
+            const refusal = {
+              ...createAgentDatabaseInspectionRefusal({
+                agentId: row.agentId,
+                paths: [agentPath],
+                reason: `Agent ${row.agentId} database is held for deletion recovery at schema ${agentVersion}; migration to schema ${supportedVersions.agent} requires Doctor.`,
+              }),
+              code: "agent-database-recovery-held" as const,
+            };
+            (inspection.agentRefusals ??= []).push(refusal);
+            createSubsystemLogger("state/agent-admission").warn(
+              `${refusal.reason} ${refusal.repairHint}`,
+            );
+            return undefined;
+          }
           (inspection.pendingMigrations ??= []).push({
             kind: "agent",
             path: agentPath,

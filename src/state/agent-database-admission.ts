@@ -27,7 +27,10 @@ export type AgentDatabaseAdmissionRefusal = {
 } & (
   | { code: "agent-database-ownership-mismatch"; embeddedOwnerId: string }
   | {
-      code: "agent-database-inspection-pending" | "agent-database-inspection-failed";
+      code:
+        | "agent-database-inspection-pending"
+        | "agent-database-inspection-failed"
+        | "agent-database-recovery-held";
       embeddedOwnerId?: undefined;
     }
 );
