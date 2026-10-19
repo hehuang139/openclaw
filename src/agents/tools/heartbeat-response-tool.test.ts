@@ -69,14 +69,14 @@ describe("resolveHeartbeatResponseTool", () => {
     ]);
   });
 
-  it("tells the model to reply with text when the run does not accept responses", async () => {
+  it("preserves the configured reply instructions when the run does not accept responses", async () => {
     const tool = resolveHeartbeatResponseTool({ offerHeartbeatTool: true });
     assert(tool);
 
     await expect(
       tool.execute("call-1", { outcome: "no_change", notify: false, summary: "Quiet." }),
     ).rejects.toThrow(
-      "heartbeat_respond is not accepted in this run; reply with plain text instead",
+      "heartbeat_respond is not accepted in this run; follow the configured reply instructions instead",
     );
   });
 
