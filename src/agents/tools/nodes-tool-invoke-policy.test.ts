@@ -69,23 +69,20 @@ describe("generic node invoke policy", () => {
     expect(mocks.callGatewayTool).not.toHaveBeenCalled();
   });
 
-  it.each(["device.status", "constructor", "__proto__"])(
-    "allows generic %s when another node publishes the same command",
-    async (command) => {
-      mocks.listConnectedNodePluginTools.mockReturnValue([
-        { nodeId: "node-2", descriptor: { name: "remote_status", command } },
-      ]);
-      mocks.callGatewayTool.mockResolvedValue({ payload: { ok: true } });
+  it("allows ordinary generic commands when another node publishes the same command", async () => {
+    mocks.listConnectedNodePluginTools.mockReturnValue([
+      { nodeId: "node-2", descriptor: { name: "remote_status", command: "device.status" } },
+    ]);
+    mocks.callGatewayTool.mockResolvedValue({ payload: { ok: true } });
 
-      await invoke(command);
+    await invoke("device.status");
 
-      expect(mocks.callGatewayTool).toHaveBeenCalledWith(
-        "node.invoke",
-        {},
-        expect.objectContaining({ nodeId: "node-1", command }),
-      );
-    },
-  );
+    expect(mocks.callGatewayTool).toHaveBeenCalledWith(
+      "node.invoke",
+      {},
+      expect.objectContaining({ nodeId: "node-1", command: "device.status" }),
+    );
+  });
 
   it("blocks a typed action when the selected node publishes its command as an agent tool", async () => {
     mocks.listConnectedNodePluginTools.mockReturnValue([

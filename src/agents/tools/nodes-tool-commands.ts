@@ -14,17 +14,23 @@ import { callNodesToolNodeInvoke, resolveNodesToolInvokeTimeouts } from "./nodes
 import { resolveAgentNodeId } from "./nodes-utils.js";
 
 const BLOCKED_INVOKE_COMMANDS = new Set(["system.run", "system.run.prepare"]);
+const MEDIA_INVOKE_ACTIONS: Readonly<Record<string, string>> = {
+  "camera.snap": "camera_snap",
+  "camera.clip": "camera_clip",
+  "photos.latest": "photos_latest",
+  "screen.record": "screen_record",
+  "screen.snapshot": "screen_snapshot",
+  "file.fetch": "file_fetch",
+  "dir.list": "dir_list",
+  "dir.fetch": "dir_fetch",
+  "file.write": "file_write",
+};
 // File-transfer policy cannot be bypassed by opting into raw media payloads.
-const MEDIA_INVOKE_ACTIONS = new Map<string, { action: string; pathPolicy?: true }>([
-  ["camera.snap", { action: "camera_snap" }],
-  ["camera.clip", { action: "camera_clip" }],
-  ["photos.latest", { action: "photos_latest" }],
-  ["screen.record", { action: "screen_record" }],
-  ["screen.snapshot", { action: "screen_snapshot" }],
-  ["file.fetch", { action: "file_fetch", pathPolicy: true }],
-  ["dir.list", { action: "dir_list", pathPolicy: true }],
-  ["dir.fetch", { action: "dir_fetch", pathPolicy: true }],
-  ["file.write", { action: "file_write", pathPolicy: true }],
+const POLICY_REDIRECT_INVOKE_COMMANDS: ReadonlySet<string> = new Set([
+  "file.fetch",
+  "dir.list",
+  "dir.fetch",
+  "file.write",
 ]);
 const NODE_READ_ACTION_COMMANDS = {
   camera_list: "camera.list",
@@ -168,15 +174,15 @@ export async function executeNodeCommandAction(params: {
           `invokeCommand "${invokeCommand}" is reserved for shell execution; call the shell exec tool with { command, host: "node", node: "${nodeId}" } instead`,
         );
       }
-      const dedicatedAction = MEDIA_INVOKE_ACTIONS.get(invokeCommandNormalized);
-      if (dedicatedAction?.pathPolicy) {
+      const dedicatedAction = MEDIA_INVOKE_ACTIONS[invokeCommandNormalized];
+      if (dedicatedAction && POLICY_REDIRECT_INVOKE_COMMANDS.has(invokeCommandNormalized)) {
         throw new Error(
-          `invokeCommand "${invokeCommand}" enforces a path-allowlist policy and cannot be invoked via the generic nodes.invoke surface; use the dedicated file-transfer tool "${dedicatedAction.action}"`,
+          `invokeCommand "${invokeCommand}" enforces a path-allowlist policy and cannot be invoked via the generic nodes.invoke surface; use the dedicated file-transfer tool "${dedicatedAction}"`,
         );
       }
       if (dedicatedAction && !params.allowMediaInvokeCommands) {
         throw new Error(
-          `invokeCommand "${invokeCommand}" returns media payloads and is blocked to prevent base64 context bloat; use action="${dedicatedAction.action}"`,
+          `invokeCommand "${invokeCommand}" returns media payloads and is blocked to prevent base64 context bloat; use action="${dedicatedAction}"`,
         );
       }
       const invokeParamsJson =

@@ -2,7 +2,6 @@ import { isDeepStrictEqual } from "node:util";
 import type { AllowAlwaysPersistenceDecision } from "./exec-approvals-contracts.js";
 // Resolves exec approval requirements and approval-decision availability.
 import {
-  EXEC_APPROVAL_DECISIONS,
   normalizeExecAsk,
   type ExecApprovalsFile,
   type ExecApprovalDecision,
@@ -41,6 +40,11 @@ export function maxAsk(a: ExecAsk, b: ExecAsk): ExecAsk {
   return order[a] >= order[b] ? a : b;
 }
 
+const DEFAULT_EXEC_APPROVAL_DECISIONS = [
+  "allow-once",
+  "allow-always",
+  "deny",
+] as const satisfies readonly ExecApprovalDecision[];
 const OPTIONAL_EXEC_APPROVAL_DECISIONS = [
   "allow-always",
 ] as const satisfies readonly ExecApprovalDecision[];
@@ -60,7 +64,7 @@ export function resolveExecApprovalAllowedDecisions(params?: {
   if (ask === "always" || params?.allowAlwaysPersistence?.kind === "one-shot") {
     return ["allow-once", "deny"];
   }
-  return EXEC_APPROVAL_DECISIONS;
+  return DEFAULT_EXEC_APPROVAL_DECISIONS;
 }
 
 export function resolveExecApprovalUnavailableDecisions(params?: {

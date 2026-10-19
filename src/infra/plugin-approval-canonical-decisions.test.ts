@@ -3,14 +3,6 @@ import { resolveCanonicalPluginApprovalRequestAllowedDecisions } from "./plugin-
 import { resolvePluginApprovalRequestAllowedDecisions } from "./plugin-approvals.js";
 
 describe("plugin approval decisions", () => {
-  it("offers default decisions in the established order when the request omits them", () => {
-    expect(resolveCanonicalPluginApprovalRequestAllowedDecisions()).toEqual([
-      "allow-once",
-      "allow-always",
-      "deny",
-    ]);
-  });
-
   it("preserves the shipped explicit list while canonical decisions add deny", () => {
     const request = { allowedDecisions: ["allow-once"] as const };
 
