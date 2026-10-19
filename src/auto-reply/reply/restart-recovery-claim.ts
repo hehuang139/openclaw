@@ -202,33 +202,38 @@ export function createReplyRestartRecoveryClaimController(
         throw error;
       }
     };
-    const authority: SessionActorAuthority = {
-      assertCurrent: authorize,
-      authorize(stage, facts) {
-        authorize(stage, facts.entry);
-      },
-    };
     let committed: SessionEntry | undefined;
-    const outcome = await actor.adoptRun(
-      {
-        commandId: randomUUID(),
-        phaseId: "reply.restart-recovery",
-        sessionId,
-        expectedState,
-        lifecycle: options.patch,
-        runId: options.writer?.runId,
-      },
-      authority,
-      {
-        committed(receipt) {
-          committed = receipt.receipt.postimage.entry;
-          if (!committed) {
-            throw new Error("Committed restart recovery adoption omitted its session");
-          }
-          options.committed(committed);
+    let pending: ReturnType<SessionActor["adoptRun"]>;
+    try {
+      pending = actor.adoptRun(
+        {
+          commandId: randomUUID(),
+          phaseId: "reply.restart-recovery",
+          sessionId,
+          expectedState,
+          lifecycle: options.patch,
+          runId: options.writer?.runId,
         },
-      },
-    );
+        {
+          assertCurrent: authorize,
+          authorize: (stage, facts) => authorize(stage, facts.entry),
+        },
+        {
+          committed(receipt) {
+            committed = receipt.receipt.postimage.entry;
+            if (!committed) {
+              throw new Error("Committed restart recovery adoption omitted its session");
+            }
+            options.committed(committed);
+          },
+        },
+      );
+    } catch (error) {
+      // Synchronous rejection precedes actor acceptance; no write can have started.
+      options.rolledBack?.();
+      throw error;
+    }
+    const outcome = await pending;
     if (outcome.kind === "committed") {
       if (outcome.failure && outcome.failure.origin !== "response") {
         throw Object.assign(new Error(outcome.failure.message), { name: outcome.failure.name });
@@ -400,7 +405,7 @@ export function createReplyRestartRecoveryClaimController(
         let adoption: Promise<SessionEntry> | undefined;
         admission.adoptInput = (writer) => {
           if (!adoption) {
-            // Once adoption starts, only its committed receipt transfers cleanup custody.
+            // Uncertain adoption must not clear a possibly committed claim.
             tracked = false;
             adoption = adoptLifecycle({
               entry,
