@@ -578,6 +578,30 @@ fi
     }
   });
 
+  it.each([
+    ["26.12.1-rc.1", false],
+    ["26.12.1", true],
+    ["26.12.2-rc.1", true],
+  ] as const)(
+    "compares installed Node %s with an explicitly requested release",
+    (version, usable) => {
+      const root = tempDirs.make("openclaw-install-cli-prerelease-");
+      const node = join(root, "node");
+      const npm = join(root, "npm");
+      writeNodeFixture(node, version);
+      writeShell(npm, "exit 0");
+      const result = runInstallCliShell(
+        `
+      NODE_VERSION_REQUESTED=1
+      NODE_VERSION=26.12.1
+      linked_node_is_usable "$FIXTURE_NODE" "$FIXTURE_NPM"
+      `,
+        { FIXTURE_NODE: node, FIXTURE_NPM: npm },
+      );
+      expect(result.status, result.stdout + result.stderr).toBe(usable ? 0 : 1);
+    },
+  );
+
   it("rejects Linux ARMv7 before installing an explicitly requested Node", () => {
     const result = runInstallCliShell(`
       set -euo pipefail

@@ -2,6 +2,7 @@ export type NodeReleaseVersion = {
   major: number;
   minor: number;
   patch: number;
+  prerelease?: boolean;
 };
 
 export const MINIMUM_BUN_VERSION: NodeReleaseVersion;

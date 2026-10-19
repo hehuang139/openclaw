@@ -1526,19 +1526,20 @@ parse_node_version_components_for_binary() {
     if ! command -v "$node_bin" &> /dev/null && [[ ! -x "$node_bin" ]]; then
         return 1
     fi
-    local version major minor patch
+    local version major minor patch prerelease
     version="$("$node_bin" -v 2>/dev/null || true)"
     version="${version#"${version%%[![:space:]]*}"}"
     version="${version%"${version##*[![:space:]]}"}"
 
     # This standalone installer runs before OpenClaw exists on disk. Mirror the
     # release grammar in node-version.mjs; parity cases guard this boundary.
-    if [[ ! "$version" =~ ^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+    if [[ ! "$version" =~ ^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
         return 1
     fi
     major="${BASH_REMATCH[1]}"
     minor="${BASH_REMATCH[2]}"
     patch="${BASH_REMATCH[3]}"
+    prerelease="${BASH_REMATCH[4]}"
 
     local component
     for component in "$major" "$minor" "$patch"; do
@@ -1547,14 +1548,14 @@ parse_node_version_components_for_binary() {
             return 1
         fi
     done
-    echo "${major} ${minor} ${patch}"
+    echo "${major} ${minor} ${patch} ${prerelease:+1}"
     return 0
 }
 
 node_major_version() {
-    local version_components major minor patch
+    local version_components major minor patch prerelease
     version_components="$(parse_node_version_components_for_binary node || true)"
-    read -r major minor patch <<< "$version_components"
+    read -r major minor patch prerelease <<< "$version_components"
     if [[ "$major" =~ ^[0-9]+$ && "$minor" =~ ^[0-9]+$ ]]; then
         echo "$major"
         return 0
@@ -1566,15 +1567,18 @@ node_version_components_are_supported() {
     local major="$1"
     local minor="$2"
     local patch="$3"
+    local prerelease="${4:-}"
 
     case "$major" in
         24)
             ((minor > NODE_24_MIN_MINOR)) ||
-                ((minor == NODE_24_MIN_MINOR && patch >= NODE_24_MIN_PATCH))
+                ((minor == NODE_24_MIN_MINOR && patch > NODE_24_MIN_PATCH)) ||
+                { ((minor == NODE_24_MIN_MINOR && patch == NODE_24_MIN_PATCH)) && [[ -z "$prerelease" ]]; }
             ;;
         26)
             ((minor > NODE_26_MIN_MINOR)) ||
-                ((minor == NODE_26_MIN_MINOR && patch >= NODE_26_MIN_PATCH))
+                ((minor == NODE_26_MIN_MINOR && patch > NODE_26_MIN_PATCH)) ||
+                { ((minor == NODE_26_MIN_MINOR && patch == NODE_26_MIN_PATCH)) && [[ -z "$prerelease" ]]; }
             ;;
         *)
             ((major > 26))
@@ -1583,24 +1587,24 @@ node_version_components_are_supported() {
 }
 
 node_version_is_supported() {
-    local version_components major minor patch
+    local version_components major minor patch prerelease
     version_components="$(parse_node_version_components_for_binary node || true)"
-    read -r major minor patch <<< "$version_components"
+    read -r major minor patch prerelease <<< "$version_components"
     if [[ ! "$major" =~ ^[0-9]+$ || ! "$minor" =~ ^[0-9]+$ || ! "$patch" =~ ^[0-9]+$ ]]; then
         return 1
     fi
-    node_version_components_are_supported "$major" "$minor" "$patch"
+    node_version_components_are_supported "$major" "$minor" "$patch" "$prerelease"
 }
 
 node_binary_is_supported() {
     local node_bin="$1"
-    local version_components major minor patch
+    local version_components major minor patch prerelease
     version_components="$(parse_node_version_components_for_binary "$node_bin" || true)"
-    read -r major minor patch <<< "$version_components"
+    read -r major minor patch prerelease <<< "$version_components"
     if [[ ! "$major" =~ ^[0-9]+$ || ! "$minor" =~ ^[0-9]+$ || ! "$patch" =~ ^[0-9]+$ ]]; then
         return 1
     fi
-    node_version_components_are_supported "$major" "$minor" "$patch" &&
+    node_version_components_are_supported "$major" "$minor" "$patch" "$prerelease" &&
         node_binary_has_safe_sqlite "$node_bin"
 }
 

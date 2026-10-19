@@ -56,7 +56,7 @@ export async function resolveTargetNodeRuntime(params: {
       .flatMap((release: { version?: unknown }) => {
         const version =
           typeof release?.version === "string" ? parseNodeReleaseVersion(release.version) : null;
-        if (!version || version.major < 24 || version.major % 2 !== 0) {
+        if (!version || version.prerelease || version.major < 24 || version.major % 2 !== 0) {
           return [];
         }
         const label = `${version.major}.${version.minor}.${version.patch}`;

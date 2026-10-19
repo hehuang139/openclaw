@@ -2,7 +2,7 @@
 export const MINIMUM_BUN_VERSION = { major: 1, minor: 4, patch: 3 };
 
 const NODE_RELEASE_VERSION_RE =
-  /^v?((?:0|[1-9]\d*))\.((?:0|[1-9]\d*))\.((?:0|[1-9]\d*))(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u;
+  /^v?((?:0|[1-9]\d*))\.((?:0|[1-9]\d*))\.((?:0|[1-9]\d*))(?:-((?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u;
 
 const NODE_RELEASE_FLOORS = [
   { major: 24, minor: 16, patch: 0 },
@@ -146,7 +146,7 @@ export function canRunOpenClawNodeDiagnostics(value, hasNodeSqlite) {
   );
 }
 
-/** Parses an anchored release SemVer, allowing a leading v and valid build metadata. */
+/** Parses an anchored SemVer with optional leading v, prerelease, and build metadata. */
 export function parseNodeReleaseVersion(value) {
   if (typeof value !== "string") {
     return null;
@@ -160,7 +160,9 @@ export function parseNodeReleaseVersion(value) {
     minor: Number(match[2]),
     patch: Number(match[3]),
   };
-  return Object.values(version).every(Number.isSafeInteger) ? version : null;
+  return Object.values(version).every(Number.isSafeInteger)
+    ? { ...version, prerelease: match[4] !== undefined }
+    : null;
 }
 
 export function isNodeVersionAtLeast(version, minimum) {
@@ -173,7 +175,10 @@ export function isNodeVersionAtLeast(version, minimum) {
   if (version.minor !== minimum.minor) {
     return version.minor > minimum.minor;
   }
-  return version.patch >= minimum.patch;
+  if (version.patch !== minimum.patch) {
+    return version.patch > minimum.patch;
+  }
+  return !version.prerelease;
 }
 
 /** Checks OpenClaw's supported release lines. Older Node lines with lossy SQLite TEXT reads are unsupported. */
@@ -203,7 +208,8 @@ function renderProcessNodeVersionCheck() {
     version.major > floor.major ||
     (version.major === floor.major &&
       (version.minor > floor.minor ||
-        (version.minor === floor.minor && version.patch >= floor.patch)));
+        (version.minor === floor.minor &&
+          (version.patch > floor.patch || (version.patch === floor.patch && match[4] === undefined)))));
   return minimum ? atLeast(minimum) : version.major > floors[floors.length - 1].major;
 })(process.versions.node)`;
 }

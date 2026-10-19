@@ -131,6 +131,7 @@ MIN_NODE_24_VERSION="24.16.0"
 MIN_NODE_26_VERSION="26.1.0"
 SUPPORTED_NODE_VERSION_LABEL="Node 24.16.0+ or Node 26.1.0+"
 NODE_RELEASE_VERSION_CORE=""
+NODE_RELEASE_VERSION_PRERELEASE=""
 APK_NODE_BIN_DIR="/usr/bin"
 NPM_LOGLEVEL="${OPENCLAW_NPM_LOGLEVEL:-error}"
 INSTALL_METHOD="${OPENCLAW_INSTALL_METHOD:-npm}"
@@ -581,7 +582,7 @@ linked_node_is_usable() {
   if ! node_release_version_is_supported "$current_version"; then
     return 1
   fi
-  if ! semver_at_least "$NODE_RELEASE_VERSION_CORE" "$required_version"; then
+  if ! semver_at_least "$NODE_RELEASE_VERSION_CORE" "$required_version" "$NODE_RELEASE_VERSION_PRERELEASE"; then
     return 1
   fi
   candidate_bin="${candidate_node%/*}"
@@ -595,6 +596,7 @@ linked_node_is_usable() {
 semver_at_least() {
   local version="${1#v}"
   local required="${2#v}"
+  local prerelease="${3:-}"
   local version_major version_minor version_patch
   local required_major required_minor required_patch
 
@@ -619,7 +621,8 @@ semver_at_least() {
     ((version_minor > required_minor))
     return
   fi
-  ((version_patch >= required_patch))
+  ((version_patch > required_patch)) ||
+    { ((version_patch == required_patch)) && [[ -z "$prerelease" ]]; }
 }
 
 parse_node_release_version() {
@@ -627,14 +630,16 @@ parse_node_release_version() {
   local major minor patch
 
   NODE_RELEASE_VERSION_CORE=""
+  NODE_RELEASE_VERSION_PRERELEASE=""
   while [[ "$version" == [[:space:]]* ]]; do version="${version#?}"; done
   while [[ "$version" == *[[:space:]] ]]; do version="${version%?}"; done
-  if [[ ! "$version" =~ ^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+  if [[ ! "$version" =~ ^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
     return 1
   fi
   major="${BASH_REMATCH[1]}"
   minor="${BASH_REMATCH[2]}"
   patch="${BASH_REMATCH[3]}"
+  NODE_RELEASE_VERSION_PRERELEASE="${BASH_REMATCH[4]}"
   for part in "$major" "$minor" "$patch"; do
     if ((${#part} > 16)) || ((${#part} == 16 && 10#$part > 9007199254740991)); then
       return 1
@@ -646,14 +651,15 @@ parse_node_release_version() {
 
 node_release_version_is_supported() {
   parse_node_release_version "$1" || return 1
-  node_version_is_supported "$NODE_RELEASE_VERSION_CORE"
+  node_version_is_supported "$NODE_RELEASE_VERSION_CORE" "$NODE_RELEASE_VERSION_PRERELEASE"
 }
 
 # Download labels are plain numeric Node distribution versions. Installed
 # runtimes use node_release_version_is_supported, which accepts canonical
-# release labels with a leading v or build metadata.
+# SemVer labels with a leading v, prerelease, or build metadata.
 node_version_is_supported() {
   local version="${1#v}"
+  local prerelease="${2:-}"
   local major minor patch
 
   IFS=. read -r major minor patch <<<"$version"
@@ -666,11 +672,11 @@ node_version_is_supported() {
   done
 
   if ((major == 24)); then
-    semver_at_least "$version" "$MIN_NODE_24_VERSION"
+    semver_at_least "$version" "$MIN_NODE_24_VERSION" "$prerelease"
     return
   fi
   if ((major == 26)); then
-    semver_at_least "$version" "$MIN_NODE_26_VERSION"
+    semver_at_least "$version" "$MIN_NODE_26_VERSION" "$prerelease"
     return
   fi
   ((major > 26))

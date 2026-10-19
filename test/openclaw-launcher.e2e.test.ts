@@ -726,6 +726,7 @@ describe("openclaw launcher", () => {
       if ((parseNodeReleaseVersion(version)?.major ?? 0) >= 24) {
         expect(result.status, version).toBe(0);
         expect(result.stdout, version).toContain("runtime-loaded");
+        expect(result.stderr, version).not.toContain("Retrying with");
       } else {
         expect(result.status, version).toBe(1);
         expect(result.stderr, version).toContain(

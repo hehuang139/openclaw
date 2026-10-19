@@ -38,8 +38,8 @@ it.each([
       });
     }
     const releases = discovery
-      ? ["v28.2.0", "v26.1.0", "v27.9.0", "v26.8.1", "v24.20.0", "invalid", null]
-      : ["v24.20.0", "v27.9.0"];
+      ? ["v28.2.0", "v26.1.0", "v27.9.0", "v26.8.1", "v26.9.0-rc.1", "v24.20.0", "invalid", null]
+      : ["v24.20.0", "v27.9.0", "v26.1.0-rc.0"];
     fetchMock.mockResolvedValue(
       scenario === "upstream unavailable"
         ? new Response("unavailable", { status: 503 })

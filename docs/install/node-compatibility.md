@@ -28,6 +28,8 @@ Startup, doctor, Gateway runtime selection, update preflight, and installer runt
 
 The running package's startup guard and Gateway runtime selection admit a Node 24 or newer release outside the table when the check passes, with a note that the version is unsupported but its capabilities passed validation. Its capabilities meet this package's correctness gate, but it remains outside the tested support policy. This permits vendor backports without claiming support for their version. Node 22 and 23 remain excluded, and package manager engine checks still apply.
 
+Prerelease and nightly labels follow SemVer precedence: a prerelease sorts below its release, so `24.16.0-rc.1` and `26.1.0-rc.0` fall below the floors, while a Node 27 nightly or alpha passes the version table and still has to pass the capability check.
+
 Installers retain the numeric Node requirement and add the check as a second gate. Package and Git update preflight also require the selected target's `engines.node` range numerically, including any fallback runtime. A passing check cannot relax another package's requirements: an older release may still enforce its version table at startup.
 
 Update recovery recommends the lowest standard release satisfying both the
@@ -89,7 +91,7 @@ Rows identify the first effective release, including a beta when applicable. Rec
 
 | Release                              | Node requirement                                 | What changed and why                                                                                                                                                                                          |
 | ------------------------------------ | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Unreleased (main)                    | Unchanged support policy                         | Replaces decoder version-only admission with an in-memory NUL round-trip check; capable vendor builds on Node 24+ may run with an unsupported-version note. Node 22/23 remain excluded.                       |
+| Unreleased (main)                    | Unchanged support policy                         | Replaces decoder version-only admission with an in-memory NUL round-trip check; capable vendor builds on Node 24+ may run with an unsupported-version note. Node 22/23 remain excluded; prereleases admitted. |
 | v2026.9.3                            | `>=24.16.0 <25 \|\| >=26.1.0`                    | Raises the Node 24 floor and drops Node 22 and 25 to prevent embedded-NUL TEXT truncation; Node 23 remains excluded. Official Node-based support for macOS 11–13.4 and Linux ARMv7 provisioning ends. #140672 |
 | v2026.8.2                            | `>=22.22.3 <23 \|\| >=24.15.0 <25 \|\| >=25.9.0` | Preserves supported RPM-owned Node packages with unsafe system SQLite and provisions a separate user-space runtime. The numeric range and loaded-library safety requirement stay unchanged. #134166           |
 | v2026.8.1                            | `>=22.22.3 <23 \|\| >=24.15.0 <25 \|\| >=25.9.0` | Rootless defaults advance to 24.19.0, or 22.23.2 on ARMv7. Linux package provisioning returns to Node 24 LTS to avoid prerelease repository builds. #130369                                                   |

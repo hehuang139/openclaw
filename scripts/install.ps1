@@ -265,8 +265,8 @@ function Test-NodeVersionSupported {
     # This standalone installer runs before OpenClaw exists on disk. Mirror the
     # release grammar in node-version.mjs; parity cases guard this boundary.
     $versionMatch = [regex]::Match(
-        $Version,
-        '^\s*v?(?<major>0|[1-9]\d*)\.(?<minor>0|[1-9]\d*)\.(?<patch>0|[1-9]\d*)(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?\s*$'
+        $Version.Trim(),
+        '^v?(?<major>0|[1-9][0-9]*)\.(?<minor>0|[1-9][0-9]*)\.(?<patch>0|[1-9][0-9]*)(?:-(?<prerelease>(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?\z'
     )
     if (-not $versionMatch.Success) {
         return $false
@@ -286,10 +286,10 @@ function Test-NodeVersionSupported {
         return $false
     }
     if ($major -eq 24) {
-        return ($minor -ge 16)
+        return ($minor -gt 16 -or ($minor -eq 16 -and ($patch -gt 0 -or -not $versionMatch.Groups["prerelease"].Success)))
     }
     if ($major -eq 26) {
-        return ($minor -ge 1)
+        return ($minor -gt 1 -or ($minor -eq 1 -and ($patch -gt 0 -or -not $versionMatch.Groups["prerelease"].Success)))
     }
     return ($major -gt 26)
 }

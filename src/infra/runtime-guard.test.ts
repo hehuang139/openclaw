@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
+import { isNodeVersionAtLeast, parseNodeReleaseVersion } from "../../node-version.mjs";
 import {
   assertSupportedRuntime,
   isSupportedBunVersion,
@@ -103,6 +104,8 @@ describe("runtime-guard", () => {
     ["24.16.0", false, false],
     ["24.15.0+vendor.1", true, true],
     ["24.15.0+vendor.1", false, false],
+    ["27.0.0-nightly20261018f88a1d25e9", true, true],
+    ["27.0.0-nightly20261018f88a1d25e9", false, false],
   ] as const)("gates Node %s with lossless SQLite %s", async (version, lossless, admitted) => {
     const runtime = createRuntime();
     const details = runtimeDetails("node", {
@@ -227,6 +230,22 @@ describe("runtime-guard", () => {
     expect(nodeVersionSatisfiesEngine("22.22.3", "^22.22.3")).toBeNull();
   });
 
+  it("places prereleases below a release minimum with the same triple", () => {
+    const minimum = { major: 26, minor: 1, patch: 0 };
+    expect(isNodeVersionAtLeast(parseNodeReleaseVersion("26.1.0-rc.0"), minimum)).toBe(false);
+    expect(isNodeVersionAtLeast(parseNodeReleaseVersion("26.1.1-rc.0"), minimum)).toBe(true);
+  });
+
+  it("parses SemVer prerelease identifiers without allowing numeric leading zeros", () => {
+    expect(parseNodeReleaseVersion(" v27.0.0-rc.0+build.5 ")).toEqual({
+      major: 27,
+      minor: 0,
+      patch: 0,
+      prerelease: true,
+    });
+    expect(parseNodeReleaseVersion("27.0.0-01")).toBeNull();
+  });
+
   it("preserves the target package's numeric engine range", () => {
     const engine = ">=24.16.0 <25 || >=26.1.0";
     expect(nodeVersionSatisfiesEngine("22.23.2", engine)).toBe(false);
@@ -254,6 +273,20 @@ describe("runtime-guard", () => {
     ["24.16.0+local.1", true],
     ["24.15.0-rc.1", false],
     ["25.9.1-nightly.20260714", false],
+    ["27.0.0-nightly20261018f88a1d25e9", true],
+    ["v27.0.0-alpha.1", true],
+    ["27.0.0-rc.1+build.5", true],
+    ["26.1.0-rc.0", false],
+    ["26.12.1-rc.1", true],
+    ["24.16.0-rc.1", false],
+    ["24.16.1-pre", true],
+    ["27.0.0-0", true],
+    ["27.0.0-0a", true],
+    ["27.0.0-", false],
+    ["27.0.0-01", false],
+    ["27.0.0-rc..1", false],
+    ["27.0.0-rc_1", false],
+    ["27.0.0-+build", false],
     ["24.15", false],
     ["garbage24.15.0suffix", false],
     ["24.15.0suffix", false],
