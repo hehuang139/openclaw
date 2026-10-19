@@ -6,13 +6,13 @@ import { uniqueValues } from "@openclaw/normalization-core/string-normalization"
 import { Type, type TObject } from "typebox";
 import { stripPlainTextToolCallBlocks } from "../../../packages/tool-call-repair/src/index.js";
 import type { SourceReplyDeliveryMode } from "../../auto-reply/get-reply-options.types.js";
-import { parseReplyDirectives } from "../../auto-reply/reply/reply-directives.js";
 import type { ChannelMessageActionName } from "../../channels/plugins/types.public.js";
 import type { AgentRuntimeMessageActionContext } from "../../gateway/message-action-turn-capability.js";
 import { MessageActionDeniedError } from "../../infra/outbound/message-action-denial.js";
 import { sourceDeliveryTargetsMatch } from "../../infra/outbound/source-delivery-plan.js";
 import { normalizeOptionalAccountId } from "../../routing/account-id.js";
 import { stripUnsupportedCitationControlMarkers } from "../../shared/text/citation-control-markers.js";
+import { parseInlineDirectives } from "../../utils/directive-tags.js";
 import { INTERNAL_MESSAGE_CHANNEL, normalizeMessageChannel } from "../../utils/message-channel.js";
 import { readToolStringParam } from "./common.js";
 import { normalizeEscapedLineBreaksForVisibleText } from "./message-tool-visible-content.js";
@@ -75,8 +75,9 @@ export function enforceSourceReplyOnlyTextDirectives(args: Record<string, unknow
     withoutCitationMarkers,
     stripPlainTextToolCallBlocks(withoutCitationMarkers),
   ])) {
-    const directives = parseReplyDirectives(normalized, { extractMarkdownImages: true });
-    if (directives.replyToTag || directives.audioAsVoice) {
+    // Match outbound preparation before media extraction can hide reply/audio tags in URLs.
+    const directives = parseInlineDirectives(normalized);
+    if (directives.hasReplyTag || directives.audioAsVoice) {
       throw sourceReplyPolicyError("Completion source replies cannot use reply/audio directives.");
     }
   }

@@ -99,6 +99,26 @@ describe("completion source-reply authority", () => {
     ["unknown plugin argument", { action: "send", pluginFile: "./AGENTS.md" }],
     ["inline reply route", { action: "send", message: "[[reply_to:message-2]] stolen thread" }],
     [
+      "reply directive inside a media-only URL",
+      {
+        action: "send",
+        media: undefined,
+        message: "MEDIA:https://example.com/a[[reply_to:message-2]].png",
+      },
+    ],
+    [
+      "reply directive inside a media caption",
+      {
+        action: "send",
+        message: "",
+        caption: "MEDIA:https://example.com/a[[reply_to:message-2]].png",
+      },
+    ],
+    [
+      "audio directive inside a media URL",
+      { action: "send", message: "MEDIA:https://example.com/a[[audio_as_voice]].ogg" },
+    ],
+    [
       "caption reply route",
       { action: "send", message: "", caption: "[[reply_to:message-2]] stolen thread" },
     ],
