@@ -49,6 +49,12 @@ const TOOL_SEARCH_CONFIG: OpenClawConfig = {
 const CATALOGS_DISABLED_CONFIG: OpenClawConfig = {
   tools: { codeMode: false, toolSearch: false },
 };
+const RUN_CONTEXT = {
+  sessionId: "session",
+  sessionKey: "session-key",
+  agentId: "main",
+  runId: "run",
+};
 
 function clientTool(name: string) {
   return {
@@ -70,26 +76,19 @@ function pluginTool(
 // Register a real catalog: otherwise client append is a no-op in both branches.
 function seedCatalog(mode: "code-mode" | "tool-search", config: OpenClawConfig) {
   const catalogRef = createToolSearchCatalogRef();
+  const context = { config, catalogRef, ...RUN_CONTEXT };
   const controlTools =
     mode === "code-mode"
       ? createCodeModeTools({
-          config,
-          catalogRef,
+          ...context,
           executeTool: async () => ({ content: [], details: {} }),
         })
       : [createStubTool(TOOL_SEARCH_RAW_TOOL_NAME)];
-  const seedParams = {
-    tools: [...controlTools, createStubTool("seeded_target")],
-    config,
-    sessionId: "session",
-    sessionKey: "session-key",
-    agentId: "main",
-    runId: "run",
-    catalogRef,
-  };
-  const seeded =
-    mode === "code-mode" ? applyCodeModeCatalog(seedParams) : applyToolSearchCatalog(seedParams);
-  expect(seeded.catalogRegistered).toBe(true);
+  const applyCatalog = mode === "code-mode" ? applyCodeModeCatalog : applyToolSearchCatalog;
+  expect(
+    applyCatalog({ ...context, tools: [...controlTools, createStubTool("seeded_target")] })
+      .catalogRegistered,
+  ).toBe(true);
   return catalogRef;
 }
 
@@ -109,7 +108,6 @@ function prepare({
     deferredDirectoryToolsCallable: false,
     effectiveTools: [],
     replaySafetyOptions: { declaredReplaySafe: () => undefined },
-    sandboxEnabled: false,
     sandboxSessionKey: "session-key",
     sessionAgentId: "main",
     toolSearchCatalogRef: catalogRef,
@@ -199,9 +197,7 @@ describe("prepareEmbeddedAttemptClientTools", () => {
       {
         hookName: "before_tool_call",
         matcher: ["first_tool"],
-        handler: async () => {
-          await firstHook.promise;
-        },
+        handler: () => firstHook.promise,
       },
     ]);
     try {
@@ -334,16 +330,17 @@ describe("prepareEmbeddedAttemptClientTools", () => {
     expect(result.trustedLocalMediaToolNames).toEqual(new Set());
   });
 
-  it.each([CODE_MODE_CONFIG])("hides client tools when the attempt engages code mode", (config) => {
-    const catalogRef = seedCatalog("code-mode", config);
-
+  it.each(["code-mode", "tool-search"] as const)("hides client tools behind %s catalog", (mode) => {
+    const codeMode = mode === "code-mode";
+    const config = codeMode ? CODE_MODE_CONFIG : TOOL_SEARCH_CONFIG;
+    const catalogRef = seedCatalog(mode, config);
+    // Disable the other config source to prove each mode reads its owner.
     const result = prepare({
-      codeModeControlsEnabledForRun: true,
-      attemptConfig: config,
-      // Deliberately catalog-disabled: the code-mode branch must not read this.
+      codeModeControlsEnabledForRun: codeMode,
+      attemptConfig: codeMode ? config : CATALOGS_DISABLED_CONFIG,
+      toolSearchRuntimeConfig: codeMode ? CATALOGS_DISABLED_CONFIG : config,
       catalogRef,
     });
-
     expect(result.clientToolDefs).toEqual([]);
     expect(result.allCustomTools).toEqual([]);
   });
@@ -376,10 +373,7 @@ describe("prepareEmbeddedAttemptClientTools", () => {
     setPluginToolMeta(shadowedPlugin, { pluginId: "trusted-plugin", optional: false });
     const context = {
       config: CODE_MODE_CONFIG,
-      sessionId: "session",
-      sessionKey: "session-key",
-      agentId: "main",
-      runId: "run",
+      ...RUN_CONTEXT,
       catalogRef,
       codeModeSkills,
     };
@@ -449,19 +443,6 @@ describe("prepareEmbeddedAttemptClientTools", () => {
     expect(providerExec?.description).toBe(initialDescription);
   });
 
-  it("hides client tools behind the tool-search catalog when code mode is not engaged", () => {
-    const catalogRef = seedCatalog("tool-search", TOOL_SEARCH_CONFIG);
-
-    const result = prepare({
-      // Deliberately catalog-disabled: the tool-search branch must not read this.
-      toolSearchRuntimeConfig: TOOL_SEARCH_CONFIG,
-      catalogRef,
-    });
-
-    expect(result.clientToolDefs).toEqual([]);
-    expect(result.allCustomTools).toEqual([]);
-  });
-
   it("keeps client tools directly callable for directory Tool Search", () => {
     const catalogRef = seedCatalog("tool-search", TOOL_SEARCH_CONFIG);
 
@@ -475,41 +456,28 @@ describe("prepareEmbeddedAttemptClientTools", () => {
     expect(catalogRef.current?.entries.some((entry) => entry.source === "client")).toBe(false);
   });
 
-  it("binds side-effect metadata to the concrete plugin tool owner", () => {
+  it.each([false, true])("binds side-effect owners unless client shadow is %s", (shadowed) => {
     const catalogRef = seedCatalog("tool-search", TOOL_SEARCH_CONFIG);
-    const tools = ["memory_store", "memory_forget"].map((name) =>
+    const tools = (shadowed ? ["memory_store"] : ["memory_store", "memory_forget"]).map((name) =>
       pluginTool(name, "memory-lancedb", { sideEffecting: true }),
     );
-
     const result = prepare({
       catalogRef,
       uncompactedEffectiveTools: tools,
+      ...(shadowed ? { clientTools: [clientTool("Memory_Store")] } : {}),
     });
-
+    if (shadowed) {
+      expect(result.clientToolDefs.map((tool) => tool.name)).toEqual(["Memory_Store"]);
+    }
     expect(result.sideEffectToolOwners).toEqual(
-      new Map([
-        ["memory_store", '["memory-lancedb","memory_store"]'],
-        ["memory_forget", '["memory-lancedb","memory_forget"]'],
-      ]),
+      new Map(
+        shadowed
+          ? []
+          : [
+              ["memory_store", '["memory-lancedb","memory_store"]'],
+              ["memory_forget", '["memory-lancedb","memory_forget"]'],
+            ],
+      ),
     );
   });
-
-  it.each(["Memory_Store"])(
-    "keeps client shadow %s admitted but drops ambiguous side-effect ownership",
-    (clientName) => {
-      const catalogRef = seedCatalog("tool-search", TOOL_SEARCH_CONFIG);
-      const memoryStore = pluginTool("memory_store", "memory-lancedb", {
-        sideEffecting: true,
-      });
-
-      const result = prepare({
-        catalogRef,
-        uncompactedEffectiveTools: [memoryStore],
-        clientTools: [clientTool(clientName)],
-      });
-
-      expect(result.clientToolDefs.map((tool) => tool.name)).toEqual([clientName]);
-      expect(result.sideEffectToolOwners).toEqual(new Map());
-    },
-  );
 });

@@ -10,14 +10,14 @@ import { createAttemptSetupFixture } from "./attempt-setup.test-support.js";
 import type { EmbeddedRunAttemptParams } from "./types.js";
 
 const addedTempDirs = useAutoCleanupTempDirTracker(afterEach);
+const contextFile = (filePath: string, content: unknown) =>
+  expect.objectContaining({ path: filePath, content });
 
 async function makeWorkspace(label: string, files: Record<string, string> = {}): Promise<string> {
   const workspace = await fs.realpath(addedTempDirs.make(`openclaw-${label}-`));
-  await Promise.all(
-    Object.entries(files).map(([name, content]) =>
-      fs.writeFile(path.join(workspace, name), content),
-    ),
-  );
+  for (const [name, content] of Object.entries(files)) {
+    await fs.writeFile(path.join(workspace, name), content);
+  }
   return workspace;
 }
 
@@ -90,80 +90,63 @@ describe("prepareEmbeddedAttemptBootstrap", () => {
       content: "Execution project context",
     });
     expect(result.contextFiles).toContainEqual(
-      expect.objectContaining({
-        path: path.join(agentWorkspace, "SOUL.md"),
-        content: "Canonical agent soul",
-      }),
+      contextFile(path.join(agentWorkspace, "SOUL.md"), "Canonical agent soul"),
     );
     expect(result.contextFiles).not.toContainEqual(
       expect.objectContaining({ path: path.join(sessionWorkspace, "SOUL.md") }),
     );
   });
 
-  it("withholds the completion marker when the execution project AGENTS.md was unreadable", async () => {
+  it.each(["none", "full"])("withholds completion for unreadable AGENTS.md (%s)", async (mode) => {
+    const unreadable = "x".repeat(MAX_WORKSPACE_BOOTSTRAP_FILE_BYTES + 1);
     const agentWorkspace = await makeWorkspace("agent-workspace", {
-      "AGENTS.md": "Canonical agent instructions",
+      "AGENTS.md": mode === "full" ? unreadable : "Canonical agent instructions",
+      ...(mode === "full" ? { "BOOTSTRAP.md": "Finish the workspace setup." } : {}),
     });
-    const sessionWorkspace = await makeWorkspace("session-workspace", {
-      "AGENTS.md": "x".repeat(MAX_WORKSPACE_BOOTSTRAP_FILE_BYTES + 1),
-    });
+    const sessionWorkspace =
+      mode === "full"
+        ? agentWorkspace
+        : await makeWorkspace("session-workspace", { "AGENTS.md": unreadable });
 
     const result = await prepare(agentWorkspace, sessionWorkspace, {
       contextInjection: "continuation-skip",
     });
 
-    expect(result.bootstrapMode).toBe("none");
+    expect(result).toMatchObject({
+      bootstrapMode: mode,
+      shouldRecordCompletedBootstrapTurn: false,
+    });
+    if (mode === "full") {
+      return;
+    }
     expect(result.contextFiles).toContainEqual(
-      expect.objectContaining({
-        path: path.join(sessionWorkspace, "AGENTS.md"),
-        content: expect.stringMatching(/^\[UNREADABLE: File exceeds/),
-      }),
+      contextFile(
+        path.join(sessionWorkspace, "AGENTS.md"),
+        expect.stringMatching(/^\[UNREADABLE: File exceeds/),
+      ),
     );
-    expect(result.shouldRecordCompletedBootstrapTurn).toBe(false);
 
-    await fs.writeFile(path.join(sessionWorkspace, "AGENTS.md"), "Recovered project instructions");
+    await fs.writeFile(path.join(sessionWorkspace, "AGENTS.md"), "Recovered instructions");
     const recovered = await prepare(agentWorkspace, sessionWorkspace, {
       contextInjection: "continuation-skip",
     });
     expect(recovered.shouldRecordCompletedBootstrapTurn).toBe(true);
     expect(recovered.contextFiles).toContainEqual(
-      expect.objectContaining({ content: "Recovered project instructions" }),
+      expect.objectContaining({ content: "Recovered instructions" }),
     );
   });
 
-  it("withholds the completion marker when a full bootstrap turn carried an unreadable file", async () => {
-    const workspace = await makeWorkspace("onboarding-workspace", {
-      "BOOTSTRAP.md": "Finish the workspace setup.",
-      "AGENTS.md": "x".repeat(MAX_WORKSPACE_BOOTSTRAP_FILE_BYTES + 1),
-    });
-
-    const result = await prepare(workspace, workspace, {
-      contextInjection: "continuation-skip",
-    });
-
-    expect(result).toMatchObject({
-      bootstrapMode: "full",
-      shouldRecordCompletedBootstrapTurn: false,
-    });
-  });
-
   it("remaps injected paths into the prompt workspace while accounting keeps source paths", async () => {
-    // Sandbox runs show the model the copy path; injection accounting still has
-    // to recognize the host file it loaded, or its bytes read as never injected.
-    const workspace = await makeWorkspace("remap-workspace");
-    const promptWorkspace = await makeWorkspace("remap-prompt");
     const agents = "Sandboxed agent instructions";
-    await fs.writeFile(path.join(workspace, "AGENTS.md"), agents);
+    const workspace = await makeWorkspace("remap-workspace", { "AGENTS.md": agents });
+    const promptWorkspace = await makeWorkspace("remap-prompt");
 
     const result = await prepare(workspace, workspace, {
       effectiveWorkspace: promptWorkspace,
     });
 
     expect(result.contextFiles).toContainEqual(
-      expect.objectContaining({
-        path: path.join(promptWorkspace, "AGENTS.md"),
-        content: agents,
-      }),
+      contextFile(path.join(promptWorkspace, "AGENTS.md"), agents),
     );
     expect(result.bootstrapInjectionStats).toContainEqual(
       expect.objectContaining({

@@ -1,5 +1,4 @@
-// Coverage for external cancellation and timeout paths.
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { projectAgentRunAttemptTerminal } from "../../agent-run-terminal-outcome.js";
 import { countActiveToolExecutions } from "../../embedded-agent-subscribe.handlers.tools.start.js";
 import type { EmbeddedAgentQueueHandle } from "../runs.js";
@@ -11,9 +10,7 @@ import { createEmbeddedAttemptSessionSettleTracker } from "./attempt-session-set
 import { prepareEmbeddedAttemptTimeout } from "./attempt-timeout-prepare.js";
 import type { EmbeddedAttemptExecutionState } from "./types.js";
 
-const mocks = vi.hoisted(() => ({
-  markActiveEmbeddedRunAbandoned: vi.fn(),
-}));
+const mocks = vi.hoisted(() => ({ markActiveEmbeddedRunAbandoned: vi.fn() }));
 
 vi.mock("../../embedded-agent-subscribe.handlers.tools.start.js");
 
@@ -22,52 +19,36 @@ vi.mock("../runs.js", () => ({
 }));
 
 function createAbortFixture(source = new AbortController()) {
-  const runAbortController = new AbortController();
   const state: Pick<EmbeddedAttemptExecutionState, "terminal"> = { terminal: { kind: "ok" } };
   const abort = vi.fn(async (_reason?: unknown) => {});
   const tracker = createEmbeddedAttemptSessionSettleTracker({ abort });
   const cleanupAfterEarlyAbort = vi.fn(async () => {});
-  const attempt = {
-    abortSignal: source.signal,
-    onAttemptTimeout: vi.fn(),
-    runId: "run-test",
-    sessionFile: "/tmp/session.jsonl",
-    sessionId: "session-test",
-    sessionKey: "agent:main",
-    timeoutMs: 60_000,
+  const input = {
+    abortActiveSession: tracker.abortActiveSession,
+    activeSession: { abortCompaction: vi.fn(), isCompacting: false },
+    attempt: {
+      abortSignal: source.signal,
+      onAttemptTimeout: vi.fn(),
+      runId: "run-test",
+      sessionFile: "/tmp/session.jsonl",
+      sessionId: "session-test",
+      sessionKey: "agent:main",
+      timeoutMs: 60_000,
+    },
+    getQueueHandle: (): EmbeddedAgentQueueHandle | undefined => undefined,
+    isProbeSession: false,
+    log: { warn: vi.fn() },
+    runAbortController: new AbortController(),
+    state,
   };
   const controller = createEmbeddedAttemptExternalAbortController({
+    ...input,
     abortSignal: source.signal,
     cleanupAfterEarlyAbort,
-    runAbortController,
-    runId: attempt.runId,
-    state,
+    runId: input.attempt.runId,
   });
-  const createRunAbort = (
-    overrides: Partial<Parameters<typeof createEmbeddedAttemptRunAbort>[0]> = {},
-  ) =>
-    createEmbeddedAttemptRunAbort({
-      abortActiveSession: tracker.abortActiveSession,
-      activeSession: { abortCompaction: vi.fn(), isCompacting: false },
-      attempt,
-      getQueueHandle: () => undefined,
-      isProbeSession: false,
-      log: { warn: vi.fn() },
-      runAbortController,
-      state,
-      ...overrides,
-    });
-  return {
-    source,
-    runAbortController,
-    state,
-    abort,
-    tracker,
-    cleanupAfterEarlyAbort,
-    attempt,
-    controller,
-    createRunAbort,
-  };
+  onTestFinished(controller.dispose);
+  return { ...input, source, abort, tracker, cleanupAfterEarlyAbort, controller };
 }
 
 beforeEach(() => {
@@ -75,7 +56,7 @@ beforeEach(() => {
   mocks.markActiveEmbeddedRunAbandoned.mockReset();
 });
 
-describe("createEmbeddedAttemptExternalAbortController", () => {
+describe("embedded attempt abort", () => {
   it("preserves external cancellation through active session settlement", async () => {
     const { source, runAbortController, state, abort, tracker, controller } = createAbortFixture();
     controller.setActiveSessionAbort(tracker.abortActiveSession);
@@ -92,19 +73,14 @@ describe("createEmbeddedAttemptExternalAbortController", () => {
     expect(runAbortController.signal.reason).toBe(reason);
     expect(abort).toHaveBeenCalledExactlyOnceWith(reason);
     await tracker.buildAbortSettlePromise();
-    controller.dispose();
   });
 
   it("classifies timeout during compaction without also blaming a tool", () => {
     const { source, runAbortController, state, controller } = createAbortFixture();
     vi.mocked(countActiveToolExecutions).mockReturnValue(1);
-    controller.setCompactionState({
-      isPendingOrRetrying: () => true,
-      isInFlight: () => false,
-    });
+    controller.setCompactionState({ isPendingOrRetrying: () => true, isInFlight: () => false });
     controller.arm();
-    const reason = new Error("deadline");
-    reason.name = "TimeoutError";
+    const reason = Object.assign(new Error("deadline"), { name: "TimeoutError" });
 
     source.abort(reason);
 
@@ -116,33 +92,22 @@ describe("createEmbeddedAttemptExternalAbortController", () => {
       timedOutDuringToolExecution: false,
     });
     expect(runAbortController.signal.reason).toBe(reason);
-    controller.dispose();
   });
 
   it("hands an external timeout to the live attempt exactly once", async () => {
-    const {
-      source,
-      runAbortController,
-      state,
-      abort,
-      tracker,
-      controller,
-      attempt,
-      createRunAbort,
-    } = createAbortFixture();
-    const abortRun = createRunAbort({
+    const fixture = createAbortFixture();
+    const { controller } = fixture;
+    const abortRun = createEmbeddedAttemptRunAbort({
+      ...fixture,
       getQueueHandle: () => ({}) as EmbeddedAgentQueueHandle,
       isProbeSession: true,
     });
     controller.setRunAbort(abortRun);
-    controller.setCompactionState({
-      isPendingOrRetrying: () => false,
-      isInFlight: () => false,
-    });
+    controller.setCompactionState({ isPendingOrRetrying: () => false, isInFlight: () => false });
     controller.arm();
     const timeout = prepareEmbeddedAttemptTimeout({
-      attempt,
-      runAbortSignal: runAbortController.signal,
+      attempt: fixture.attempt,
+      runAbortSignal: fixture.runAbortController.signal,
       activeSession: { isCompacting: false, isStreaming: false },
       compactionState: { isCompacting: () => false },
       compactionTimeoutMs: 1_000,
@@ -152,31 +117,27 @@ describe("createEmbeddedAttemptExternalAbortController", () => {
       markTimedOutByRunBudget: vi.fn(),
     });
 
-    try {
-      const reason = new Error("upstream request timed out");
-      reason.name = "TimeoutError";
-      source.abort(reason);
-      await tracker.buildAbortSettlePromise();
+    onTestFinished(() => timeout.clearTimers());
+    const reason = Object.assign(new Error("upstream request timed out"), {
+      name: "TimeoutError",
+    });
+    fixture.source.abort(reason);
+    await fixture.tracker.buildAbortSettlePromise();
 
-      expect(state.terminal).toEqual({
-        kind: "timeout",
-        phase: "prompt",
-        source: "external",
-        aborted: true,
-      });
-      expect(attempt.onAttemptTimeout).toHaveBeenCalledOnce();
-      expect(abort).toHaveBeenCalledExactlyOnceWith(reason);
-      expect(mocks.markActiveEmbeddedRunAbandoned).toHaveBeenCalledOnce();
-    } finally {
-      timeout.clearTimers();
-      controller.dispose();
-    }
+    expect(fixture.state.terminal).toEqual({
+      kind: "timeout",
+      phase: "prompt",
+      source: "external",
+      aborted: true,
+    });
+    expect(fixture.attempt.onAttemptTimeout).toHaveBeenCalledOnce();
+    expect(fixture.abort).toHaveBeenCalledExactlyOnceWith(reason);
+    expect(mocks.markActiveEmbeddedRunAbandoned).toHaveBeenCalledOnce();
   });
 
   it("classifies abort after preparation cleanup", async () => {
     const source = new AbortController();
-    const reason = new Error("cancelled during setup");
-    reason.name = "AbortError";
+    const reason = Object.assign(new Error("cancelled during setup"), { name: "AbortError" });
     source.abort(reason);
     const { cleanupAfterEarlyAbort, state, controller } = createAbortFixture(source);
 
@@ -193,20 +154,18 @@ describe("createEmbeddedAttemptExternalAbortController", () => {
     controller.arm();
     expect(() => controller.throwIfFired()).toThrow(reason);
     expect(state.terminal).toBe(firstTerminal);
-    controller.dispose();
   });
-});
 
-describe("createEmbeddedAttemptRunAbort", () => {
   it("settles timeout state, session work, and queue ownership", async () => {
-    const { state, attempt, runAbortController, createRunAbort } = createAbortFixture();
-    const timeoutReason = new Error("attempt deadline");
-    timeoutReason.name = "TimeoutError";
+    const fixture = createAbortFixture();
+    const { state, attempt, runAbortController } = fixture;
+    const timeoutReason = Object.assign(new Error("attempt deadline"), { name: "TimeoutError" });
     const abortCompaction = vi.fn();
     const abortActiveSession = vi.fn(async () => {});
     const queueHandle = {} as EmbeddedAgentQueueHandle;
     vi.mocked(countActiveToolExecutions).mockReturnValue(1);
-    const abortRun = createRunAbort({
+    const abortRun = createEmbeddedAttemptRunAbort({
+      ...fixture,
       abortActiveSession,
       activeSession: { abortCompaction, isCompacting: true },
       getQueueHandle: () => queueHandle,
@@ -236,11 +195,11 @@ describe("createEmbeddedAttemptRunAbort", () => {
 
   it("preserves a manual abort reason", () => {
     const abortReason = new Error("manual abort");
-    const { runAbortController, createRunAbort } = createAbortFixture();
-    const abortRun = createRunAbort();
+    const fixture = createAbortFixture();
+    const abortRun = createEmbeddedAttemptRunAbort(fixture);
 
     abortRun(false, abortReason);
 
-    expect(runAbortController.signal.reason).toBe(abortReason);
+    expect(fixture.runAbortController.signal.reason).toBe(abortReason);
   });
 });

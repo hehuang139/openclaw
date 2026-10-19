@@ -14,7 +14,6 @@ import {
   createTestSession,
   registerAgentSessionLoopTestLifecycle,
 } from "../../sessions/agent-session-loop-correctness.test-support.js";
-import { makeAgentAssistantMessage } from "../../test-helpers/agent-message-fixtures.js";
 import { makeProviderModelFixture } from "../../test-helpers/provider-model-fixture.js";
 import { createZeroUsageFixture } from "../../test-helpers/usage-fixtures.js";
 import {
@@ -56,15 +55,20 @@ function guardAssistant(
   stopReason: AssistantMessage["stopReason"] = "stop",
   timestamp = 0,
 ) {
-  return makeAgentAssistantMessage({
-    content,
-    stopReason,
+  return {
+    ...createAssistant(model, content, stopReason),
     timestamp,
-    api: model.api,
-    provider: model.provider,
-    model: model.id,
     usage: createZeroUsageFixture(),
-  });
+  };
+}
+function fixtureTool<P, E>(parameters: P, execute: E) {
+  return {
+    name: "read_fixture",
+    label: "Read fixture",
+    description: "Read fixture",
+    parameters,
+    execute,
+  };
 }
 function makeEngine(
   storedPrefix = makeStoredPrefix(),
@@ -140,15 +144,7 @@ describe("context advancement through embedded attempt guards", () => {
         initialState: {
           model,
           messages: history,
-          tools: [
-            {
-              name: "read_fixture",
-              label: "Read fixture",
-              description: "Read fixture",
-              parameters: { type: "object", properties: {} },
-              execute,
-            },
-          ],
+          tools: [fixtureTool({ type: "object", properties: {} }, execute)],
         },
         streamFn: (_model, context) => {
           providerCalls++;
@@ -245,7 +241,7 @@ describe("context advancement through embedded attempt guards", () => {
   );
 
   it.each([0, 6])(
-    "preserves active content through prompt preparation and submission with %i silent replay messages",
+    "preserves active content across %i silent replay messages",
     async (silentCount) => {
       const prompt = "Perform task with tools.";
       const sessionId = `replay-boundary-${silentCount}`;
@@ -254,16 +250,10 @@ describe("context advancement through embedded attempt guards", () => {
       const { session } = await createTestSession({
         model,
         customTools: [
-          {
-            name: "read_fixture",
-            label: "Read fixture",
-            description: "Read fixture",
-            parameters: Type.Object({}),
-            execute: async () => ({
-              content: text(`fixture observation ${++toolCalls}`),
-              details: {},
-            }),
-          },
+          fixtureTool(Type.Object({}), async () => ({
+            content: text(`fixture observation ${++toolCalls}`),
+            details: {},
+          })),
         ],
       });
       session.agent.state.messages = [
