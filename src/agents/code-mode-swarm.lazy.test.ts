@@ -83,12 +83,11 @@ it("fences swarm effects after owner or policy loss during a shared runtime impo
       { id: "note", method: "swarmNote", args: [{ kind: "phase", text: "Plan" }] },
     ];
     function createRun() {
-      const catalogRef = createToolSearchCatalogRef();
       const config = { tools: { codeMode: true, swarm: { enabled: true } } };
       const ctx: ToolSearchToolContext = {
         config,
         runtimeConfig: config,
-        catalogRef,
+        catalogRef: createToolSearchCatalogRef(),
         sessionKey: "agent:main:main",
         sessionId: "session-swarm",
         runId: "run-swarm",

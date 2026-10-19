@@ -101,11 +101,11 @@ describe("buildCodexMcpServersConfig", () => {
 
 describe("loadCodexBundleMcpThreadConfigCore", () => {
   it("projects durable grants only for configured bundle names and fingerprints their removal", async () => {
-    mocks.bundleMcp.config.mcpServers = {
+    setServers({
       configured: { command: "mcp" },
       prompt: { command: "mcp" },
       pluginOnly: { command: "mcp" },
-    };
+    });
     mocks.loadExecApprovalsReadOnlyAsync.mockResolvedValue({
       version: 1,
       agents: {
@@ -147,19 +147,16 @@ describe("loadCodexBundleMcpThreadConfigCore", () => {
     const dataDir = path.join(tempDir, "plugin-data");
     const collisionPath = path.join(tempDir, "plugin-data-collision");
     await fs.writeFile(collisionPath, "not a directory", "utf8");
-    Object.assign(mocks.bundleMcp, {
-      config: {
-        mcpServers: {
-          weather: {
-            command: "node",
-            env: { PLUGIN_DATA: dataDir },
-            supportsParallelToolCalls: false,
-            codex: { defaultToolsApprovalMode: "prompt" },
-          },
-          broken: { command: "node", env: { PLUGIN_DATA: collisionPath } },
-        },
+    setServers({
+      weather: {
+        command: "node",
+        env: { PLUGIN_DATA: dataDir },
+        supportsParallelToolCalls: false,
+        codex: { defaultToolsApprovalMode: "prompt" },
       },
-      diagnostics: [],
+      broken: { command: "node", env: { PLUGIN_DATA: collisionPath } },
+    });
+    Object.assign(mocks.bundleMcp, {
       prepareDataDirsByServer: {
         weather: { pluginId: "weather-plugin", dataDir },
         broken: { pluginId: "broken-plugin", dataDir: collisionPath },

@@ -94,12 +94,15 @@ function connect(
 }
 
 const load = () => loadPairedComputerUseAvailabilityForSurface({ computerAllowed: true });
-const withContext = <T>(resolve: () => GatewayRequestContext | undefined, run: () => Promise<T>) =>
+const withContext = <T>(
+  context: GatewayRequestContext | (() => GatewayRequestContext | undefined),
+  run: () => Promise<T>,
+) =>
   withGatewayToolCallerIdentity(
     {
       agentId: "main",
       sessionKey: "agent:main:computer-discovery",
-      gatewayContextResolver: resolve,
+      gatewayContextResolver: typeof context === "function" ? context : () => context,
     },
     run,
   );
@@ -107,40 +110,37 @@ async function expectPrepared(
   expected: Partial<PreparedPairedComputerUse>,
   context?: GatewayRequestContext,
 ) {
-  const result = await (context ? withContext(() => context, load) : load());
+  const result = await (context ? withContext(context, load) : load());
   expect(result?.prepared).toMatchObject(expected);
 }
 
 it("updates the advertised surface after the local node and pairing owners change", async () => {
   const context = createContext();
-  await withContext(
-    () => context,
-    async () => {
-      await expectPrepared({ actions: [] });
-      connect(context, "paired-node", ["screenshot", "left_click"]);
-      const connected = await load();
-      expect(connected?.prepared).toMatchObject({
-        actions: ["screenshot", "left_click"],
-        guidanceCapabilities: { provider: { id: "fixture" } },
-      });
+  await withContext(context, async () => {
+    await expectPrepared({ actions: [] });
+    connect(context, "paired-node", ["screenshot", "left_click"]);
+    const connected = await load();
+    expect(connected?.prepared).toMatchObject({
+      actions: ["screenshot", "left_click"],
+      guidanceCapabilities: { provider: { id: "fixture" } },
+    });
 
-      context.nodeRegistry.refreshRuntimePolicy({
-        gateway: { nodes: { commands: { deny: ["computer.act"] } } },
-      });
-      await expectPrepared({ actions: [] });
-      context.nodeRegistry.refreshRuntimePolicy({});
-      await expectPrepared({ actions: ["screenshot", "left_click"] });
+    context.nodeRegistry.refreshRuntimePolicy({
+      gateway: { nodes: { commands: { deny: ["computer.act"] } } },
+    });
+    await expectPrepared({ actions: [] });
+    context.nodeRegistry.refreshRuntimePolicy({});
+    await expectPrepared({ actions: ["screenshot", "left_click"] });
 
-      pairing = { paired: [], bindings: new Map() };
-      await expectPrepared({ actions: [] });
-      connect(context, "paired-node", ["screenshot", "type"]);
-      const reconnected = await load();
-      expect(reconnected?.prepared?.actions).toEqual(["screenshot", "type"]);
-      expect(reconnected?.cacheKey).not.toBe(connected?.cacheKey);
-      context.nodeRegistry.unregister("connection-paired-node");
-      await expectPrepared({ actions: [] });
-    },
-  );
+    pairing = { paired: [], bindings: new Map() };
+    await expectPrepared({ actions: [] });
+    connect(context, "paired-node", ["screenshot", "type"]);
+    const reconnected = await load();
+    expect(reconnected?.prepared?.actions).toEqual(["screenshot", "type"]);
+    expect(reconnected?.cacheKey).not.toBe(connected?.cacheKey);
+    context.nodeRegistry.unregister("connection-paired-node");
+    await expectPrepared({ actions: [] });
+  });
 });
 
 it("observes the local computer owner's config and provider publications", async () => {
@@ -186,43 +186,40 @@ it("observes the local computer owner's config and provider publications", async
   });
   services.push(service);
   const context = createContext(service);
-  await withContext(
-    () => context,
-    async () => {
-      await expectPrepared({
-        actions: ["screenshot", "left_click"],
-        gateway: { configured: true, available: false },
-      });
-      expect(startComputerHostProcess).not.toHaveBeenCalled();
+  await withContext(context, async () => {
+    await expectPrepared({
+      actions: ["screenshot", "left_click"],
+      gateway: { configured: true, available: false },
+    });
+    expect(startComputerHostProcess).not.toHaveBeenCalled();
 
-      let active = true;
-      vi.mocked(startComputerHostProcess).mockReturnValue({
-        ready: Promise.resolve(capabilities(["screenshot", "left_click"])),
-        isCurrent: () => active,
-        invoke: async () => {
-          throw new Error("Discovery must not invoke the computer");
-        },
-        close: async () => {
-          active = false;
-        },
-      });
-      await service.status({ probe: true });
-      await expectPrepared({ gateway: { configured: true, available: true } });
-      active = false;
-      await expectPrepared({ gateway: { configured: true, available: false } });
+    let active = true;
+    vi.mocked(startComputerHostProcess).mockReturnValue({
+      ready: Promise.resolve(capabilities(["screenshot", "left_click"])),
+      isCurrent: () => active,
+      invoke: async () => {
+        throw new Error("Discovery must not invoke the computer");
+      },
+      close: async () => {
+        active = false;
+      },
+    });
+    await service.status({ probe: true });
+    await expectPrepared({ gateway: { configured: true, available: true } });
+    active = false;
+    await expectPrepared({ gateway: { configured: true, available: false } });
 
-      publishProvider(["screenshot", "type"]);
-      await expectPrepared({ actions: ["screenshot", "type"] });
+    publishProvider(["screenshot", "type"]);
+    await expectPrepared({ actions: ["screenshot", "type"] });
 
-      config = { plugins: { entries: { fixture: { enabled: false } } } };
-      await expectPrepared({
-        actions: [],
-        gateway: { configured: false, available: false },
-      });
-      config = { plugins: { entries: { fixture: { enabled: true } } } };
-      await expectPrepared({ actions: ["screenshot", "type"] });
-    },
-  );
+    config = { plugins: { entries: { fixture: { enabled: false } } } };
+    await expectPrepared({
+      actions: [],
+      gateway: { configured: false, available: false },
+    });
+    config = { plugins: { entries: { fixture: { enabled: true } } } };
+    await expectPrepared({ actions: ["screenshot", "type"] });
+  });
 });
 
 it("keeps inventory scoped to its admitted Gateway and rejects retired bindings locally", async () => {

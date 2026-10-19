@@ -1,4 +1,3 @@
-// Covers Codex-native web search activation and payload projection.
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -208,8 +207,6 @@ describe("Codex native web-search payload helpers", () => {
 
   it("injects native web_search into provider payloads", () => {
     const payload: Record<string, unknown> = { tools: [{ type: "function", name: "read" }] };
-    // Payload patching mutates the provider request in place because callers
-    // already hold the request object that will be sent to the model runtime.
     const result = patchCodexNativeWebSearchPayload({ payload, config: baseConfig });
 
     expect(result.status).toBe("injected");
@@ -228,32 +225,30 @@ describe("Codex native web-search payload helpers", () => {
   });
 });
 
-describe("isCodexNativeWebSearchRelevant", () => {
-  it("treats a default model with model-level openai-chatgpt-responses api as relevant", async () => {
-    // Provider-level APIs can be generic while individual models opt into the
-    // ChatGPT Responses shape that supports native web_search.
-    const model: ModelDefinitionConfig = {
-      id: "gpt-5.4",
-      name: "gpt-5.4",
-      api: "openai-chatgpt-responses",
-      reasoning: false,
-      input: ["text"],
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: 128_000,
-      maxTokens: 16_384,
-    };
-    const config: OpenClawConfig = {
-      agents: { defaults: { model: { primary: "gateway/gpt-5.4" } } },
-      models: {
-        providers: {
-          gateway: {
-            api: "openai-responses",
-            baseUrl: "https://gateway.example/v1",
-            models: [model],
-          },
+it("treats a default model with model-level openai-chatgpt-responses api as relevant", async () => {
+  // Provider-level APIs can be generic while individual models opt into the
+  // ChatGPT Responses shape that supports native web_search.
+  const model: ModelDefinitionConfig = {
+    id: "gpt-5.4",
+    name: "gpt-5.4",
+    api: "openai-chatgpt-responses",
+    reasoning: false,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 128_000,
+    maxTokens: 16_384,
+  };
+  const config: OpenClawConfig = {
+    agents: { defaults: { model: { primary: "gateway/gpt-5.4" } } },
+    models: {
+      providers: {
+        gateway: {
+          api: "openai-responses",
+          baseUrl: "https://gateway.example/v1",
+          models: [model],
         },
       },
-    };
-    expect(await isCodexNativeWebSearchRelevant({ config })).toBe(true);
-  });
+    },
+  };
+  expect(await isCodexNativeWebSearchRelevant({ config })).toBe(true);
 });

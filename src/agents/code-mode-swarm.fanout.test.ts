@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, assert, describe, expect, it } from "vitest";
 import type { CodeModeWorkerResult } from "./code-mode-runtime.js";
 import { resolveCodeModeConfig } from "./code-mode.js";
 import { resetCodeModeTestState, testing } from "./code-mode.test-support.js";
@@ -61,8 +61,6 @@ describe("Swarm pipeline backpressure", () => {
       ]);
       const collectors = new Map<string, string>();
       const progressItems: unknown[] = [];
-      // Drive real executor continuations with controlled child results; this tests request
-      // admission and resumption, not a mock of the guest's Promise implementation.
       for (let round = 0; result.status === "waiting" && round < count * 8; round++) {
         expect(result.pendingRequests.length).toBeGreaterThan(0);
         expect(result.pendingRequests.length).toBeLessThanOrEqual(limit);
@@ -74,9 +72,7 @@ describe("Swarm pipeline backpressure", () => {
             value = { ok: true };
           } else if (request.method === "agentSpawn") {
             const prompt = request.args[0];
-            if (typeof prompt !== "string") {
-              throw new Error("expected a collector prompt");
-            }
+            assert(typeof prompt === "string", "expected a collector prompt");
             const runId = `collector-${collectors.size}`;
             collectors.set(runId, prompt);
             value = { status: "accepted", runId };
@@ -88,9 +84,7 @@ describe("Swarm pipeline backpressure", () => {
             expect(request.method).toBe("agentWait");
             const runId = request.args[0];
             const prompt = typeof runId === "string" ? collectors.get(runId) : undefined;
-            if (!prompt) {
-              throw new Error("wait must reference an accepted collector");
-            }
+            assert(prompt, "wait must reference an accepted collector");
             const nextStage = prompt.startsWith("first-")
               ? prompt.replace("first-", "second-")
               : prompt.replace("second-", "done-");
@@ -103,12 +97,10 @@ describe("Swarm pipeline backpressure", () => {
         });
         result = await executor.resume(result.continuation, settledRequests, pendingRequests);
       }
-      expect(result.status, result.status === "failed" ? result.error : undefined).toBe(
-        "completed",
+      assert(
+        result.status === "completed",
+        result.status === "failed" ? result.error : "pipeline must complete",
       );
-      if (result.status !== "completed") {
-        throw new Error("pipeline must complete");
-      }
       expect(result.value.kind).toBe("complete");
       expect(JSON.parse(result.value.json)).toEqual(
         Array.from({ length: count }, (_, index) =>
@@ -143,6 +135,7 @@ describe("Swarm pipeline backpressure", () => {
     "preserves queued collector arguments and structured=%s results",
     async (structured) => {
       const executor = createExecutor(1);
+      const options = { label: "original", ...(structured ? { schema: { type: "object" } } : {}) };
       let result = await executor.exec(`
           const timer = setTimeout(() => { throw new Error("canceled timer fired"); }, 60_000);
           const options = { label: "original", ...(${structured} ? { schema: { type: "object" } } : {}) };
@@ -160,10 +153,7 @@ describe("Swarm pipeline backpressure", () => {
           {
             id: "bridge:agentSpawn:1",
             method: "agentSpawn",
-            args: [
-              "Queued research",
-              { label: "original", ...(structured ? { schema: { type: "object" } } : {}) },
-            ],
+            args: ["Queued research", options],
           },
         ],
       });
@@ -184,10 +174,7 @@ describe("Swarm pipeline backpressure", () => {
         }));
         result = await executor.resume(result.continuation, settledRequests);
       }
-      expect(result.status).toBe("completed");
-      if (result.status !== "completed") {
-        throw new Error("collector must complete");
-      }
+      assert(result.status === "completed", "collector must complete");
       expect(JSON.parse(result.value.json)).toEqual(structured ? { answer: 42 } : "text");
     },
   );

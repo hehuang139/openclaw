@@ -51,13 +51,16 @@ const discovered = (id: string, contextWindow: number, provider?: string) => ({
   contextWindow,
   provider,
 });
+const sync = { allowAsyncLoad: false };
+const sonnet = "openrouter/claude-sonnet";
 
 let context: typeof import("./context.js");
-function tokens(
+function expectTokens(
   modelId: string,
+  expected: number | undefined,
   options: Omit<Parameters<typeof context.resolveContextTokensForModel>[0], "model"> = {},
 ) {
-  return context.resolveContextTokensForModel({ model: modelId, ...options });
+  expect(context.resolveContextTokensForModel({ model: modelId, ...options })).toBe(expected);
 }
 
 beforeAll(async () => {
@@ -85,8 +88,8 @@ afterEach(async () => {
 
 describe("context cache lifecycle", () => {
   it("rehydrates configured entries after module reload without rereading config", async () => {
-    state.config = config("openrouter", model("openrouter/claude-sonnet", 321_000));
-    expect(tokens("openrouter/claude-sonnet", { allowAsyncLoad: false })).toBe(321_000);
+    state.config = config("openrouter", model(sonnet, 321_000));
+    expectTokens(sonnet, 321_000, sync);
     expect(state.loadConfig).toHaveBeenCalledTimes(1);
 
     vi.resetModules();
@@ -94,41 +97,36 @@ describe("context cache lifecycle", () => {
       throw new Error("config should come from shared runtime state");
     });
     const reloaded = await import("./context.js");
-    expect(
-      reloaded.resolveContextTokensForModel({
-        model: "openrouter/claude-sonnet",
-        allowAsyncLoad: false,
-      }),
-    ).toBe(321_000);
+    expect(reloaded.resolveContextTokensForModel({ model: sonnet, ...sync })).toBe(321_000);
     expect(state.loadConfig).not.toHaveBeenCalled();
   });
 
   it("retries config loading only after backoff", async () => {
     vi.useFakeTimers();
-    state.config = config("openrouter", model("openrouter/claude-sonnet", 654_321));
+    state.config = config("openrouter", model(sonnet, 654_321));
     state.loadConfig.mockImplementationOnce(() => {
       throw new Error("transient");
     });
-    expect(tokens("openrouter/claude-sonnet")).toBeUndefined();
+    expectTokens(sonnet, undefined);
     expect(state.loadConfig).toHaveBeenCalledTimes(1);
-    expect(tokens("openrouter/claude-sonnet")).toBeUndefined();
+    expectTokens(sonnet, undefined);
     expect(state.loadConfig).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(1_000);
-    expect(tokens("openrouter/claude-sonnet")).toBe(654_321);
+    expectTokens(sonnet, 654_321);
     expect(state.loadConfig).toHaveBeenCalledTimes(2);
     await context.ensureContextWindowCacheLoaded();
   });
 
   it("replaces configured token overrides before refreshing discovery", async () => {
     state.config = config("openrouter", model("claude-sonnet", 321_000, 111_000));
-    expect(tokens("claude-sonnet", { allowAsyncLoad: false })).toBe(111_000);
+    expectTokens("claude-sonnet", 111_000, sync);
     state.catalog.entries = [discovered("claude-sonnet", 654_321, "openrouter")];
     const pending = context.refreshContextWindowCache(
       config("openrouter", model("claude-sonnet", 222_000)),
     );
-    expect(tokens("claude-sonnet", { allowAsyncLoad: false })).toBe(222_000);
+    expectTokens("claude-sonnet", 222_000, sync);
     await pending;
-    expect(tokens("claude-sonnet", { allowAsyncLoad: false })).toBe(222_000);
+    expectTokens("claude-sonnet", 222_000, sync);
   });
 
   it("loads exact read-only metadata rather than the Gateway-published owner", async () => {
@@ -139,7 +137,7 @@ describe("context cache lifecycle", () => {
     await context.ensureContextWindowCacheLoaded(cfg);
     expect(state.loadOwner).toHaveBeenCalledWith({ config: cfg, readOnly: true });
     expect(state.publishedOwner).not.toHaveBeenCalled();
-    expect(tokens("anthropic/claude-opus-4.7-20260219", { allowAsyncLoad: false })).toBe(1_000_000);
+    expectTokens("anthropic/claude-opus-4.7-20260219", 1_000_000, sync);
   });
 
   it.each(["success", "failure"])(
@@ -157,7 +155,7 @@ describe("context cache lifecycle", () => {
       state.catalog.entries = [discovered("new-model", 222_000, "synthetic")];
       await context.refreshContextWindowCache({});
       const options = { provider: "synthetic", allowAsyncLoad: false };
-      expect(tokens("new-model", options)).toBe(222_000);
+      expectTokens("new-model", 222_000, options);
 
       if (outcome === "failure") {
         older.reject(new Error("old catalog unavailable"));
@@ -170,8 +168,8 @@ describe("context cache lifecycle", () => {
       }
       await pending;
 
-      expect(tokens("new-model", options)).toBe(222_000);
-      expect(tokens("old-model", options)).toBeUndefined();
+      expectTokens("new-model", 222_000, options);
+      expectTokens("old-model", undefined, options);
     },
   );
 
@@ -189,10 +187,10 @@ describe("context cache lifecycle", () => {
     });
     expect(state.loadOwner).not.toHaveBeenCalled();
     const options = { allowAsyncLoad: false, cfg: {} };
-    expect(tokens("current-model", options)).toBe(222_000);
-    expect(tokens("discovered-model", options)).toBe(64_000);
-    expect(tokens("static-model", options)).toBe(1_048_576);
-    expect(tokens("stale-model", options)).toBeUndefined();
+    expectTokens("current-model", 222_000, options);
+    expectTokens("discovered-model", 64_000, options);
+    expectTokens("static-model", 1_048_576, options);
+    expectTokens("stale-model", undefined, options);
   });
 
   it("retires failed prewarm so exact request-time loading can recover", async () => {
@@ -203,7 +201,7 @@ describe("context cache lifecycle", () => {
     expect(CONTEXT_WINDOW_RUNTIME_STATE.configuredConfig).toBeUndefined();
     await context.ensureContextWindowCacheLoaded();
     expect(state.loadOwner).toHaveBeenCalledWith({ config: state.config, readOnly: true });
-    expect(tokens("recovered-model", { allowAsyncLoad: false })).toBe(96_000);
+    expectTokens("recovered-model", 96_000, sync);
   });
 
   it("retires stale discovery when exact catalog loading fails", async () => {
@@ -212,7 +210,7 @@ describe("context cache lifecycle", () => {
     await context.ensureContextWindowCacheLoaded(
       config("synthetic", model("current-model", 96_000)),
     );
-    expect(tokens("stale-model", { cfg: {} })).toBeUndefined();
+    expectTokens("stale-model", undefined, { cfg: {} });
   });
 
   it("does not publish prewarm cancelled during cooperative projection", async () => {
@@ -233,7 +231,7 @@ describe("context cache lifecycle", () => {
     });
 
     expect(cancelled).toBe(true);
-    expect(tokens("cancelled-599", { cfg: {} })).toBeUndefined();
+    expectTokens("cancelled-599", undefined, { cfg: {} });
     expect(CONTEXT_WINDOW_RUNTIME_STATE.loadPromise).toBeNull();
   });
 });
@@ -246,31 +244,27 @@ describe("provider-owned context lookup", () => {
       discovered("google-gemini-cli/gemini-3.1-pro-preview", 1_048_576, "google-gemini-cli"),
     ];
     await context.ensureContextWindowCacheLoaded();
-    expect(tokens("gemini-3.1-pro-preview", { provider: "google-gemini-cli" })).toBe(1_048_576);
-    expect(tokens("gemini-3.1-pro-preview")).toBe(128_000);
+    expectTokens("gemini-3.1-pro-preview", 1_048_576, { provider: "google-gemini-cli" });
+    expectTokens("gemini-3.1-pro-preview", 128_000);
   });
 
   it("falls back to a bare configured row", () => {
-    expect(
-      tokens("kilocode/kilo-auto/balanced", {
-        cfg: config("kilocode", model("kilo-auto/balanced", 900_000, 900_000)),
-        provider: "kilocode",
-      }),
-    ).toBe(900_000);
+    expectTokens("kilocode/kilo-auto/balanced", 900_000, {
+      cfg: config("kilocode", model("kilo-auto/balanced", 900_000, 900_000)),
+      provider: "kilocode",
+    });
   });
 
   it("treats explicit config as authoritative for read-only misses", () => {
     state.loadConfig.mockImplementation(() => {
       throw new Error("runtime config should not load");
     });
-    expect(
-      tokens("unknown-test-model", {
-        cfg: { agents: { defaults: {} } },
-        provider: "openai",
-        fallbackContextTokens: 123_000,
-        allowAsyncLoad: false,
-      }),
-    ).toBe(123_000);
+    expectTokens("unknown-test-model", 123_000, {
+      cfg: { agents: { defaults: {} } },
+      provider: "openai",
+      fallbackContextTokens: 123_000,
+      allowAsyncLoad: false,
+    });
     expect(state.loadConfig).not.toHaveBeenCalled();
   });
 
@@ -278,9 +272,9 @@ describe("provider-owned context lookup", () => {
     state.catalog.entries = [discovered("google/gemini-2.5-pro", 999_000, "openrouter")];
     await context.ensureContextWindowCacheLoaded();
     const cfg = config("google", model("gemini-2.5-pro", 2_000_000));
-    expect(tokens("gemini-2.5-pro", { cfg, provider: "google" })).toBe(2_000_000);
-    expect(tokens("google/gemini-2.5-pro", { provider: "openrouter" })).toBe(999_000);
-    expect(tokens("gemini-2.5-pro", { provider: "google" })).toBeUndefined();
-    expect(tokens("google/gemini-2.5-pro", { cfg })).toBe(999_000);
+    expectTokens("gemini-2.5-pro", 2_000_000, { cfg, provider: "google" });
+    expectTokens("google/gemini-2.5-pro", 999_000, { provider: "openrouter" });
+    expectTokens("gemini-2.5-pro", undefined, { provider: "google" });
+    expectTokens("google/gemini-2.5-pro", 999_000, { cfg });
   });
 });

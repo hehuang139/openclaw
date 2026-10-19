@@ -70,41 +70,6 @@ afterEach(async () => {
 });
 
 describe("agent tool result middleware", () => {
-  it("includes plugin-registered middleware and restores it from cache", async () => {
-    const tmp = createBundledTempDir();
-    process.env.OPENCLAW_BUNDLED_PLUGINS_DIR = tmp;
-
-    writeTempPlugin({
-      dir: tmp,
-      id: "tool-result-middleware",
-      filename: "index.mjs",
-      manifest: { contracts: middlewareContract },
-      body: `export default { id: "tool-result-middleware", register(api) {
-  api.registerAgentToolResultMiddleware(async (event) => ({
-    result: { ...event.result, content: [{ type: "text", text: event.toolName + " compacted" }] }
-  }), { runtimes: ["codex"] });
-} };`,
-    });
-
-    const options = enabledOptions("tool-result-middleware");
-
-    setRuntimeConfigSnapshot(options.config);
-    loadOpenClawPlugins(options);
-    expect(listAgentToolResultMiddlewares("codex")).toHaveLength(1);
-    expect(listAgentToolResultMiddlewares("openclaw")).toHaveLength(0);
-
-    resetActivePluginRegistryForTest();
-    expect(listAgentToolResultMiddlewares("codex")).toHaveLength(0);
-
-    // The second load proves manifest-backed discovery can restore middleware
-    // after the active in-memory registry has been reset.
-    loadOpenClawPlugins(options);
-    const runner = createAgentToolResultMiddlewareRunner({ runtime: "codex" });
-    const result = await runner.applyToolResultMiddleware(toolResultEvent());
-
-    expect(result.content).toEqual([{ type: "text", text: "exec compacted" }]);
-  });
-
   it("does not treat auto-enabled runtime config as explicit middleware opt-in", async () => {
     const tmp = createTempDir();
     process.env.OPENCLAW_BUNDLED_PLUGINS_DIR = "/nonexistent/bundled/plugins";
@@ -187,51 +152,12 @@ describe("agent tool result middleware", () => {
 });
 
 describe("Codex app-server extension factories", () => {
-  it("includes plugin-registered Codex app-server extension factories and restores them from cache", async () => {
-    const tmp = createBundledTempDir();
-    process.env.OPENCLAW_BUNDLED_PLUGINS_DIR = tmp;
-
-    writeTempPlugin({
-      dir: tmp,
-      id: "codex-ext",
-      filename: "index.mjs",
-      manifest: { contracts: extensionContract },
-      body: `export default { id: "codex-ext", register(api) {
-  api.registerCodexAppServerExtensionFactory((codex) => {
-    codex.on("tool_result", async (event) => ({
-      result: { ...event.result, content: [{ type: "text", text: "compacted" }] }
-    }));
-  });
-} };`,
-    });
-
-    const options = enabledOptions("codex-ext");
-
-    setRuntimeConfigSnapshot(options.config);
-    loadOpenClawPlugins(options);
-    expect(listCodexAppServerExtensionFactories()).toHaveLength(1);
-
-    resetActivePluginRegistryForTest();
-    expect(listCodexAppServerExtensionFactories()).toHaveLength(0);
-
-    // Factories are cached like middleware so app-server startup can recover
-    // them after registry resets without reinterpreting arbitrary paths.
-    loadOpenClawPlugins(options);
-    const runner = createCodexAppServerToolResultExtensionRunner({});
-    const result = await runner.applyToolResultExtensions(toolResultEvent());
-
-    expect(result.content).toEqual([{ type: "text", text: "compacted" }]);
-  });
-
   it("initializes async Codex app-server extension factories in registration order", async () => {
     const steps: string[] = [];
-    let releaseFirstFactory: () => void = () => {};
-    const firstFactoryCanContinue = new Promise<void>((resolve) => {
-      releaseFirstFactory = resolve;
-    });
+    const firstFactory = Promise.withResolvers<void>();
     const runner = createCodexAppServerToolResultExtensionRunner({}, [
       async (codex) => {
-        await firstFactoryCanContinue;
+        await firstFactory.promise;
         codex.on("tool_result", async ({ result }) => {
           steps.push("first");
           return {
@@ -250,14 +176,69 @@ describe("Codex app-server extension factories", () => {
       },
     ]);
 
-    // Awaiting each factory in order keeps later handlers from observing a
-    // partially initialized earlier extension.
-    releaseFirstFactory();
+    firstFactory.resolve();
     await runner.applyToolResultExtensions(toolResultEvent());
 
     expect(steps).toEqual(["first", "second"]);
   });
 });
+
+it.each([
+  {
+    id: "tool-result-middleware",
+    contracts: middlewareContract,
+    text: "exec compacted",
+    registration: `api.registerAgentToolResultMiddleware(async (event) => ({
+    result: { ...event.result, content: [{ type: "text", text: event.toolName + " compacted" }] }
+  }), { runtimes: ["codex"] });`,
+    list: () => listAgentToolResultMiddlewares("codex"),
+    apply: () =>
+      createAgentToolResultMiddlewareRunner({ runtime: "codex" }).applyToolResultMiddleware(
+        toolResultEvent(),
+      ),
+  },
+  {
+    id: "codex-ext",
+    contracts: extensionContract,
+    text: "compacted",
+    registration: `api.registerCodexAppServerExtensionFactory((codex) => {
+    codex.on("tool_result", async (event) => ({
+      result: { ...event.result, content: [{ type: "text", text: "compacted" }] }
+    }));
+  });`,
+    list: listCodexAppServerExtensionFactories,
+    apply: () =>
+      createCodexAppServerToolResultExtensionRunner({}).applyToolResultExtensions(
+        toolResultEvent(),
+      ),
+  },
+])(
+  "restores plugin-registered $id from cache",
+  async ({ id, contracts, registration, text, list, apply }) => {
+    const dir = createBundledTempDir();
+    process.env.OPENCLAW_BUNDLED_PLUGINS_DIR = dir;
+    writeTempPlugin({
+      dir,
+      id,
+      filename: "index.mjs",
+      manifest: { contracts },
+      body: `export default { id: ${JSON.stringify(id)}, register(api) {
+  ${registration}
+} };`,
+    });
+    const options = enabledOptions(id);
+    setRuntimeConfigSnapshot(options.config);
+    loadOpenClawPlugins(options);
+    expect(list()).toHaveLength(1);
+    if (id === "tool-result-middleware") {
+      expect(listAgentToolResultMiddlewares("openclaw")).toHaveLength(0);
+    }
+    resetActivePluginRegistryForTest();
+    expect(list()).toHaveLength(0);
+    loadOpenClawPlugins(options);
+    expect((await apply()).content).toEqual([{ type: "text", text }]);
+  },
+);
 
 it.each([
   {

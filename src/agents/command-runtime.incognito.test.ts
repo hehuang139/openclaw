@@ -73,12 +73,8 @@ afterAll(async () => {
   memorySessionActorOwners.closeDatabase(other);
 });
 
-async function create(
-  name: string,
-  patch: Partial<SessionEntry> = {},
-  owner = actor,
-  signal?: AbortSignal,
-) {
+async function create(name: string, patch: Partial<SessionEntry> = {}, owner = actor) {
+  const controller = new AbortController();
   const sessionKey = `agent:main:dashboard:incognito-${name}`;
   const entry: SessionEntry = {
     sessionId: name,
@@ -92,7 +88,7 @@ async function create(
     {
       assertCurrent() {},
       assertReadable() {
-        signal?.throwIfAborted();
+        controller.signal.throwIfAborted();
       },
     },
   );
@@ -103,11 +99,14 @@ async function create(
   ).toMatchObject({ kind: "committed" });
   const target = { agentId: "main", storePath: owner.path, sessionKey, sessionId: entry.sessionId };
   return {
-    binding,
     target,
     entry,
     run: <T>(callback: () => T) => runWithSessionActorStorage(binding, callback),
     read: () => owner.readSession(sessionKey, authority)?.entry,
+    abort: (message: string) => {
+      controller.abort(new Error(message));
+      expect(() => handle.assertReadable()).toThrow(message);
+    },
   };
 }
 
@@ -135,13 +134,7 @@ const patchedModel = {
 } satisfies Partial<SessionEntry>;
 
 it("settles queued CLI records on their captured actor after abort and outside the binding", async () => {
-  const controller = new AbortController();
-  const { target, binding, run } = await create(
-    "cli-records",
-    { activeWriterRunId: "cli-run" },
-    actor,
-    controller.signal,
-  );
+  const { target, run, abort } = await create("cli-records", { activeWriterRunId: "cli-run" });
   const foreign = await create("cli-records", { activeWriterRunId: "cli-run" }, other);
   const recorder = run(() =>
     createCliDispatchTranscriptRecorder({
@@ -155,18 +148,13 @@ it("settles queued CLI records on their captured actor after abort and outside t
     }),
   );
   foreign.run(() => {
-    recorder.noteToolEvent({ phase: "start", toolName: "read", toolCallId: "tool-1" });
-    recorder.noteToolEvent({
-      phase: "result",
-      toolName: "read",
-      toolCallId: "tool-1",
-      result: "private result",
-    });
+    const tool = { toolName: "read", toolCallId: "tool-1" };
+    recorder.noteToolEvent({ phase: "start", ...tool });
+    recorder.noteToolEvent({ phase: "result", ...tool, result: "private result" });
     recorder.noteAssistantText("partial private reply");
   });
   // Abort before the recorder's Promise FIFO can start its first append.
-  controller.abort(new Error("run stopped"));
-  expect(() => binding.actor.assertReadable()).toThrow("run stopped");
+  abort("run stopped");
   recorder.flushAssistantSnapshot();
   await recorder.finalize();
 
@@ -180,20 +168,13 @@ it("settles queued CLI records on their captured actor after abort and outside t
 });
 
 it("rolls back a failed model and appends its visible note to the original actor after cancellation", async () => {
-  const controller = new AbortController();
-  const { target, binding, run, read } = await create(
-    "rollback",
-    patchedModel,
-    actor,
-    controller.signal,
-  );
+  const { target, run, read, abort } = await create("rollback", patchedModel);
   const foreign = await create("rollback", patchedModel, other);
   const onError = vi.fn();
   const guard = await run(() =>
     createAgentPatchedSessionModelRunGuard({ ...target, cfg: {}, onError }),
   );
-  controller.abort(new Error("run finished"));
-  expect(() => binding.actor.assertReadable()).toThrow("run finished");
+  abort("run finished");
   await foreign.run(() => guard.fail(new Error("model unavailable"), "model_not_found"));
 
   expect(onError).not.toHaveBeenCalled();
@@ -269,16 +250,6 @@ it.each([true, false])(
     const { target, entry, run } = await create(`final-delivery-${hasStorePath}`, {
       activeWriterRunId: "first-writer",
     });
-    entry.restartRecoveryHarnessCompletion = {
-      taskId: "task",
-      taskRunId: "task-run",
-      taskStatus: "succeeded",
-      sourceRunId: "announce:task-run",
-      requesterAgentId: "main",
-      requesterSessionKey: target.sessionKey,
-      sessionId: target.sessionId,
-      lifecycleRevision: entry.lifecycleRevision,
-    };
     const payload = { text: "final private reply" };
     setReplyPayloadMetadata(payload, {
       sessionWriterDeliveryAuthority: {
@@ -289,9 +260,8 @@ it.each([true, false])(
         expectedWriterRunId: "first-writer",
       },
     });
-    const result = await run(async () => {
-      await replaceSessionEntry(target, entry);
-      return persistPendingFinalDeliveryMarker({
+    const result = await run(() =>
+      persistPendingFinalDeliveryMarker({
         ...target,
         deliver: true,
         sessionStore: { [target.sessionKey]: entry },
@@ -301,8 +271,8 @@ it.each([true, false])(
         payloads: [payload],
         deliveryContext: { channel: "discord", to: "channel:synthetic" },
         runOwnedSessionId: target.sessionId,
-      });
-    });
+      }),
+    );
 
     expect(result.pendingFinalDeliveryMarkerPersisted).toBe(true);
     let release = () => {};
