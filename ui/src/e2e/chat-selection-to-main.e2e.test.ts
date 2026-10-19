@@ -552,6 +552,8 @@ suite.define(() => {
             await addComment(page, "Review before deployment.");
             await pin.waitFor({ state: "visible" });
           };
+          // Startup layout can still scroll, which intentionally dismisses the selection toolbar.
+          await waitForChatScrollIdle(page);
           await saveComment();
           await pin.click();
           await submitComment(comment, "Check rollback first.", "Save");
