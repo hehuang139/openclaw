@@ -14,24 +14,7 @@ import {
   startupHarnessDatabases,
 } from "./manager-sync-ops.startup-catchup.test-support.js";
 
-const activity = vi.hoisted(() => ({
-  listener: undefined as ((busy: boolean) => void) | undefined,
-}));
-
-vi.mock("openclaw/plugin-sdk/memory-core-host-engine-foundation", async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import("openclaw/plugin-sdk/memory-core-host-engine-foundation")>();
-  return {
-    ...actual,
-    observeAgentRunActivity: (_agentId: string, listener: (busy: boolean) => void) => {
-      activity.listener = listener;
-      listener(false);
-      return () => {
-        activity.listener = undefined;
-      };
-    },
-  };
-});
+const { activity } = await vi.hoisted(() => import("./manager-session-activity.test-support.js"));
 
 describe("session index scheduling", () => {
   let testState: OpenClawTestState;
@@ -74,6 +57,7 @@ describe("session index scheduling", () => {
     sessions,
     archiveFiles: [],
   });
+  const catchup = { reason: "session-startup-catchup" };
   async function expectPendingFor(delay: number) {
     await vi.advanceTimersByTimeAsync(delay);
     expect(harness.syncCalls).toEqual([]);
@@ -86,6 +70,36 @@ describe("session index scheduling", () => {
   async function expectAttemptsAfter(delay: number, index: unknown, count: number) {
     await vi.advanceTimersByTimeAsync(delay);
     expect(index).toHaveBeenCalledTimes(count);
+  }
+  function fallbackFixture(sessionId: string, persistentFailure = false) {
+    const target = append(sessionId);
+    const error = createMemoryEmbeddingOperationError({
+      operation: "batch",
+      cause: "embedding backend failed",
+    });
+    const state = { lastAttemptAt: 0, rebuildNext: false };
+    const fail = async () => {
+      state.lastAttemptAt = Date.now();
+      throw error;
+    };
+    const index = vi.fn(async () => {});
+    if (persistentFailure) {
+      index.mockImplementation(fail);
+    } else {
+      index.mockImplementationOnce(fail);
+    }
+    harness["syncArchiveFiles"] = index;
+    harness["activateFallbackProvider"] = vi.fn(async () => true);
+    harness["sync"] = async (params) => {
+      harness.syncCalls.push(params ?? {});
+      if (state.rebuildNext || (!persistentFailure && params?.reason !== "session-delta")) {
+        state.rebuildNext = false;
+        await harness.runSyncForTest(params);
+      } else {
+        await harness["syncTargetedSessions"](new Set([`/tmp/${sessionId}.jsonl`]));
+      }
+    };
+    return { target, index, state };
   }
 
   it("waits for a fresh quiet period and includes every pending session in one pass", async () => {
@@ -172,36 +186,14 @@ describe("session index scheduling", () => {
   });
 
   it("keeps the final automatic retry until a long rebuild cooldown expires", async () => {
-    const target = append("cooldown");
-    const index = vi.fn(async () => {});
-    index.mockRejectedValueOnce(
-      createMemoryEmbeddingOperationError({
-        operation: "batch",
-        cause: "embedding backend failed",
-      }),
-    );
-    harness["syncArchiveFiles"] = index;
-    harness["activateFallbackProvider"] = vi.fn(async () => true);
+    const { target, index } = fallbackFixture("cooldown");
     // Earlier rebuild failures have reached the existing thirty-minute cap.
     for (let attempt = 0; attempt < 7; attempt++) {
       harness["recordFullReindexFailure"](false);
     }
-    harness["sync"] = async (params) => {
-      harness.syncCalls.push(params ?? {});
-      if (params?.reason === "session-delta") {
-        await harness["syncTargetedSessions"](new Set(["/tmp/cooldown.jsonl"]));
-      } else {
-        await harness.runSyncForTest(params);
-      }
-    };
-
     await expectAttemptsAfter(30_000, index, 1);
     await vi.advanceTimersByTimeAsync(60_000 + 300_000);
-    expect(harness.syncCalls).toEqual([
-      pass(target),
-      { reason: "session-startup-catchup" },
-      { reason: "session-startup-catchup" },
-    ]);
+    expect(harness.syncCalls).toEqual([pass(target), catchup, catchup]);
     await expectAttemptsAfter(1_800_000 - 390_000 - 1, index, 1);
     expect(harness.syncCalls).toHaveLength(3);
 
@@ -211,34 +203,10 @@ describe("session index scheduling", () => {
   });
 
   it("backs off handled fallback failures, yields to turns, and stops retrying until new activity", async () => {
-    const target = append("fallback");
-    const sessionFile = "/tmp/fallback.jsonl";
-    const index = vi.fn(async () => {});
-    const error = createMemoryEmbeddingOperationError({
-      operation: "batch",
-      cause: "embedding backend failed",
-    });
-    let lastAttemptAt = 0;
-    index.mockImplementation(async () => {
-      lastAttemptAt = Date.now();
-      throw error;
-    });
-    harness["syncArchiveFiles"] = index;
-    harness["activateFallbackProvider"] = vi.fn(async () => true);
-    let deferForRebuildCooldown = false;
-    harness["sync"] = async (params) => {
-      harness.syncCalls.push(params ?? {});
-      if (deferForRebuildCooldown) {
-        deferForRebuildCooldown = false;
-        await harness.runSyncForTest(params);
-        return;
-      }
-      await harness["syncTargetedSessions"](new Set([sessionFile]));
-    };
-
+    const { target, index, state } = fallbackFixture("fallback", true);
     await expectAttemptsAfter(30_000, index, 1);
     for (const [attempt, delay] of [60_000, 300_000, 900_000].entries()) {
-      await expectAttemptsAfter(lastAttemptAt + delay - Date.now() - 1, index, attempt + 1);
+      await expectAttemptsAfter(state.lastAttemptAt + delay - Date.now() - 1, index, attempt + 1);
       if (attempt === 1) {
         activity.listener?.(true);
         await expectAttemptsAfter(60_000, index, attempt + 1);
@@ -247,17 +215,14 @@ describe("session index scheduling", () => {
       await expectAttemptsAfter(1, index, attempt + 2);
     }
     await expectAttemptsAfter(3_600_000, index, 4);
-    expect(harness.syncCalls).toEqual([
-      pass(target),
-      ...Array.from({ length: 3 }, () => ({ reason: "session-startup-catchup" })),
-    ]);
+    expect(harness.syncCalls).toEqual([pass(target), catchup, catchup, catchup]);
     expect(harness["sessionsFullRetryDirty"]).toBe(true);
 
     index.mockResolvedValue(undefined);
     activity.listener?.(true);
     await expectAttemptsAfter(30_000, index, 4);
     harness["recordFullReindexFailure"](false);
-    deferForRebuildCooldown = true;
+    state.rebuildNext = true;
     activity.listener?.(false);
     await expectAttemptsAfter(1, index, 4);
     await expectAttemptsAfter(59_998, index, 4);

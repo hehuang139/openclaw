@@ -27,16 +27,15 @@ async function indexedManager(cfg = createConfig()) {
   await manager.sync({ reason: "test", force: true });
   return manager;
 }
-const seedSession = (sessionId: string, content: string, kind = "chat") =>
+const sessionId = "worker-read";
+const sessionPath = `sessions/main/${sessionId}.jsonl`;
+const seedSession = (content: string, kind = "chat") =>
   fixture.seedSessionTranscript({
     sessionId,
     sessionKey: `agent:main:${kind}:${sessionId}`,
     messages: [{ role: "user", timestamp: Date.now(), content }],
   });
-function gateWorker(
-  signal: AbortSignal,
-  check: (result: Awaited<ReturnType<typeof cpuRuntime.runMemoryKeywordSearch>>) => void,
-) {
+function gateWorker(signal: AbortSignal, fused = false) {
   const ready = createDeferred<void>();
   const release = createDeferred<void>();
   const run = cpuRuntime.runMemoryKeywordSearch;
@@ -44,7 +43,11 @@ function gateWorker(
     .spyOn(cpuRuntime, "runMemoryKeywordSearch")
     .mockImplementationOnce(async (...args) => {
       const result = await run(...args);
-      check(result);
+      expect(result.body.rows.some((row) => row.path === sessionPath)).toBe(true);
+      if (fused) {
+        expect(result.recallData?.sourceMtimes.sessions.has(sessionPath)).toBe(true);
+        expect(result.body.rows.every((row) => result.recallData?.rows.has(row.id))).toBe(true);
+      }
       ready.resolve();
       await release.promise;
       return result;
@@ -52,42 +55,47 @@ function gateWorker(
   const abort = () => release.resolve();
   signal.addEventListener("abort", abort, { once: true });
   return {
-    ready: ready.promise,
-    release: () => release.resolve(),
+    wait: (search: Promise<unknown>) =>
+      Promise.race([
+        ready.promise,
+        search.then(() => {
+          throw new Error("Search settled before its worker result was gated");
+        }),
+      ]),
+    release: abort,
     restore() {
       signal.removeEventListener("abort", abort);
       query.mockRestore();
     },
   };
 }
-const awaitWorker = (ready: Promise<void>, search: Promise<unknown>) =>
-  Promise.race([
-    ready,
-    search.then(() => {
-      throw new Error("Search settled before its worker result was gated");
-    }),
-  ]);
+type Manager = Awaited<ReturnType<typeof indexedManager>>;
+function expectMissingChunk(manager: Manager) {
+  const db = Reflect.get(manager, "db") as DatabaseSync;
+  expect(
+    db.prepare("SELECT id FROM memory_index_chunks WHERE path = ?").get(sessionPath),
+  ).toBeUndefined();
+}
+async function expectReaders(manager: Manager, word: string) {
+  const results = await manager.search(word, { lexicalOnly: true });
+  expect(results[0]?.snippet).toContain(word);
+  expect((await manager.listTriggerCandidates())[0]?.snippet).toContain(word);
+}
 
 it("sees published replacements through reused search and curated readers", async () => {
   const filename = path.join(fixture.paths.workspace, "MEMORY.md");
   await fs.writeFile(filename, "- Remember violetcompass. <!-- trigger: compass -->");
   const manager = await indexedManager();
-  expect((await manager.search("violetcompass", { lexicalOnly: true }))[0]?.snippet).toContain(
-    "violetcompass",
-  );
-  expect((await manager.listTriggerCandidates())[0]?.snippet).toContain("violetcompass");
+  await expectReaders(manager, "violetcompass");
 
   await fs.writeFile(filename, "- Remember ambercompass. <!-- trigger: compass -->");
   await manager.sync({ reason: "replace-after-reader-reuse", force: true });
   await expect(manager.search("violetcompass", { lexicalOnly: true })).resolves.toEqual([]);
-  expect((await manager.search("ambercompass", { lexicalOnly: true }))[0]?.snippet).toContain(
-    "ambercompass",
-  );
-  expect((await manager.listTriggerCandidates())[0]?.snippet).toContain("ambercompass");
+  await expectReaders(manager, "ambercompass");
 });
 
 it("cancels post-probe metadata reads and releases the generation for publication", async () => {
-  await seedSession("metadata-cancellation", "Alpha cancellation proof.", "memory");
+  await seedSession("Alpha cancellation proof.", "memory");
   const manager = await indexedManager(createConfig(["memory", "sessions"]));
   const caller = new AbortController();
   const reason = new Error("caller cancelled metadata enrichment");
@@ -108,26 +116,17 @@ it("cancels post-probe metadata reads and releases the generation for publicatio
   expect(results.some((result) => result.snippet.includes("Alpha cancellation proof."))).toBe(true);
 });
 
-it("discards a worker hit forgotten before authoritative metadata enrichment", async ({
-  signal,
-}) => {
-  const sessionId = "forgotten-worker-read";
-  const sessionPath = `sessions/main/${sessionId}.jsonl`;
-  await seedSession(sessionId, "Private violetfragment.");
+it("drops forgotten hits before metadata enrichment", async ({ signal }) => {
+  await seedSession("Private violetfragment.");
   await fs.writeFile(path.join(fixture.paths.memory, "survivor.md"), "Public violetfragment.");
   const cfg = createConfig(["memory", "sessions"]);
   const manager = await indexedManager(cfg);
-  const gate = gateWorker(signal, (result) => {
-    expect(result.body.rows.some((row) => row.path === sessionPath)).toBe(true);
-  });
+  const gate = gateWorker(signal);
   const search = manager.search("violetfragment", { lexicalOnly: true, signal });
   try {
-    await awaitWorker(gate.ready, search);
+    await gate.wait(search);
     await forgetMemoryEntries({ cfg, agentId: "main", sessionIds: [sessionId] });
-    const db = Reflect.get(manager, "db") as DatabaseSync;
-    expect(
-      db.prepare("SELECT id FROM memory_index_chunks WHERE path = ?").get(sessionPath),
-    ).toBeUndefined();
+    expectMissingChunk(manager);
     gate.release();
     const results = await search;
     expect(results.map((result) => result.path)).toEqual(["memory/survivor.md"]);
@@ -141,18 +140,12 @@ it("discards a worker hit forgotten before authoritative metadata enrichment", a
 it.for(["completed", "cancelled"] as const)(
   "settles a %s fused search before close and a queued forget",
   async (outcome, { signal }) => {
-    const sessionId = "fused-search-custody";
-    const sessionPath = `sessions/main/${sessionId}.jsonl`;
-    await seedSession(sessionId, "Private violetcustody.");
+    await seedSession("Private violetcustody.");
     const cfg = createConfig(["sessions"]);
     const manager = await indexedManager(cfg);
     const caller = new AbortController();
     const cancellation = new Error("cancel fused search during result delivery");
-    const gate = gateWorker(signal, (result) => {
-      expect(result.body.rows.some((row) => row.path === sessionPath)).toBe(true);
-      expect(result.recallData?.sourceMtimes.sessions.has(sessionPath)).toBe(true);
-      expect(result.body.rows.every((row) => result.recallData?.rows.has(row.id))).toBe(true);
-    });
+    const gate = gateWorker(signal, true);
     const search = manager.search("violetcustody", {
       lexicalOnly: true,
       sources: ["sessions"],
@@ -163,11 +156,10 @@ it.for(["completed", "cancelled"] as const)(
     let closing: Promise<void> | undefined;
     let forgetSettled = false;
     try {
-      await awaitWorker(gate.ready, search);
-      forgetting = forgetMemoryEntries({ cfg, agentId: "main", sessionIds: [sessionId] }).then(
-        (report) => {
+      await gate.wait(search);
+      forgetting = forgetMemoryEntries({ cfg, agentId: "main", sessionIds: [sessionId] }).finally(
+        () => {
           forgetSettled = true;
-          return report;
         },
       );
       void forgetting.catch(() => undefined);
@@ -187,15 +179,12 @@ it.for(["completed", "cancelled"] as const)(
       await Promise.all([forgetting, closing]);
       gate.restore();
 
-      const reopened = await fixture.getFreshManager(cfg, "cli");
-      await reopened.sync({ reason: "after-fused-forget", force: true });
+      const reopened = await indexedManager(cfg);
       await expect(
         reopened.search("violetcustody", { lexicalOnly: true, sources: ["sessions"] }),
       ).resolves.toEqual([]);
       const db = Reflect.get(reopened, "db") as DatabaseSync;
-      expect(
-        db.prepare("SELECT id FROM memory_index_chunks WHERE path = ?").get(sessionPath),
-      ).toBeUndefined();
+      expectMissingChunk(reopened);
       expect(
         db.prepare("SELECT session_id FROM session_windows WHERE session_id = ?").get(sessionId),
       ).toEqual({ session_id: sessionId });

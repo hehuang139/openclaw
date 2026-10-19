@@ -5,25 +5,7 @@ import {
   createManagerIndexFixture,
   readPublishedSessionIndex,
 } from "./manager-index.test-support.js";
-
-const activity = vi.hoisted(() => ({
-  listener: undefined as ((busy: boolean) => void) | undefined,
-}));
-
-vi.mock("openclaw/plugin-sdk/memory-core-host-engine-foundation", async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import("openclaw/plugin-sdk/memory-core-host-engine-foundation")>();
-  return {
-    ...actual,
-    observeAgentRunActivity: (_agentId: string, listener: (busy: boolean) => void) => {
-      activity.listener = listener;
-      listener(false);
-      return () => {
-        activity.listener = undefined;
-      };
-    },
-  };
-});
+const { activity } = await vi.hoisted(() => import("./manager-session-activity.test-support.js"));
 
 const { closeAllMemorySearchManagers, getMemorySearchManager } = await import("./index.js");
 
@@ -32,7 +14,7 @@ describe("memory session delta publication", () => {
     getMemorySearchManager,
     closeAllMemorySearchManagers,
   });
-  const { createConfig, getFreshManager, seedSessionTranscript } = fixture;
+  const { createConfig, getFreshManager, seedSessionTranscript, provider } = fixture;
   beforeEach(() => {
     vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
     onTestFinished(() => {
@@ -51,8 +33,8 @@ describe("memory session delta publication", () => {
     await (manager as unknown as { awaitManagerIdle(): Promise<void> }).awaitManagerIdle();
   }
   function interruptNextBatch() {
-    fixture.provider.beforeEmbedBatch = async () => {
-      fixture.provider.beforeEmbedBatch = null;
+    provider.beforeEmbedBatch = async () => {
+      provider.beforeEmbedBatch = null;
       activity.listener?.(true);
     };
   }
@@ -61,6 +43,8 @@ describe("memory session delta publication", () => {
     sessionKey: `agent:main:chat:${sessionId}`,
   });
   const message = (content: string) => ({ role: "user" as const, timestamp: Date.now(), content });
+  const seed = (target: ReturnType<typeof sessionIdentity>, content: string) =>
+    seedSessionTranscript({ ...target, messages: [message(content)] });
 
   it("yields an interrupted pass and indexes every pending session after the next quiet period", async () => {
     const manager = await createSessionManager(true);
@@ -68,10 +52,7 @@ describe("memory session delta publication", () => {
     const database = Reflect.get(manager, "db") as DatabaseSync;
     const sessions = Array.from({ length: 9 }, (_, index) => sessionIdentity(`resume-${index}`));
     for (const session of sessions) {
-      await seedSessionTranscript({
-        ...session,
-        messages: [message(`resumeproof alpha ${session.sessionId}`)],
-      });
+      await seed(session, `resumeproof alpha ${session.sessionId}`);
       await publishSessionTranscriptUpdateByIdentity({ agentId: "main", ...session });
     }
     interruptNextBatch();
@@ -81,7 +62,7 @@ describe("memory session delta publication", () => {
         .all();
 
     await settle(manager);
-    expect(fixture.provider.embedBatchCalls).toBeGreaterThan(0);
+    expect(provider.embedBatchCalls).toBeGreaterThan(0);
     expect(indexedPaths()).toEqual([]);
 
     activity.listener?.(false);
@@ -103,20 +84,14 @@ describe("memory session delta publication", () => {
 
   it("keeps the published index when a background rebuild is interrupted", async () => {
     const target = sessionIdentity("rebuild");
-    await seedSessionTranscript({
-      ...target,
-      messages: [message("stableproof original")],
-    });
+    await seed(target, "stableproof original");
     const manager = await createSessionManager();
     await manager.sync({ reason: "initial", force: true });
     const database = Reflect.get(manager, "db") as DatabaseSync;
     const read = (query: string) =>
       readPublishedSessionIndex(database, "sessions/main/rebuild.jsonl", query);
     const before = read("stableproof");
-    await seedSessionTranscript({
-      ...target,
-      messages: [message("newproof appended")],
-    });
+    await seed(target, "newproof appended");
     Reflect.set(manager, "memoryFullRetryDirty", true);
     interruptNextBatch();
     await publishSessionTranscriptUpdateByIdentity({ agentId: "main", ...target });
@@ -147,14 +122,14 @@ describe("memory session delta publication", () => {
     const before = initial.chunks;
     expect(before.length).toBeGreaterThan(2);
 
-    fixture.provider.embeddedBatchTexts = [];
+    provider.embeddedBatchTexts = [];
     for (let index = 5; index < 15; index += 1) {
       await seedSessionTranscript({ sessionId, sessionKey, messages: [turn(index)] });
       await publishSessionTranscriptUpdateByIdentity({ agentId: "main", sessionId, sessionKey });
       await vi.advanceTimersByTimeAsync(1000);
     }
     expect(read("turnmarker14").search).toEqual([]);
-    expect(fixture.provider.embeddedBatchTexts).toEqual([]);
+    expect(provider.embeddedBatchTexts).toEqual([]);
     await settle(manager);
 
     const after = read("turnmarker14");
@@ -164,19 +139,13 @@ describe("memory session delta publication", () => {
     expect(kept.length).toBeGreaterThanOrEqual(before.length - 1);
     expect(after.chunks).toEqual(expect.arrayContaining(kept));
     expect(read("turnmarker1").search).toEqual(initial.search);
-    const texts = fixture.provider.embeddedBatchTexts;
+    const texts = provider.embeddedBatchTexts;
     expect(texts.some((text) => /\bturnmarker1\b/.test(text))).toBe(false);
     expect(texts.some((text) => text.includes("turnmarker14"))).toBe(true);
     expect(manager.status().dirty).toBe(false);
     const search = async () =>
       (await manager.search("turnmarker14", { lexicalOnly: true, sources: ["sessions"] })).map(
-        ({ path, startLine, endLine, snippet, source }) => [
-          path,
-          startLine,
-          endLine,
-          snippet,
-          source,
-        ],
+        (hit) => [hit.path, hit.startLine, hit.endLine, hit.snippet, hit.source],
       );
     const incrementalResults = await search();
     expect(incrementalResults.length).toBeGreaterThan(0);
