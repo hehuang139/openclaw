@@ -256,19 +256,11 @@ describe("gateway server agent", () => {
     async (kind) => {
       const runId = `agent-bound-identity-${kind}`;
       const sessionKey = `agent:main:bound-identity-${kind}`;
+      // Expired under the one-minute reset, but not old enough for archival.
+      const expiredAt = Date.now() - 120_000;
       const previousSessionConfig = testState.sessionConfig;
       testState.sessionConfig = { reset: { mode: "idle", idleMinutes: 1 } };
       const execution = await observeGatewayRunExecution({ method: "agent", runId });
-      const beginEffect = sessionLifecycle.beginSessionEffect;
-      let boundSessionId: string | undefined;
-      const admission = vi
-        .spyOn(sessionLifecycle, "beginSessionEffect")
-        .mockImplementation((params) => {
-          if (params.sourceInput?.protocolRunId === runId && "target" in params) {
-            boundSessionId ??= params.target.incarnation;
-          }
-          return beginEffect(params);
-        });
       try {
         await setTestSessionStore({
           entries:
@@ -276,9 +268,9 @@ describe("gateway server agent", () => {
               ? {
                   [sessionKey]: {
                     sessionId: "expired-predecessor",
-                    updatedAt: 1,
-                    sessionStartedAt: 1,
-                    lastInteractionAt: 1,
+                    updatedAt: expiredAt,
+                    sessionStartedAt: expiredAt,
+                    lastInteractionAt: expiredAt,
                   },
                 }
               : {},
@@ -297,6 +289,13 @@ describe("gateway server agent", () => {
         expect(response.ok, JSON.stringify(response)).toBe(true);
         const command = await waitForAgentCommandCall(runId);
         await execution.waitForCompletion(runId);
+        const boundSessionId = vi
+          .mocked(sessionLifecycle.beginSessionEffect)
+          .mock.calls.flatMap(([params]) =>
+            params.sourceInput?.protocolRunId === runId && "target" in params
+              ? [params.target.incarnation]
+              : [],
+          )[0];
         expect(boundSessionId).toEqual(expect.any(String));
         expect(boundSessionId).not.toBe("");
         expect(command.sessionId).toBe(boundSessionId);
@@ -312,7 +311,6 @@ describe("gateway server agent", () => {
           expect(boundSessionId).toBe("requested-session");
         }
       } finally {
-        admission.mockRestore();
         await execution.restore();
         testState.sessionConfig = previousSessionConfig;
       }
