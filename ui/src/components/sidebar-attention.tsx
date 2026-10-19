@@ -94,7 +94,7 @@ function renderSidebarAttentionContent(props: SidebarAttentionProps, host: HTMLE
   };
   const observeListScroll = createScrollStateRef(syncOverflowCue, {
     presented: panelOpen,
-    content: () => [selectedTab(), attention.read()],
+    content: attention.revision,
   });
   const preloadPanel = () => {
     void panelLoad.load().catch(() => undefined);
