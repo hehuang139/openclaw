@@ -69,86 +69,62 @@ describe("collectTelegramStatusIssues", () => {
     expect(issues[0]?.message).toContain("channels.telegram.groups");
   });
 
-  it("reports polling runtime state that never completed getUpdates after startup grace", () => {
+  it.each([
+    [
+      "polling",
+      "network timeout",
+      "has not completed a successful getUpdates call",
+      "channels status --probe",
+    ],
+    [
+      "polling",
+      "Telegram isolated polling spool handler timed out",
+      "spool backlog is stalled",
+      undefined,
+    ],
+    ["webhook", "fetch failed", "setWebhook has not completed", "webhook URL"],
+  ] as const)("reports disconnected %s runtime: %s", (mode, error, message, fix) => {
     const issues = collectIssues({
       running: true,
-      mode: "polling",
+      mode,
       connected: false,
       lastStartAt: Date.now() - 121_000,
-      lastError: "network timeout",
+      lastError: error,
     });
-
     expectRuntimeIssue(issues);
-    expect(issues[0]?.message).toContain("has not completed a successful getUpdates call");
-    expect(issues[0]?.message).toContain("network timeout");
-    expect(issues[0]?.fix).toContain("channels status --probe");
+    expect(issues[0]?.message).toContain(message);
+    expect(issues[0]?.message).toContain(error);
+    if (fix) {
+      expect(issues[0]?.fix).toContain(fix);
+    }
+    if (error.includes("spool")) {
+      expect(issues[0]?.message).not.toContain("has not completed a successful getUpdates call");
+    }
   });
 
-  it("reports isolated polling spool handler timeouts distinctly from startup failures", () => {
-    const issues = collectIssues({
-      running: true,
-      mode: "polling",
-      connected: false,
-      lastStartAt: Date.now() - 121_000,
-      lastError:
-        "Telegram isolated polling spool handler timed out behind update 42 on lane telegram:123 after 1500100ms; marking the update failed and restarting isolated ingress so later updates can drain.",
-    });
-
-    expectRuntimeIssue(issues);
-    expect(issues[0]?.message).toContain("spool backlog is stalled");
-    expect(issues[0]?.message).not.toContain("has not completed a successful getUpdates call");
-  });
-
-  it("reports stale polling transport activity after successful getUpdates stops refreshing", () => {
-    const issues = collectIssues({
-      running: true,
-      mode: "polling",
-      connected: true,
-      lastStartAt: Date.now() - 60 * 60_000,
-      lastTransportActivityAt: Date.now() - 31 * 60_000,
-    });
-
-    expectRuntimeIssue(issues);
-    expect(issues[0]?.message).toContain("polling transport is stale");
-  });
-
-  it("does not report inherited stale transport activity during a fresh polling lifecycle", () => {
-    const issues = collectIssues({
-      running: true,
-      mode: "polling",
-      connected: true,
-      lastStartAt: Date.now() - 60_000,
-      lastTransportActivityAt: Date.now() - 2 * 60 * 60_000,
-    });
-
-    expect(issues).toStrictEqual([]);
-  });
-
-  it("reports webhook runtime state that never completed setWebhook after startup grace", () => {
-    const issues = collectIssues({
-      running: true,
-      mode: "webhook",
-      connected: false,
-      lastStartAt: Date.now() - 10 * 60_000,
-      lastError: "fetch failed",
-    });
-
-    expectRuntimeIssue(issues);
-    expect(issues[0]?.message).toContain("setWebhook has not completed");
-    expect(issues[0]?.message).toContain("fetch failed");
-    expect(issues[0]?.fix).toContain("webhook URL");
-  });
-
-  it("does not report an advertised webhook just because no user updates arrived", () => {
-    const issues = collectIssues({
-      running: true,
-      mode: "webhook",
-      connected: true,
-      lastStartAt: Date.now() - 60 * 60_000,
-    });
-
-    expect(issues).toStrictEqual([]);
-  });
+  it.each([
+    ["polling", 3_600_000, 1_860_000, true],
+    ["polling", 60_000, 7_200_000, false],
+    ["webhook", 3_600_000, undefined, false],
+  ] as const)(
+    "checks connected %s lifecycle age %s / activity age %s",
+    (mode, age, activityAge, stale) => {
+      const now = Date.now();
+      const issues = collectIssues({
+        running: true,
+        mode,
+        connected: true,
+        lastStartAt: now - age,
+        ...(activityAge === undefined ? {} : { lastTransportActivityAt: now - activityAge }),
+      });
+      if (stale) {
+        expectRuntimeIssue(issues);
+        expect(issues[0]?.message).toContain("polling transport is stale");
+      } else {
+        expect(issues).toStrictEqual([]);
+      }
+    },
+  );
 });
 
 describe("resolveTelegramAllowedReactions", () => {

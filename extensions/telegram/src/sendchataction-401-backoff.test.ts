@@ -7,7 +7,6 @@ const mocks = vi.hoisted(() => ({
   sleepWithAbort: vi.fn().mockResolvedValue(undefined),
 }));
 
-// Mock the runtime-exported backoff sleep that the handler actually imports.
 vi.mock("openclaw/plugin-sdk/runtime-env", async (importOriginal) => ({
   ...(await importOriginal<typeof import("openclaw/plugin-sdk/runtime-env")>()),
   computeBackoff: vi.fn((_policy, attempt: number) => attempt * 1000),
@@ -75,12 +74,11 @@ describe("createTelegramSendChatActionHandler", () => {
     const fn = vi.fn(() => pending.promise);
     const { send } = setup(fn, { minIntervalMs: 4000 });
 
-    const threadParams = { message_thread_id: 1 };
     const first = send(-100, 1);
     await send(-100, 1);
 
     expect(fn).toHaveBeenCalledTimes(1);
-    expect(fn).toHaveBeenCalledWith(-100, "typing", threadParams);
+    expect(fn).toHaveBeenCalledWith(-100, "typing", { message_thread_id: 1 });
 
     pending.resolve(true);
     await first;
@@ -91,12 +89,11 @@ describe("createTelegramSendChatActionHandler", () => {
     const fn = vi.fn().mockReturnValueOnce(pending.promise).mockResolvedValue(true);
     const { send } = setup(fn, { minIntervalMs: 4000 });
 
-    const threadParams = undefined;
     const first = send(-100);
     await send(-100, 2);
 
     expect(fn).toHaveBeenCalledTimes(2);
-    expect(fn).toHaveBeenNthCalledWith(1, -100, "typing", threadParams);
+    expect(fn).toHaveBeenNthCalledWith(1, -100, "typing", undefined);
     expect(fn).toHaveBeenNthCalledWith(2, -100, "typing", { message_thread_id: 2 });
     pending.resolve(true);
     await first;
@@ -113,48 +110,31 @@ describe("createTelegramSendChatActionHandler", () => {
   });
 
   it.each([
-    ["recoverable network", () => makeNetworkError(), 1000],
-    ["snippet-only network", () => new Error("socket hang up"), 1000],
-  ])("cools down transient %s errors", async (_name, makeError, expectedCooldownMs) => {
-    now = 10_000;
-    const fn = vi.fn().mockRejectedValueOnce(makeError()).mockResolvedValue(true);
-    const { send, logger } = setup(fn);
-
-    await expect(send(123, 1)).rejects.toThrow();
-    expect(logger.mock.calls.at(-1)).toEqual([
-      `sendChatAction transient error (1). Cooling down ${expectedCooldownMs}ms before retry.`,
-    ]);
-
-    now += expectedCooldownMs - 1;
-    await expect(send(123, 2)).rejects.toThrow("transient cooldown active");
-    expect(fn).toHaveBeenCalledTimes(1);
-
-    now += 1;
-    await send(123);
-    expect(fn).toHaveBeenCalledTimes(2);
-  });
-
-  it("rejects transient keepalive ticks until same-chat coalescing expires", async () => {
-    now = 0;
-    const fn = vi
-      .fn()
-      .mockRejectedValueOnce(makeTelegramError("Bad Gateway", 502))
-      .mockResolvedValue(true);
-    const { send, logger } = setup(fn, { minIntervalMs: 4000 });
-
-    await expect(send(-100)).rejects.toThrow("Bad Gateway");
-    expect(logger.mock.calls.at(-1)).toEqual([
-      "sendChatAction transient error (1). Cooling down 4000ms before retry.",
-    ]);
-
-    now = 3000;
-    await expect(send(-100)).rejects.toThrow("transient cooldown active");
-    expect(fn).toHaveBeenCalledTimes(1);
-
-    now = 4000;
-    await send(-100);
-    expect(fn).toHaveBeenCalledTimes(2);
-  });
+    ["network code", makeNetworkError(), 0],
+    ["network snippet", new Error("socket hang up"), 0],
+    ["same-chat keepalive", makeTelegramError("Bad Gateway", 502), 4000],
+  ] as const)(
+    "cools down %s until its retry/coalescing window expires",
+    async (_name, error, interval) => {
+      const chatId = interval ? -100 : 123;
+      const cooldown = interval || 1000;
+      now = interval ? 0 : 10_000;
+      const fn = vi.fn().mockRejectedValueOnce(error).mockResolvedValue(true);
+      const { send, logger } = setup(fn, { minIntervalMs: interval });
+      await expect(send(chatId, interval ? undefined : 1)).rejects.toThrow(error.message);
+      expect(logger.mock.calls.at(-1)).toEqual([
+        `sendChatAction transient error (1). Cooling down ${cooldown}ms before retry.`,
+      ]);
+      now += cooldown - 1;
+      await expect(send(chatId, interval ? undefined : 2)).rejects.toThrow(
+        "transient cooldown active",
+      );
+      expect(fn).toHaveBeenCalledTimes(1);
+      now += 1;
+      await send(chatId);
+      expect(fn).toHaveBeenCalledTimes(2);
+    },
+  );
 
   it("rechecks account cooldown after an authorization backoff wait", async () => {
     const older = createDeferred<true>();
@@ -240,7 +220,6 @@ describe("createTelegramSendChatActionHandler", () => {
 
     expect(handler.isSuspended()).toBe(false);
 
-    const criticalLogs = logger.mock.calls.filter(([msg]) => String(msg).includes("CRITICAL"));
-    expect(criticalLogs).toEqual([]);
+    expect(logger.mock.calls.filter(([msg]) => String(msg).includes("CRITICAL"))).toEqual([]);
   });
 });

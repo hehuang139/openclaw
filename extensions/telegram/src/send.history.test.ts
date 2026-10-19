@@ -72,22 +72,26 @@ describe("Telegram outbound history over HTTP and SQLite", () => {
       ...(thread && chatId < 0 ? { is_forum: true } : {}),
     },
     ...(thread && thread !== 1 ? { message_thread_id: thread } : {}),
-    poll: {
-      id,
-      question: "Ready?",
-      options: [
-        { text: "Yes", voter_count: 0 },
-        { text: "No", voter_count: 0 },
-      ],
-      total_voter_count: 0,
-      is_closed: false,
-      is_anonymous: id === "anonymous",
-      type: "regular",
-      allows_multiple_answers: false,
-      allows_revoting: false,
-      members_only: false,
-    },
+    poll: { id },
   });
+  const cursorFor = (transcriptMessageId: string) =>
+    createTelegramPromptContextProjectionCursor({ transcriptMessageId });
+  const projectionMarker = (transcriptMessageId: string, partIndex = 0, finalPart = true) => ({
+    kind: "valid",
+    projection: { transcriptMessageId, partIndex, finalPart },
+  });
+  const mockStore = (
+    transform: <T>(
+      store: PluginStateKeyedStore<T>,
+      options: OpenAsyncKeyedStoreOptions,
+    ) => PluginStateKeyedStore<T>,
+  ) => {
+    const state = getTelegramRuntime().state;
+    const open = state.openKeyedStore;
+    vi.spyOn(state, "openKeyedStore").mockImplementation(<T>(options: OpenAsyncKeyedStoreOptions) =>
+      transform(open<T>(options), options),
+    );
+  };
   beforeEach(() => {
     resetPluginStateStoreForTests({ closeDatabase: false });
     resetTelegramMessageCacheForTest();
@@ -112,33 +116,20 @@ describe("Telegram outbound history over HTTP and SQLite", () => {
     async (rewritten) => {
       const text = rewritten ? "Hook-rewritten answer" : "Final answer";
       fixture.responseFor = () => providerMessage(123, text);
+      const promptContextSource = {
+        transcriptMessageId: "assistant-final",
+        deliverySignature: resolveTelegramPromptContextDeliverySignature({ text: "Final answer" }),
+      };
       const result = await fixture.telegramOutbound.sendPayload!({
         cfg,
         to: "123",
         text: "",
-        payload: {
-          text,
-          channelData: {
-            telegram: {
-              promptContextSource: {
-                transcriptMessageId: "assistant-final",
-                deliverySignature: resolveTelegramPromptContextDeliverySignature({
-                  text: "Final answer",
-                }),
-              },
-            },
-          },
-        },
+        payload: { text, channelData: { telegram: { promptContextSource } } },
       });
       const cached = await getCached(result.messageId!);
       expect(cached).toMatchObject({ body: text });
       expect(cached?.promptContextProjectionMarker).toEqual(
-        rewritten
-          ? undefined
-          : {
-              kind: "valid",
-              projection: { transcriptMessageId: "assistant-final", partIndex: 0, finalPart: true },
-            },
+        rewritten ? undefined : projectionMarker("assistant-final"),
       );
       expect(fixture.requests.map(({ fields }) => fields.text)).toEqual([text]);
     },
@@ -149,17 +140,13 @@ describe("Telegram outbound history over HTTP and SQLite", () => {
     { chatId: "-100123", kind: "location" },
     { chatId: "123", kind: "text" },
   ])("retains accepted $kind in $chatId when history storage fails", async ({ chatId, kind }) => {
-    const runtime = getTelegramRuntime();
-    const open = runtime.state.openKeyedStore;
-    vi.spyOn(runtime.state, "openKeyedStore").mockImplementation((options) => {
+    mockStore((store, options) => {
       if (options.namespace === TELEGRAM_MESSAGE_CACHE_PERSISTENT_NAMESPACE) {
         throw new Error("history storage unavailable");
       }
-      return open(options);
+      return store;
     });
-    const cursor = createTelegramPromptContextProjectionCursor({
-      transcriptMessageId: "failed-history",
-    });
+    const cursor = cursorFor("failed-history");
     const opts = {
       ...sendOptions(),
       promptContextProjectionPlan: { cursor, finalPart: true },
@@ -215,9 +202,7 @@ describe("Telegram outbound history over HTTP and SQLite", () => {
 
   it("keeps Telegram time and transcript provenance for locations", async () => {
     fixture.responseFor = () => providerMessage(123, "Final answer");
-    const cursor = createTelegramPromptContextProjectionCursor({
-      transcriptMessageId: "assistant-final",
-    });
+    const cursor = cursorFor("assistant-final");
     const opts = {
       ...sendOptions(),
       promptContextProjectionPlan: { cursor, finalPart: true },
@@ -225,10 +210,7 @@ describe("Telegram outbound history over HTTP and SQLite", () => {
     await sendLocationTelegram("123", { latitude: 48.858844, longitude: 2.294351 }, opts);
     const node = await getCached("902");
     expect(node?.timestamp).toBe(1_779_394_740_000);
-    expect(node?.promptContextProjectionMarker).toEqual({
-      kind: "valid",
-      projection: { transcriptMessageId: "assistant-final", partIndex: 0, finalPart: true },
-    });
+    expect(node?.promptContextProjectionMarker).toEqual(projectionMarker("assistant-final"));
   });
 
   it("refreshes authoritative edited captions without hiding later group history", async () => {
@@ -286,13 +268,28 @@ describe("Telegram outbound history over HTTP and SQLite", () => {
     );
   });
 
-  it.each(["html-recovery", "middle-rejection", "rich-recovery", "empty-tail"] as const)(
+  const emptyText = "Bad Request: text must be non-empty";
+  const rejectedChunk = "Bad Request: chunk content rejected";
+  const acceptedParts = ["A".repeat(4000), "A".repeat(1000)];
+  it.each([
+    [
+      "html-recovery",
+      ["2", "3"],
+      ["Bad Request: can't parse entities"],
+      ["<".repeat(1000), "y".repeat(3000)],
+    ],
+    ["middle-rejection", ["1", "3"], ["", rejectedChunk], acceptedParts],
+    [
+      "rich-recovery",
+      ["2", "4"],
+      ["Bad Request: RICH_MESSAGE_EMAIL_INVALID", "", rejectedChunk],
+      acceptedParts,
+    ],
+    ["empty-tail", ["1"], ["", emptyText, emptyText], ["A".repeat(4000)]],
+  ] as const)(
     "projects only accepted chunks through %s",
-    async (outcome) => {
-      const cursor = createTelegramPromptContextProjectionCursor({
-        transcriptMessageId: "multipart",
-      });
-      const empty = "Bad Request: text must be non-empty";
+    async (outcome, ids, rejections, bodies) => {
+      const cursor = cursorFor("multipart");
       fixture.responseFor = (method) =>
         method === "sendMessage"
           ? {
@@ -301,19 +298,7 @@ describe("Telegram outbound history over HTTP and SQLite", () => {
               chat: { id: 123, type: "private" },
             }
           : undefined;
-      fixture.rejections.push(
-        ...(outcome === "html-recovery"
-          ? ["Bad Request: can't parse entities"]
-          : outcome === "empty-tail"
-            ? ["", empty, empty]
-            : outcome === "rich-recovery"
-              ? [
-                  "Bad Request: RICH_MESSAGE_EMAIL_INVALID",
-                  "",
-                  "Bad Request: chunk content rejected",
-                ]
-              : ["", "Bad Request: chunk content rejected"]),
-      );
+      fixture.rejections.push(...rejections);
       const sending = sendMessageTelegram(
         "123",
         outcome === "html-recovery"
@@ -330,36 +315,17 @@ describe("Telegram outbound history over HTTP and SQLite", () => {
         },
       );
       const incomplete = outcome === "middle-rejection" || outcome === "rich-recovery";
-      const ids =
-        outcome === "html-recovery"
-          ? ["2", "3"]
-          : outcome === "empty-tail"
-            ? ["1"]
-            : outcome === "rich-recovery"
-              ? ["2", "4"]
-              : ["1", "3"];
       if (incomplete) {
         await expect(sending).rejects.toMatchObject({ deliveryResult: { messageIds: ids } });
       } else {
         await sending;
       }
       const nodes = await Promise.all(ids.map((messageId) => getCached(messageId)));
-      expect(nodes.map((node) => node?.body)).toEqual(
-        outcome === "html-recovery"
-          ? ["<".repeat(1000), "y".repeat(3000)]
-          : outcome === "empty-tail"
-            ? ["A".repeat(4000)]
-            : ["A".repeat(4000), "A".repeat(1000)],
-      );
+      expect(nodes.map((node) => node?.body)).toEqual(bodies);
       expect(nodes.map((node) => node?.promptContextProjectionMarker)).toEqual(
-        ids.map((_, partIndex) => ({
-          kind: "valid",
-          projection: {
-            transcriptMessageId: "multipart",
-            partIndex,
-            finalPart: !incomplete && partIndex === ids.length - 1,
-          },
-        })),
+        ids.map((_, partIndex) =>
+          projectionMarker("multipart", partIndex, !incomplete && partIndex === ids.length - 1),
+        ),
       );
       if (outcome === "empty-tail") {
         expect(fixture.requests.at(-1)).toEqual({
@@ -374,143 +340,111 @@ describe("Telegram outbound history over HTTP and SQLite", () => {
     },
   );
 
-  it.each([
-    { name: "DM topic", chatId: 123, type: "private", thread: 42, scope: { scope: "dm", id: 42 } },
-    {
-      name: "group",
-      chatId: -100123,
-      type: "supergroup",
-      thread: undefined,
-      scope: { scope: "none" },
-    },
-    {
-      name: "General",
-      chatId: -100123,
-      type: "supergroup",
-      thread: 1,
-      scope: { scope: "forum", id: 1 },
-    },
-  ])(
-    "persists the accepted $name public-poll route for later votes",
-    async ({ name, chatId, type, thread, scope }) => {
-      fixture.responseFor = (method) =>
-        method === "getChatMember"
-          ? { status: "administrator" }
-          : pollMessage(chatId, type, name, thread);
-      const target = `${chatId}${thread ? `:topic:${thread}` : ""}`;
-      await expect(
-        sendPollTelegram(
-          target,
-          { question: " Ready? ", options: [" Yes ", "No "] },
-          { ...sendOptions(), isAnonymous: false },
-        ),
-      ).resolves.toMatchObject({ messageId: "500", pollAnswerRouting: "enabled" });
-      expect(await findTelegramPollRegistryEntry({ pollId: name })).toMatchObject({
-        messageId: 500,
-        threadSpec: scope,
-        question: "Ready?",
-        options: ["Yes", "No"],
-      });
-      expect(fixture.requests.map(({ method }) => method)).toEqual(
-        chatId < 0 ? ["sendPoll", "getChatMember"] : ["sendPoll"],
-      );
-    },
-  );
-
   type PollScenario = {
     name: string;
     policy: TelegramAccountConfig;
     type: "private" | "supergroup" | "channel";
     status?: "administrator" | "member";
     thread?: number;
-    warning: string;
+    warning?: string;
+    scope?: { scope: "dm" | "forum" | "none"; id?: number };
   };
-  const unavailablePoll = (
+  const pollScenario = (
     name: string,
-    warning: string,
+    warning?: string,
     overrides: Partial<PollScenario> = {},
   ): PollScenario => ({ name, warning, policy: {}, type: "supergroup", ...overrides });
   const disabled = "inbound messages are disabled";
-  const unavailablePollScenarios = [
-    unavailablePoll("anonymous", "anonymously"),
-    unavailablePoll("channel", "Telegram channels", { type: "channel" }),
-    unavailablePoll("non-admin", "not an administrator", { status: "member" }),
-    unavailablePoll("account-disabled", disabled, { policy: { groupPolicy: "disabled" } }),
-    unavailablePoll("group-disabled", disabled, {
+  const topicPolicy = (topic: { enabled?: boolean; groupPolicy?: "disabled" }) => ({
+    groups: { "-100123": { topics: { "77": topic } } },
+  });
+  it.each([
+    pollScenario("DM topic", undefined, {
+      type: "private",
+      thread: 42,
+      scope: { scope: "dm", id: 42 },
+    }),
+    pollScenario("group", undefined, { scope: { scope: "none" } }),
+    pollScenario("General", undefined, { thread: 1, scope: { scope: "forum", id: 1 } }),
+    pollScenario("anonymous", "anonymously"),
+    pollScenario("channel", "Telegram channels", { type: "channel" }),
+    pollScenario("non-admin", "not an administrator", { status: "member" }),
+    pollScenario("account-disabled", disabled, { policy: { groupPolicy: "disabled" } }),
+    pollScenario("group-disabled", disabled, {
       policy: { groups: { "-100123": { enabled: false } } },
     }),
-    unavailablePoll("topic-disabled", disabled, {
-      policy: { groups: { "-100123": { topics: { "77": { enabled: false } } } } },
+    pollScenario("topic-disabled", disabled, {
       thread: 77,
+      policy: topicPolicy({ enabled: false }),
     }),
-    unavailablePoll("topic-policy", disabled, {
-      policy: {
-        groupPolicy: "open",
-        groups: { "-100123": { topics: { "77": { groupPolicy: "disabled" } } } },
-      },
+    pollScenario("topic-policy", disabled, {
       thread: 77,
+      policy: { groupPolicy: "open", ...topicPolicy({ groupPolicy: "disabled" }) },
     }),
-    unavailablePoll("write-failure", "routing state could not be saved", { type: "private" }),
-  ];
-  it.each(unavailablePollScenarios)(
-    "warns after accepted $name polls without advertising a usable route or resending",
-    async (scenario) => {
-      const chatId = scenario.type === "private" ? 123 : -100123;
-      const thread = scenario.thread;
-      fixture.responseFor = (method) =>
-        method === "getChatMember"
-          ? { status: scenario.status ?? "administrator" }
-          : pollMessage(chatId, scenario.type, scenario.name, thread);
-      if (scenario.name === "write-failure") {
-        const state = getTelegramRuntime().state;
-        const open = state.openKeyedStoreV2.bind(state);
-        vi.spyOn(state, "openKeyedStoreV2").mockImplementation((options) => {
-          const store = open(options);
-          return options.namespace === "telegram.poll-registry"
-            ? {
-                ...store,
-                register: async () => {
-                  throw new Error("registry unavailable");
-                },
-              }
-            : store;
-        });
-      }
-      await expect(
-        sendPollTelegram(
-          `${chatId}${thread ? `:topic:${thread}` : ""}`,
-          { question: "Ready?", options: ["Yes", "No"] },
-          {
-            cfg: withPolicy(scenario.policy),
-            api: fixture.bot.api,
-            isAnonymous: scenario.name === "anonymous",
-          },
-        ),
-      ).resolves.toMatchObject({
-        messageId: "500",
-        pollAnswerRouting: "unavailable",
-        warning: expect.stringContaining(scenario.warning),
+    pollScenario("write-failure", "routing state could not be saved", { type: "private" }),
+  ])("persists or warns for an accepted $name poll without resending", async (scenario) => {
+    const chatId = scenario.type === "private" ? 123 : -100123;
+    const thread = scenario.thread;
+    fixture.responseFor = (method) =>
+      method === "getChatMember"
+        ? { status: scenario.status ?? "administrator" }
+        : pollMessage(chatId, scenario.type, scenario.name, thread);
+    if (scenario.name === "write-failure") {
+      const state = getTelegramRuntime().state;
+      const open = state.openKeyedStoreV2.bind(state);
+      vi.spyOn(state, "openKeyedStoreV2").mockImplementation((options) => {
+        const store = open(options);
+        return options.namespace === "telegram.poll-registry"
+          ? {
+              ...store,
+              register: async () => {
+                throw new Error("registry unavailable");
+              },
+            }
+          : store;
       });
-      expect(await findTelegramPollRegistryEntry({ pollId: scenario.name })).toBeNull();
-      expect(fixture.requests.map(({ method }) => method)).toEqual(
-        scenario.name === "non-admin" ? ["sendPoll", "getChatMember"] : ["sendPoll"],
-      );
-    },
-  );
+    }
+    const result = await sendPollTelegram(
+      `${chatId}${thread ? `:topic:${thread}` : ""}`,
+      { question: " Ready? ", options: [" Yes ", "No "] },
+      {
+        ...sendOptions(),
+        cfg: withPolicy(scenario.policy),
+        isAnonymous: scenario.name === "anonymous",
+      },
+    );
+    expect(result).toMatchObject({
+      messageId: "500",
+      pollAnswerRouting: scenario.warning ? "unavailable" : "enabled",
+      ...(scenario.warning ? { warning: expect.stringContaining(scenario.warning) } : {}),
+    });
+    const entry = await findTelegramPollRegistryEntry({ pollId: scenario.name });
+    if (scenario.warning) {
+      expect(entry).toBeNull();
+    } else {
+      expect(entry).toMatchObject({
+        messageId: 500,
+        threadSpec: scenario.scope,
+        question: "Ready?",
+        options: ["Yes", "No"],
+      });
+    }
+    expect(fixture.requests.map(({ method }) => method)).toEqual(
+      chatId < 0 && (!scenario.warning || scenario.name === "non-admin")
+        ? ["sendPoll", "getChatMember"]
+        : ["sendPoll"],
+    );
+  });
 
   it("shares cold hydration while waiting for durable ownership persistence", async () => {
-    const state = getTelegramRuntime().state;
-    const open = state.openKeyedStore;
     const hydration = createDeferred<never[]>();
     const persistence = createDeferred<void>();
     const entries = vi.fn(() => hydration.promise);
-    vi.spyOn(state, "openKeyedStore").mockImplementation(
-      <T>(options: OpenAsyncKeyedStoreOptions): PluginStateKeyedStore<T> => ({
-        ...open<T>(options),
-        entries,
-        register: () => persistence.promise,
-      }),
-    );
+    mockStore((store) => ({
+      ...store,
+      entries,
+      register: () => persistence.promise,
+    }));
     let finished = false;
     const recording = recordSentMessage(123, 1, cfg).then(() => {
       finished = true;
@@ -526,21 +460,16 @@ describe("Telegram outbound history over HTTP and SQLite", () => {
   });
 
   it("writes each accepted ownership row once with its own TTL", async () => {
-    const state = getTelegramRuntime().state;
-    const open = state.openKeyedStore;
     const writes: Array<[unknown, number | undefined]> = [];
-    vi.spyOn(state, "openKeyedStore").mockImplementation(
-      <T>(options: OpenAsyncKeyedStoreOptions): PluginStateKeyedStore<T> => {
-        const store = open<T>(options);
-        return {
-          ...store,
-          register: async (key, value, registration) => {
-            await store.register(key, value, registration);
-            writes.push([value, registration?.ttlMs]);
-          },
-        };
-      },
-    );
+    mockStore((store) => {
+      return {
+        ...store,
+        register: async (key, value, registration) => {
+          await store.register(key, value, registration);
+          writes.push([value, registration?.ttlMs]);
+        },
+      };
+    });
     const now = vi.spyOn(Date, "now").mockReturnValue(1_800_000_000_000);
     await recordSentMessage(123, 1, cfg);
     now.mockReturnValue(1_800_003_600_000);
@@ -555,19 +484,15 @@ describe("Telegram outbound history over HTTP and SQLite", () => {
   });
 
   it("keeps ownership best-effort when its backing store is unavailable", async () => {
-    const state = getTelegramRuntime().state;
-    const open = state.openKeyedStore;
-    vi.spyOn(state, "openKeyedStore").mockImplementation(
-      <T>(options: OpenAsyncKeyedStoreOptions): PluginStateKeyedStore<T> => ({
-        ...open<T>(options),
-        entries: async () => {
-          throw new Error("read unavailable");
-        },
-        register: async () => {
-          throw new Error("write unavailable");
-        },
-      }),
-    );
+    mockStore((store) => ({
+      ...store,
+      entries: async () => {
+        throw new Error("read unavailable");
+      },
+      register: async () => {
+        throw new Error("write unavailable");
+      },
+    }));
     await recordSentMessage(123, 1, cfg);
     expect(await wasSentByBot(123, 1, cfg)).toBe(true);
   });

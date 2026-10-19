@@ -26,6 +26,11 @@ const callback = (id: number, data: string) => ({
   update: { callback_query: { message: mockMessage({ chat: mockChat({ id }) }), data } },
 });
 
+const addressed = (text: string) => ({
+  me: { username: "openclaw_bot" } as never,
+  message: forumMessage(text),
+});
+
 describe("getTelegramSequentialKey", () => {
   it.each([
     [
@@ -38,20 +43,8 @@ describe("getTelegramSequentialKey", () => {
       },
       "telegram:123:topic:9",
     ],
-    [
-      {
-        me: { username: "openclaw_bot" } as never,
-        message: forumMessage("/stop@some_other_bot"),
-      },
-      "telegram:-100:topic:5907",
-    ],
-    [
-      {
-        me: { username: "openclaw_bot" } as never,
-        message: forumMessage("/stop@openclaw_bot!"),
-      },
-      "telegram:-100:control",
-    ],
+    [addressed("/stop@some_other_bot"), "telegram:-100:topic:5907"],
+    [addressed("/stop@openclaw_bot!"), "telegram:-100:control"],
     // Interrupt commands keep the chat-wide control lane. `/approve` in particular must
     // never queue behind the run that is blocked waiting on its own approval request.
     [
@@ -89,39 +82,28 @@ describe("getTelegramSequentialKey", () => {
     expect(getTelegramSequentialKey({ message: {} as Message })).toBe("telegram:unknown");
   });
 
-  describe("forum flag cache fallback", () => {
-    it("uses cached forum flag to assign topic:1 lane when payload lacks is_forum and is_topic_message", async () => {
-      await resolveTelegramForumFlag({
-        chatId: -9001,
-        chatType: "supergroup",
-        isGroup: true,
-        isForum: true,
-      });
-
-      expect(getTelegramSequentialKey({ message: groupMessage(-9001) })).toBe(
-        "telegram:-9001:topic:1",
+  it.each([
+    { chatId: -9001, cached: true, hinted: undefined, expected: "telegram:-9001:topic:1" },
+    { chatId: -9002, cached: undefined, hinted: undefined, expected: "telegram:-9002" },
+    { chatId: -9004, cached: false, hinted: true, expected: "telegram:-9004:topic:1" },
+  ])(
+    "uses forum cache=$cached and hint=$hinted for $chatId",
+    async ({ chatId, cached, hinted, expected }) => {
+      if (cached !== undefined) {
+        await resolveTelegramForumFlag({
+          chatId,
+          chatType: "supergroup",
+          isGroup: true,
+          isForum: cached,
+        });
+      }
+      const message = groupMessage(
+        chatId,
+        hinted === undefined ? {} : { is_topic_message: hinted },
       );
-    });
-
-    it("falls back to base lane when cache is empty and payload lacks is_forum hint", () => {
-      expect(getTelegramSequentialKey({ message: groupMessage(-9002) })).toBe("telegram:-9002");
-    });
-
-    it("honors an explicit forum hint when the cached flag is stale", async () => {
-      await resolveTelegramForumFlag({
-        chatId: -9004,
-        chatType: "supergroup",
-        isGroup: true,
-        isForum: false,
-      });
-
-      expect(
-        getTelegramSequentialKey({
-          message: groupMessage(-9004, { is_topic_message: true }),
-        }),
-      ).toBe("telegram:-9004:topic:1");
-    });
-  });
+      expect(getTelegramSequentialKey({ message })).toBe(expected);
+    },
+  );
 });
 
 describe("getTelegramSequentialConstraints", () => {
