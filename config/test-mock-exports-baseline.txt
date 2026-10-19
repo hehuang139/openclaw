@@ -2661,7 +2661,6 @@
 ["src/agents/subagents/subagent-attachment-cleanup.authority.test.ts","./subagent-attachment-paths.js","88615095e0b57e269457edd159b710f1baee6d8ee80a65ce8df5a9752f58846b",1]
 ["src/agents/system-prompt-config.test.ts","../tts/tts-settings.js","81788c2e4e5749722791d31983539afde68c65b0b716cd8c04b2ad0af131f811",1]
 ["src/agents/test-helpers/embedded-agent-runner-e2e-mocks.ts","../../context-engine/init.js","0d98d81f6592bdfb4a016b68fda22ad246d52beda28d6c4627e36e010d048407",1]
-["src/agents/test-helpers/embedded-agent-runner-e2e-mocks.ts","../../context-engine/registry.js","264d7f485d56364c7b3857505114e39a6408dc7c2d8e846f0feeb1279bd41417",1]
 ["src/agents/test-helpers/embedded-agent-runner-e2e-mocks.ts","../../infra/backoff.js","7df212aa368069eb6710b898b155867ae144b79ce831de179216a1f7e79dfb40",1]
 ["src/agents/test-helpers/embedded-agent-runner-e2e-mocks.ts","../../plugins/hook-runner-global.js","e99e5ff1e445b4bfddd103d4af5d5dfdd4021a0c719b4fc8ec542f56529ce7c8",1]
 ["src/agents/test-helpers/embedded-agent-runner-e2e-mocks.ts","../../plugins/provider-external-auth.js","899644bd9da698ae4313e5cbe30efe147059bd425f1f59fc2ec5ccc719aca42e",1]
