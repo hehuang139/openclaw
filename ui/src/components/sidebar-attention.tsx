@@ -88,11 +88,9 @@ function renderSidebarAttentionContent(props: SidebarAttentionProps, host: HTMLE
     return wasOpen;
   });
 
-  const syncOverflowCue = (element: HTMLElement | null) => {
-    setOverflowAbove(Boolean(element && element.scrollTop > 2));
-    setOverflowBelow(
-      Boolean(element && element.scrollHeight - element.scrollTop - element.clientHeight > 2),
-    );
+  const syncOverflowCue = () => {
+    setOverflowAbove(Boolean(list && list.scrollTop > 2));
+    setOverflowBelow(Boolean(list && list.scrollHeight - list.scrollTop - list.clientHeight > 2));
   };
   const observeListScroll = createScrollStateRef(syncOverflowCue, {
     presented: panelOpen,
@@ -137,7 +135,7 @@ function renderSidebarAttentionContent(props: SidebarAttentionProps, host: HTMLE
       if (list) {
         list.scrollTop = 0;
       }
-      syncOverflowCue(list);
+      syncOverflowCue();
     });
   }
   async function open(item: SidebarAttentionItem) {
