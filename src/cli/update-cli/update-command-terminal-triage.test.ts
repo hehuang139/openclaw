@@ -4,11 +4,10 @@ import { once } from "node:events";
 import { readFileSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { DatabaseSync } from "node:sqlite";
 import { afterEach, expect, it, vi } from "vitest";
-import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
+import { awaitGateBeforeSettlement } from "../../../test/helpers/promise.js";
 import { collectNestedErrorCandidates } from "../../infra/error-graph-internal.js";
-import * as temporaryRoot from "../../infra/tmp-openclaw-dir.js";
+import { withDatabase } from "../../infra/package-update-activation-fixtures.test-support.js";
 import { CONTROL_PLANE_UPDATE_SENTINEL_META_ENV } from "../../infra/update-control-plane-sentinel.js";
 import {
   captureManagedUpdateLeaseDatabaseIdentity,
@@ -23,6 +22,7 @@ import { defaultRuntime, ExitError } from "../../runtime.js";
 import { closeOpenClawStateDatabaseForTest } from "../../state/openclaw-state-db.js";
 import type { UpdateCommandOptions } from "./shared.js";
 import { withUpdateCommandExecutor as withExecutor } from "./update-command-executor.js";
+import { useExecutorFixture } from "./update-command-executor.test-support.js";
 import { resultFixture } from "./update-command-fixtures.test-support.js";
 import { UpdateCommandRecoveryPendingError as RecoveryPendingError } from "./update-command-recovery-error.js";
 import {
@@ -38,20 +38,10 @@ import {
 import { withUpdateFailureTriage as withTriage } from "./update-command-triage.js";
 import { withUpdateCommandRecoveryUnwind as withRecovery } from "./update-command-unwind.js";
 
-const dirs = useAutoCleanupTempDirTracker(afterEach);
-function withDatabase<T>(file: string, action: (db: DatabaseSync) => T): T {
-  const db = new DatabaseSync(file);
-  try {
-    return action(db);
-  } finally {
-    db.close();
-  }
-}
+const fixture = useExecutorFixture("update-terminal-triage-", { restoreEnv: true });
 
 afterEach(() => {
   closeOpenClawStateDatabaseForTest();
-  vi.restoreAllMocks();
-  vi.unstubAllEnvs();
 });
 
 it.each([
@@ -59,12 +49,9 @@ it.each([
   { name: "authorized-failure", revoked: false, releaseDenied: false, json: true },
   { name: "release-denied", revoked: false, releaseDenied: true, json: false },
 ])("preserves settled managed failure disposition: $name", async (trial) => {
-  const root = await fs.realpath(dirs.make("update-terminal-triage-"));
-  const temporary = path.join(root, "private-tmp");
+  const { root, control: temporary } = fixture();
   const diagnosticDir = path.join(root, "diagnostics");
-  await fs.mkdir(temporary, { mode: 0o700 });
   await fs.mkdir(diagnosticDir, { mode: 0o700 });
-  vi.spyOn(temporaryRoot, "resolvePreferredOpenClawTmpDir").mockReturnValue(temporary);
   vi.stubEnv("OPENCLAW_STATE_DIR", path.join(root, "state"));
   vi.stubEnv("OPENCLAW_CONFIG_PATH", path.join(root, "state", "openclaw.json"));
   vi.stubEnv("OPENCLAW_UPDATE_RUN_HANDOFF", "1");
@@ -98,14 +85,7 @@ it.each([
     serviceManagerEnv: { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot },
     existingIdentity,
   };
-  // The helper really acquires and assigns the lease; no borrowed-owner method is mocked.
-  const helper = trial.releaseDenied
-    ? undefined
-    : spawn(
-        process.execPath,
-        [
-          "-e",
-          `
+  const helperCode = `
       const {createManagedHandoffLeaseStore}=require(${JSON.stringify(runtimeEntry)});
       const store=createManagedHandoffLeaseStore(${JSON.stringify(leaseOptions)});
       const acquired=store.acquire(${JSON.stringify(root)},${JSON.stringify(owner)},{kind:"update"});
@@ -118,10 +98,13 @@ it.each([
         process.disconnect();
       });
       process.send("assigned");
-      `,
-        ],
-        { stdio: ["ignore", "ignore", "pipe", "ipc"] },
-      );
+      `;
+  // The helper really acquires and assigns the lease; no borrowed-owner method is mocked.
+  const helper = trial.releaseDenied
+    ? undefined
+    : spawn(process.execPath, ["-e", helperCode], {
+        stdio: ["ignore", "ignore", "pipe", "ipc"],
+      });
   const exited = helper ? once(helper, "exit") : undefined;
   let stderr = "";
   helper?.stderr?.on("data", (data) => {
@@ -129,12 +112,11 @@ it.each([
   });
   try {
     if (helper && exited) {
-      const ready = await Promise.race([
-        once(helper, "message").then(([message]) => message),
-        exited.then(() => {
-          throw new Error(`helper exited before assignment: ${stderr}`);
-        }),
-      ]);
+      const [ready] = await awaitGateBeforeSettlement(
+        once(helper, "message"),
+        exited,
+        "helper exited before assignment",
+      );
       expect(ready).toBe("assigned");
     }
     const store = createManagedHandoffLeaseStore();

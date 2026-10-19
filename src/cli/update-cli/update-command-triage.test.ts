@@ -9,14 +9,12 @@ import { defaultRuntime, ExitError } from "../../runtime.js";
 import { withEnvAsync } from "../../test-utils/env.js";
 import { withOpenClawTestState } from "../../test-utils/openclaw-test-state.js";
 import { expectMessages, expectMissing, expectNoCalls } from "./update-boundary.test-support.js";
-import { resultFixture } from "./update-command-fixtures.test-support.js";
+import { resultFixture, stepFixture } from "./update-command-fixtures.test-support.js";
 import { UpdateCommandFailure } from "./update-command-result.js";
 import { withUpdateFailureTriage, type UpdateTriageTarget } from "./update-command-triage.js";
 
 const runInteractiveUpdateFailureAction = vi.hoisted(() =>
-  vi.fn<typeof import("./update-command-report.js").runInteractiveUpdateFailureAction>(
-    async () => "triage" as const,
-  ),
+  vi.fn<typeof import("./update-command-report.js").runInteractiveUpdateFailureAction>(),
 );
 
 vi.mock("./update-command-report.js", () => ({ runInteractiveUpdateFailureAction }));
@@ -37,17 +35,7 @@ const failedUpdate = resultFixture(undefined, {
   status: "error",
   reason: "global-install-failed",
   before: { version: "2026.8.1" },
-  steps: [
-    {
-      name: "global install",
-      command: "npm install",
-      cwd: "/install",
-      durationMs: 1,
-      exitCode: 1,
-      stderrTail: "ENOSPC",
-    },
-  ],
-  durationMs: 1,
+  steps: [stepFixture("global install", { stderrTail: "ENOSPC" })],
 });
 
 async function createInstalledTriage(rejectRepair = false) {
@@ -112,6 +100,11 @@ async function readReceipt(target: { root: string }) {
   };
 }
 
+async function expectNoTriage(target: { root: string }) {
+  await expectMissing(path.join(target.root, "receipt.json"));
+  expectNoCalls(defaultRuntime.exit);
+}
+
 async function createManagedTriageTarget() {
   const target = await createInstalledTriage();
   const handoffDir = path.join(target.root, "handoff");
@@ -136,10 +129,9 @@ beforeEach(() => {
   triageAfterFailure.mockClear();
   runInteractiveUpdateFailureAction.mockReset();
   runInteractiveUpdateFailureAction.mockResolvedValue("triage");
-  vi.spyOn(defaultRuntime, "exit").mockImplementation(() => undefined);
-  vi.spyOn(defaultRuntime, "log").mockImplementation(() => undefined);
-  vi.spyOn(defaultRuntime, "error").mockImplementation(() => undefined);
-  vi.spyOn(defaultRuntime, "writeJson").mockImplementation(() => undefined);
+  for (const method of ["exit", "log", "error", "writeJson"] as const) {
+    vi.spyOn(defaultRuntime, method).mockImplementation(() => undefined);
+  }
 });
 
 afterEach(() => vi.restoreAllMocks());
@@ -176,7 +168,6 @@ it.each([
     expect(receipt.updateInProgress).toBeUndefined();
     expect(receipt.serviceMarker).toBeUndefined();
     expect(JSON.stringify(receipt.failure)).toContain("ENOSPC");
-    expect(defaultRuntime.exit).not.toHaveBeenCalled();
     expect(defaultRuntime.writeJson).toHaveBeenCalledExactlyOnceWith(result);
     if ("json" in opts) {
       expectNoCalls(defaultRuntime.log);
@@ -190,7 +181,7 @@ it.each([
       .join("\n");
     expect(output).toContain("openclaw triage --run --update-result");
     expect(output).toContain("Triage diagnostics saved; no repair agent was started.");
-    expectNoCalls(triageAfterFailure, runInteractiveUpdateFailureAction);
+    expectNoCalls(defaultRuntime.exit, triageAfterFailure, runInteractiveUpdateFailureAction);
   },
 );
 
@@ -239,8 +230,6 @@ it("exports the final managed failure after cleanup without launching triage", a
     }
   });
   await expect(completion).rejects.toMatchObject({ code: 1 });
-  expect(defaultRuntime.exit).not.toHaveBeenCalled();
-
   const raw = await fs.readFile(contextPath, "utf8");
   expect(JSON.parse(raw)).toMatchObject({
     error: expect.stringContaining("original Doctor diagnostic"),
@@ -258,7 +247,7 @@ it("exports the final managed failure after cleanup without launching triage", a
   if (process.platform !== "win32") {
     expect((await fs.stat(contextPath)).mode & 0o777).toBe(0o600);
   }
-  await expectMissing(path.join(target.root, "receipt.json"));
+  await expectNoTriage(target);
   expectNoCalls(defaultRuntime.writeJson, defaultRuntime.log, runInteractiveUpdateFailureAction);
 });
 
@@ -271,8 +260,7 @@ it("leaves the outer managed export untouched in a post-core child", async () =>
   await expect(failUpdate(target)).rejects.toMatchObject({ code: 1 });
 
   await expect(fs.readFile(contextPath, "utf8")).resolves.toBe(original);
-  await expectMissing(path.join(target.root, "receipt.json"));
-  expect(defaultRuntime.exit).not.toHaveBeenCalled();
+  await expectNoTriage(target);
 });
 
 it("leaves triage to the owner for a managed helper child", async () => {
@@ -281,9 +269,8 @@ it("leaves triage to the owner for a managed helper child", async () => {
   await expect(
     failUpdate(target, {}, new UpdateCommandFailure(failedUpdate, 80)),
   ).rejects.toMatchObject({ code: 80 });
-  await expectMissing(path.join(target.root, "receipt.json"));
+  await expectNoTriage(target);
   await expectMissing(target.env.OPENCLAW_STATE_DIR);
-  expect(defaultRuntime.exit).not.toHaveBeenCalled();
 });
 
 it("uses a new report identity for each distinct CLI update execution", async () => {
@@ -300,8 +287,7 @@ it("uses a new report identity for each distinct CLI update execution", async ()
     ([params]) => params.attemptId,
   );
   expect(attemptIds).toHaveLength(2);
-  expect(attemptIds[0]).toMatch(/^[0-9a-f-]{36}$/u);
-  expect(attemptIds[1]).toMatch(/^[0-9a-f-]{36}$/u);
+  expect(attemptIds).toEqual(Array(2).fill(expect.stringMatching(/^[0-9a-f-]{36}$/u)));
   expect(attemptIds[0]).not.toBe(attemptIds[1]);
 });
 
@@ -393,8 +379,6 @@ it
           {
             PATH: bin,
             NODE_OPTIONS: "--no-warnings",
-            HOME: state.home,
-            USERPROFILE: state.home,
             OPENCLAW_WORKSPACE_DIR: state.workspaceDir,
           },
           () =>
@@ -424,17 +408,8 @@ it
                         ...failedUpdate,
                         root: target.root,
                         reason: "injected-doctor-failure",
-                        after: { version: "2026.9.1" },
                         recovery: { serviceRestartSafe: false, reason: "state-migration-started" },
-                        steps: [
-                          {
-                            ...failedUpdate.steps[0]!,
-                            name: "doctor",
-                            command: "openclaw doctor --fix",
-                            cwd: target.root,
-                            stderrTail: "State migration failed",
-                          },
-                        ],
+                        steps: [stepFixture("doctor", { stderrTail: "State migration failed" })],
                       },
                       7,
                       `Doctor failed; Authorization: Bearer ${secret}`,
