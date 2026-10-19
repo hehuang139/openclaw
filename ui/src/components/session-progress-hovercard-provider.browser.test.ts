@@ -24,6 +24,8 @@ function fixture(
       h.trigger.blur();
       h.trigger.focus();
       await drainTurn();
+      await vi.dynamicImportSettled();
+      flush();
     },
   };
 }

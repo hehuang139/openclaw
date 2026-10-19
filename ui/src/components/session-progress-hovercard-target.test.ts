@@ -73,6 +73,20 @@ describe("sessionProgressHoverTargetFromEvent", () => {
 });
 
 describe("session progress hovercard ownership", () => {
+  it("does not revive a removed provider after loading the view", async () => {
+    vi.useFakeTimers();
+    const harness = mountHovercard("global");
+    await harness.focus();
+    vi.advanceTimersByTime(0);
+    const reads = harness.getReads();
+    harness.provider.remove();
+    await vi.dynamicImportSettled();
+    flush();
+    expect(getPortal()).toBeNull();
+    expect(harness.getReads()).toBe(reads);
+    expect(harness.getPullRequestReads()).toBe(0);
+  });
+
   it.each([
     [
       "rate-limited",
@@ -89,6 +103,8 @@ describe("session progress hovercard ownership", () => {
       const harness = mountHovercard("agent:research:main");
       await harness.focus();
       await vi.advanceTimersByTimeAsync(0);
+      await vi.dynamicImportSettled();
+      flush();
       const portal = getPortal();
       expect(portal?.textContent).toContain("research progress");
       harness.emitPullRequestStatus("ready");
@@ -116,6 +132,8 @@ describe("session progress hovercard ownership", () => {
     });
     await harness.focus();
     await vi.advanceTimersByTimeAsync(0);
+    await vi.dynamicImportSettled();
+    flush();
     const portal = getPortal();
     expect(portal?.querySelector(".session-color-dot")?.getAttribute("style")).toContain("blue");
     expect(portal?.textContent).toContain("cloud-a · standard");
