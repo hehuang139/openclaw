@@ -1,4 +1,6 @@
 // Memory Wiki tests cover ingest plugin behavior.
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { KeyedAsyncQueue } from "openclaw/plugin-sdk/keyed-async-queue";
@@ -173,6 +175,85 @@ hello from source
       releaseLock.resolve();
       enqueueSpy.mockRestore();
       await Promise.allSettled([holder, ...(ingest ? [ingest] : [])]);
+    }
+  });
+
+  it("waits for another process's vault mutation before writing and compiling a source", async () => {
+    const rootDir = await createTempDir("memory-wiki-ingest-process-lock-");
+    const inputPath = path.join(rootDir, "meeting-notes.txt");
+    await fs.writeFile(inputPath, "hello from another process\n");
+    const { config } = await createVault({ rootDir: path.join(rootDir, "vault") });
+    const pagePath = path.join(config.vault.path, "sources", "meeting-notes.md");
+    const holder = spawn(
+      process.execPath,
+      [
+        "--import",
+        "./scripts/tsx.mjs",
+        "--input-type=module",
+        "--eval",
+        `
+          import { once } from "node:events";
+          import { withMemoryWikiVaultMutation } from "./extensions/memory-wiki/src/mutation-coordinator.ts";
+          await withMemoryWikiVaultMutation(process.argv[1], async () => {
+            const released = once(process, "message");
+            process.send("held");
+            await released;
+          });
+          process.disconnect();
+        `,
+        config.vault.path,
+      ],
+      { stdio: ["ignore", "ignore", "pipe", "ipc"] },
+    );
+    let stderr = "";
+    holder.stderr?.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    const closed = once(holder, "close");
+    let ingest: ReturnType<typeof ingestMemoryWikiSource> | undefined;
+    try {
+      await Promise.race([
+        once(holder, "message"),
+        closed.then(() => {
+          throw new Error(`Vault mutation holder exited before acquiring the lock: ${stderr}`);
+        }),
+      ]);
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      let settled = false;
+      ingest = ingestMemoryWikiSource({ config, inputPath });
+      void ingest.then(
+        () => {
+          settled = true;
+        },
+        () => {
+          settled = true;
+        },
+      );
+      // Observe an acquisition retry, or completion on the broken implementation,
+      // before checking that a competing process cannot modify the source.
+      await vi.waitFor(() => expect(settled || vi.getTimerCount() > 0).toBe(true));
+      await expect(fs.access(pagePath)).rejects.toThrow();
+      expect(settled).toBe(false);
+
+      holder.send("release");
+      expect(await closed).toEqual([0, null]);
+      await vi.runOnlyPendingTimersAsync();
+      const result = await ingest;
+      expect(result.created).toBe(true);
+      await expect(fs.readFile(pagePath, "utf8")).resolves.toContain("hello from another process");
+      await expect(
+        fs.readFile(path.join(config.vault.path, "index.md"), "utf8"),
+      ).resolves.toContain("[meeting notes](sources/meeting-notes.md)");
+    } finally {
+      if (holder.connected) {
+        holder.send("release");
+      }
+      await closed;
+      if (vi.isFakeTimers()) {
+        await vi.runOnlyPendingTimersAsync();
+        vi.useRealTimers();
+      }
+      await Promise.allSettled(ingest ? [ingest] : []);
     }
   });
 });

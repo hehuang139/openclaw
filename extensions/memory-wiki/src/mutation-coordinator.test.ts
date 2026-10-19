@@ -10,14 +10,15 @@ const { createTempDir } = createMemoryWikiTestHarness();
 
 describe("withMemoryWikiVaultMutation", () => {
   it("serializes mutations for one vault and permits nested work", async () => {
+    const vaultPath = await createTempDir("memory-wiki-mutation-");
     const firstEntered = deferred();
     const releaseFirst = deferred();
     const order: string[] = [];
 
-    const first = withMemoryWikiVaultMutation("/tmp/wiki-a", async () => {
+    const first = withMemoryWikiVaultMutation(vaultPath, async () => {
       order.push("first:start");
       firstEntered.resolve();
-      await withMemoryWikiVaultMutation("/tmp/wiki-a", async () => {
+      await withMemoryWikiVaultMutation(vaultPath, async () => {
         order.push("first:nested");
       });
       await releaseFirst.promise;
@@ -25,7 +26,7 @@ describe("withMemoryWikiVaultMutation", () => {
     });
     await firstEntered.promise;
 
-    const second = withMemoryWikiVaultMutation("/tmp/wiki-a", async () => {
+    const second = withMemoryWikiVaultMutation(vaultPath, async () => {
       order.push("second");
     });
     await Promise.resolve();
@@ -38,16 +39,17 @@ describe("withMemoryWikiVaultMutation", () => {
   });
 
   it("allows distinct agent vaults to mutate in parallel", async () => {
+    const root = await createTempDir("memory-wiki-mutation-agents-");
     const firstEntered = deferred();
     const secondEntered = deferred();
     const releaseFirst = deferred();
 
-    const first = withMemoryWikiVaultMutation("/tmp/wiki/support", async () => {
+    const first = withMemoryWikiVaultMutation(path.join(root, "support"), async () => {
       firstEntered.resolve();
       await releaseFirst.promise;
     });
     await firstEntered.promise;
-    const second = withMemoryWikiVaultMutation("/tmp/wiki/marketing", async () => {
+    const second = withMemoryWikiVaultMutation(path.join(root, "marketing"), async () => {
       secondEntered.resolve();
     });
 
@@ -90,22 +92,23 @@ describe("withMemoryWikiVaultMutation", () => {
     }
   });
   it("queues detached work after its inherited transaction has ended", async () => {
+    const vaultPath = await createTempDir("memory-wiki-mutation-detached-");
     const releaseDetached = deferred();
     const holderEntered = deferred();
     const releaseHolder = deferred();
     let detachedEntered = false;
     let detached!: Promise<void>;
 
-    await withMemoryWikiVaultMutation("/tmp/wiki-detached", async () => {
+    await withMemoryWikiVaultMutation(vaultPath, async () => {
       detached = (async () => {
         await releaseDetached.promise;
-        await withMemoryWikiVaultMutation("/tmp/wiki-detached", async () => {
+        await withMemoryWikiVaultMutation(vaultPath, async () => {
           detachedEntered = true;
         });
       })();
     });
 
-    const holder = withMemoryWikiVaultMutation("/tmp/wiki-detached", async () => {
+    const holder = withMemoryWikiVaultMutation(vaultPath, async () => {
       holderEntered.resolve();
       await releaseHolder.promise;
     });
