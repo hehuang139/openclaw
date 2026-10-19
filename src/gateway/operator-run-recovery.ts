@@ -334,7 +334,6 @@ export async function restoreGatewayOperatorSource(params: {
       ) {
         revoke();
       }
-      assertRecoveryCurrent();
     }
     assertRecoveryCurrent();
     await params.prepareCurrent?.();
