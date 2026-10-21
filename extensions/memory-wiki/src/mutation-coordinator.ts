@@ -73,7 +73,7 @@ export async function withMemoryWikiVaultMutation<T>(
   nextActive.set(key, lease);
   return await vaultMutationQueue.enqueue(key, () =>
     withFileLock(
-      path.join(key, ".openclaw-wiki", "log.jsonl"),
+      path.join(key, ".openclaw-wiki", "mutation"),
       {
         retries: { retries: 600, factor: 1, minTimeout: 500, maxTimeout: 500 },
         stale: 60_000,

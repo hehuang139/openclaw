@@ -252,7 +252,7 @@ describe("ChatGPT import rollback recovery", () => {
     [rootControl.moves, ...fileSpies].forEach((spy) => expect(spy).not.toHaveBeenCalled());
     // Releasing coordination may remove its sidecar, but never rollback data.
     for (const [target] of remove.mock.calls) {
-      expect(target).toBe(path.join(run.rootDir, ".openclaw-wiki", "log.jsonl.lock"));
+      expect(target).toBe(path.join(run.rootDir, ".openclaw-wiki", "mutation.lock"));
     }
     expect(compileControl.calls).toBe(compileCalls);
     await expectText(path.join(run.rootDir, preserved?.recoveryPath ?? ""), imported);
