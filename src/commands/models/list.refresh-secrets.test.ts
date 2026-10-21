@@ -118,13 +118,12 @@ it.each(["provider", "profile"] as const)(
         providers: { catalog: { source: "file", path: secretPath, mode: "singleValue" } },
       },
     });
-    await state.writeAuthProfiles({
-      version: 1,
-      profiles:
-        owner === "profile"
-          ? { [`${provider}:default`]: { type: "api_key", provider, keyRef: ref } }
-          : {},
-    });
+    if (owner === "profile") {
+      await state.writeAuthProfiles({
+        version: 1,
+        profiles: { [`${provider}:default`]: { type: "api_key", provider, keyRef: ref } },
+      });
+    }
     // Only the absent Gateway transport is replaced; config, SecretRefs, and discovery stay real.
     vi.spyOn(gateway, "callGateway").mockRejectedValue(new Error("Gateway is not running"));
     const runtime = createNonExitingRuntimeEnv();
