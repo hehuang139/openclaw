@@ -82,6 +82,11 @@ export async function modelsListCommand(
       const { agentId, agentDir } = resolveModelsTargetAgent(localConfig, opts.agent, {
         kind: "read",
       });
+      if (opts.refresh) {
+        const { prepareLocalCapabilityAccountSecrets } =
+          await import("../../cli/capability-cli/local-account-secrets.js");
+        await prepareLocalCapabilityAccountSecrets({ cfg: localConfig, agentId });
+      }
       const proxy = opts.refresh ? await startProxy(localConfig.proxy) : null;
       try {
         return await withPreparedModelCatalogOwner(
