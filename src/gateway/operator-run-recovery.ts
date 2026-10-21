@@ -22,7 +22,8 @@ import {
   projectUserProfileDisplay,
   readResidentUserProfileRevision,
 } from "../state/user-profile-list.js";
-import { isGatewayAuthGrantCurrent } from "./auth-policy.js";
+import { captureGatewayAuthPolicy, isGatewayAuthGrantCurrent } from "./auth-policy.js";
+import type { GatewayAuthPolicy } from "./auth-policy.types.js";
 import {
   captureGatewayDeviceRevocation,
   onGatewayDeviceSourceRevoked,
@@ -89,6 +90,8 @@ export function readGatewayOperatorRecoverySource(
 
 export type RestoredGatewayOperatorAuthority = {
   authority: AdmittedRunOperatorAuthority;
+  /** Original caller policy remains authoritative when its recovered execution is canceled. */
+  assertPolicyCurrent: () => void;
   authenticatedUserProfile: GatewayAuthenticatedUserProfile;
   controlUiAdmin: boolean;
   release: () => void;
@@ -169,6 +172,7 @@ async function restoreGatewayOperatorSnapshot(params: {
     if (releaseDeviceNotification) {
       subscriptions.push(releaseDeviceNotification);
     }
+    let authPolicy: GatewayAuthPolicy = snapshot.authPolicy;
     const assertSourcePolicy = () => {
       assertLifetime();
       const cfg = getConfig();
@@ -185,12 +189,14 @@ async function restoreGatewayOperatorSnapshot(params: {
           sourceRolePolicy(role),
           snapshot.scopes,
         ) ||
-        !isGatewayAuthGrantCurrent(snapshot.authPolicy, cfg) ||
+        !isGatewayAuthGrantCurrent(authPolicy, cfg) ||
         (snapshot.sharedGeneration !== undefined &&
           context.sharedGatewaySessionGenerationState !== generationOwner)
       ) {
         throw new Error("Restart recovery operator source policy changed.");
       }
+      // Retain this config's issued policy only after validating the original grant.
+      authPolicy = captureGatewayAuthPolicy(cfg, authPolicy);
       return cfg;
     };
     let assertPolicy = assertSourcePolicy;
@@ -340,6 +346,9 @@ async function restoreGatewayOperatorSnapshot(params: {
     const { id, ...display } = projectUserProfileDisplay(profile);
     return {
       authority,
+      assertPolicyCurrent: () => {
+        assertPolicy();
+      },
       authenticatedUserProfile: { profileId: id, ...display, updatedAt: profile.updated_at },
       controlUiAdmin: snapshot.controlUiAdmin,
       release,

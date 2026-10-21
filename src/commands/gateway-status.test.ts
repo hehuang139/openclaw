@@ -235,6 +235,15 @@ const localGatewayConfig = (token = "ltok", tls = false): OpenClawConfig => ({
   },
 });
 
+const gatewaySelf = {
+  text: "Gateway fixture",
+  host: "gateway-host",
+  ip: "192.0.2.10",
+  version: "2026.5.22",
+  platform: "linux",
+};
+const gatewayProcessSelf = { ...gatewaySelf, instanceId: "gateway-instance-1" };
+
 describe("gateway-status command", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -251,6 +260,112 @@ describe("gateway-status command", () => {
     expect(runtimeLogs.join("\n")).toContain("Gateway Status");
     expect(runtimeLogs.join("\n")).toContain("Discovery (this machine)");
     expect(runtimeLogs.join("\n")).toContain("Targets");
+  });
+
+  it("warns with diagnostic next steps when no probes or Bonjour discovery find a gateway", async () => {
+    const { runtime, runtimeLogs } = createRuntimeCapture();
+    readBestEffortConfig.mockResolvedValueOnce(localGatewayConfig());
+    probeGateway.mockImplementation(async ({ url }) =>
+      createUnreachableGatewayProbe(url, "connection refused"),
+    );
+
+    await expect(runGatewayStatus(runtime, { timeout: "1000", json: true })).rejects.toThrow(
+      "__exit__:1",
+    );
+
+    expect(JSON.parse(runtimeLogs.join("\n"))).toMatchObject({
+      ok: false,
+      primaryTargetId: null,
+      warnings: [
+        {
+          code: "no_gateway_reachable",
+          message:
+            "No gateway answered any check and Bonjour discovery returned no local gateways. Run `openclaw gateway status --deep --require-rpc` to inspect service state, config paths, listener owners, and logs; include `ss -ltnp` or `lsof -nP -iTCP:<port> -sTCP:LISTEN` for the configured port when filing a report.",
+          targetIds: ["localLoopback"],
+        },
+      ],
+    });
+  });
+
+  it.each([
+    {
+      name: "suppresses warning for SSH tunnel and configured remote with the same self identity",
+      ssh: "user@gateway-host",
+      localSelf: gatewayProcessSelf,
+      remoteSelf: { ...gatewayProcessSelf, host: "GATEWAY-HOST" },
+      expectedTargetIds: null,
+      primaryTargetId: "sshTunnel",
+    },
+    {
+      name: "suppresses warning for the same self identity on different transport ports",
+      ssh: null,
+      localSelf: gatewayProcessSelf,
+      remoteSelf: gatewayProcessSelf,
+      expectedTargetIds: null,
+      primaryTargetId: "explicit",
+    },
+    {
+      name: "warns when same-host probes do not report process identity",
+      ssh: null,
+      localSelf: gatewaySelf,
+      remoteSelf: gatewaySelf,
+      expectedTargetIds: ["explicit", "localLoopback"],
+      primaryTargetId: "explicit",
+    },
+    {
+      name: "warns when probes report distinct identities",
+      ssh: "user@gateway-a",
+      localSelf: { ...gatewayProcessSelf, host: "gateway-a", instanceId: "gateway-instance-a" },
+      remoteSelf: {
+        ...gatewayProcessSelf,
+        host: "gateway-b",
+        ip: "192.0.2.11",
+        instanceId: "gateway-instance-b",
+      },
+      expectedTargetIds: ["sshTunnel", "configRemote"],
+      primaryTargetId: "sshTunnel",
+    },
+    {
+      name: "warns when probe identity is unknown",
+      ssh: "user@gateway-host",
+      localSelf: null,
+      remoteSelf: null,
+      expectedTargetIds: ["sshTunnel", "configRemote"],
+      primaryTargetId: "sshTunnel",
+    },
+  ])("$name", async ({ ssh, localSelf, remoteSelf, expectedTargetIds, primaryTargetId }) => {
+    const { runtime, runtimeLogs } = createRuntimeCapture();
+    readBestEffortConfig.mockResolvedValueOnce(
+      ssh ? makeRemoteGatewayConfig("ws://gateway-host:18789") : localGatewayConfig(),
+    );
+    probeGateway.mockImplementation(async ({ url }) => {
+      const self = url.includes("127.0.0.1") ? localSelf : remoteSelf;
+      return {
+        ...mocks.successfulProbe(url),
+        presence: self ? [{ ...self, ts: 0, mode: "gateway", reason: "self" }] : null,
+      };
+    });
+
+    await runGatewayStatus(runtime, {
+      timeout: "1000",
+      json: true,
+      ...(ssh ? { ssh } : { url: "ws://gateway-host:28789", token: "explicit-token" }),
+    });
+
+    expect(JSON.parse(runtimeLogs.join("\n"))).toMatchObject({
+      ok: true,
+      primaryTargetId,
+      warnings: expectedTargetIds
+        ? [
+            {
+              code: "multiple_gateways",
+              message:
+                "Unconventional setup: multiple reachable gateway identities detected. Usually one gateway per network is recommended unless you intentionally run isolated profiles, like a rescue bot (see docs: /gateway#multiple-gateways-same-host).",
+              targetIds: expectedTargetIds,
+            },
+          ]
+        : [],
+    });
   });
 
   it("rejects configured and ambient credentials before probing an explicit URL", async () => {
@@ -618,7 +733,10 @@ describe("gateway-status command", () => {
     },
   );
 
-  it("infers SSH target from gateway.remote.url and ssh config", async () => {
+  it.each([
+    { ssh: undefined, port: 2222, explicitPort: false },
+    { ssh: "alias:22", port: 22, explicitPort: true },
+  ])("resolves SSH port $port with explicit=$explicitPort", async ({ ssh, port, explicitPort }) => {
     const { runtime } = createRuntimeCapture();
     await withEnvAsync({ USER: "steipete" }, async () => {
       readBestEffortConfig.mockResolvedValueOnce(
@@ -627,15 +745,20 @@ describe("gateway-status command", () => {
       resolveSshConfig.mockResolvedValueOnce({
         user: "steipete",
         host: "peters-mac-studio-1.sheep-coho.ts.net",
-        port: 2222,
+        port,
         identityFiles: ["/tmp/id_ed25519"],
       });
 
-      await runGatewayStatus(runtime, { timeout: "1000", json: true });
+      await runGatewayStatus(runtime, { timeout: "1000", json: true, ssh });
 
       expect(startSshPortForward).toHaveBeenCalledTimes(1);
+      expect(resolveSshConfig).toHaveBeenCalledWith(expect.anything(), {
+        explicitPort,
+        identity: undefined,
+        timeoutMs: 800,
+      });
       const call = requireSshForwardCall();
-      expect(call.target).toBe("steipete@peters-mac-studio-1.sheep-coho.ts.net:2222");
+      expect(call.target).toBe(`steipete@peters-mac-studio-1.sheep-coho.ts.net:${port}`);
       expect(call.identity).toBe("/tmp/id_ed25519");
     });
   });
