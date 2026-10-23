@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
+import { PlatformMessageNotDispatchedError } from "openclaw/plugin-sdk/error-runtime";
 import { readProviderJsonResponse } from "openclaw/plugin-sdk/provider-http";
 import {
   fetchWithSsrFGuard,
@@ -46,7 +47,10 @@ export async function sendA2aChannelText(
   const peerName = params.to.replace(/^a2a:/i, "").trim();
   const peer = account.config.peers?.[peerName];
   if (!peer?.url) {
-    throw new Error(`peer ${peerName} has no url configured for outbound A2A`);
+    throw new PlatformMessageNotDispatchedError(
+      `peer ${peerName} has no url configured for outbound A2A`,
+      { cause: undefined, retryable: false },
+    );
   }
   if (account.unresolvedOutboundPeers.includes(peerName)) {
     // Fail before any I/O: sending without the authored credential would deliver the

@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { PlatformMessageNotDispatchedError } from "openclaw/plugin-sdk/error-runtime";
 import { getRuntimeConfig } from "openclaw/plugin-sdk/runtime-config-snapshot";
 import * as ssrfRuntime from "openclaw/plugin-sdk/ssrf-runtime";
 import { withEnv, withStateDirEnv } from "openclaw/plugin-sdk/test-env";
@@ -142,11 +143,16 @@ describe("A2A outbound channel delivery", () => {
     expect(result.messageId).toBe(request.params.message.messageId);
   });
 
-  it("rejects missing outbound peer URLs before making an HTTP request", async () => {
+  it("permanently rejects missing outbound peer URLs before making an HTTP request", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch");
     const cfg = createA2aOutboundConfig({ token: "inbound-token" });
 
-    await expect(send(cfg)).rejects.toThrow("peer hermes has no url configured for outbound A2A");
+    const failure = await send(cfg).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(PlatformMessageNotDispatchedError);
+    expect(failure).toMatchObject({
+      message: "peer hermes has no url configured for outbound A2A",
+      retryable: false,
+    });
     expect(fetchMock).not.toHaveBeenCalled();
   });
 

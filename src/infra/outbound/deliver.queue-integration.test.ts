@@ -4,10 +4,13 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import { createDeferred } from "../../../test/helpers/promise.js";
 import type { TrustedMessageAuditEvent } from "../../audit/message-audit-events.js";
 import { onTrustedMessageAuditEventForTest as onTrustedMessageAuditEvent } from "../../audit/message-audit-events.test-support.js";
+import type { ChannelPlugin } from "../../channels/plugins/types.public.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import { createEmptyPluginRegistry } from "../../plugins/registry.js";
 import { resetPluginRuntimeStateForTest, setActivePluginRegistry } from "../../plugins/runtime.js";
+import { loadBundledPluginFacade } from "../../test-utils/bundled-plugin-public-surface.js";
 import { createOutboundTestPlugin, createTestRegistry } from "../../test-utils/channel-plugins.js";
+import { closeStateDatabaseForTest } from "../../test-utils/database-cleanup.js";
 import { getDeliveryQueueEntryStatus } from "../delivery-queue-sqlite.test-support.js";
 import { isOutboundDeliveryError, PlatformMessageNotDispatchedError } from "./deliver-types.js";
 import {
@@ -63,8 +66,46 @@ describe("durable outbound queue delivery", () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     resetPluginRuntimeStateForTest();
     setActivePluginRegistry(createEmptyPluginRegistry());
+  });
+
+  it("settles an inbound-only A2A peer rejection without replay after reopening state", async () => {
+    const { a2aChannelPlugin } = await loadBundledPluginFacade<{
+      a2aChannelPlugin: ChannelPlugin;
+    }>({ pluginId: "a2a", artifactBasename: "channel-plugin-api.js" });
+    setActivePluginRegistry(
+      createTestRegistry([{ pluginId: "a2a", plugin: a2aChannelPlugin, source: "test" }]),
+    );
+    const cfg: OpenClawConfig = {
+      channels: { a2a: { enabled: true, peers: { hermes: { token: "inbound-token" } } } },
+    };
+    const deliveryIntentId = "a2a-inbound-only-peer";
+    const fetch = vi.spyOn(globalThis, "fetch");
+
+    await expect(
+      deliverOutboundPayloads({
+        cfg,
+        channel: "a2a",
+        to: "hermes",
+        payloads: [{ text: "completed child result" }],
+        queuePolicy: "required",
+        deliveryIntentId,
+        completionRetention: "permanent",
+      }),
+    ).rejects.toThrow("peer hermes has no url configured for outbound A2A");
+
+    expect(
+      getDeliveryQueueEntryStatus(OUTBOUND_DELIVERY_QUEUE_NAME, deliveryIntentId, tmpDir),
+    ).toBe("failed");
+    await closeStateDatabaseForTest();
+    const deliver = vi.fn<DeliverFn>(deliverOutboundPayloads);
+    await recoverPendingDeliveries({ cfg, deliver, log: createRecoveryLog(), stateDir: tmpDir });
+
+    expect(deliver).not.toHaveBeenCalled();
+    expect(await loadPendingDeliveries(tmpDir)).toEqual([]);
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   it("never lets startup or reconnect impersonate a permanent live producer", async () => {
